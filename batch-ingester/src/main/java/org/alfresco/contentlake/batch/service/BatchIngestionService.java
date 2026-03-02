@@ -140,7 +140,9 @@ public class BatchIngestionService {
         try {
             TransformationTask task = metadataIngester.ingestMetadata(node);
             job.incrementMetadataIngested();
-            transformationQueue.enqueue(task);
+            if (task != null) {
+                transformationQueue.enqueue(task);
+            }
         } catch (Exception e) {
             job.incrementFailed();
             log.error("Failed to ingest metadata for node: {}", node.getId(), e);

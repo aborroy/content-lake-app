@@ -12,6 +12,7 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -105,6 +106,27 @@ public class AlfrescoClient {
         }
 
         return allNodes;
+    }
+
+    /**
+     * Retrieves a single node with properties, path, and permissions.
+     *
+     * @param nodeId node identifier
+     * @return the node, or {@code null} when it cannot be fetched
+     */
+    public @Nullable Node getNode(String nodeId) {
+        try {
+            var response = nodesApi.getNode(nodeId, INCLUDE, null, null);
+            return response != null && response.getBody() != null
+                    ? response.getBody().getEntry()
+                    : null;
+        } catch (RestClientResponseException e) {
+            log.debug("Could not fetch node {}: status={} body={}", nodeId, e.getStatusCode(), e.getResponseBodyAsString());
+            return null;
+        } catch (Exception e) {
+            log.debug("Could not fetch node {}: {}", nodeId, e.getMessage());
+            return null;
+        }
     }
 
     /**

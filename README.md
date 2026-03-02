@@ -25,40 +25,56 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 ## Features
 
 - Two-Phase Sync Pipeline: Fast metadata ingestion + async content processing
+- Near Real-Time Sync: Alfresco Event2 listener over ActiveMQ using the Alfresco Java SDK
 - Semantic Search: Vector embeddings with permission-aware kNN search
 - RAG: LLM-powered question answering grounded in Alfresco document content
 - Permission-Aware: Server-side ACL enforcement via hxpr
 - Local AI: On-premises LLM and embedding models using Spring AI
 - REST API: Generic connector using Alfresco REST APIs
 - Secured Endpoints: Alfresco authentication (username/password or tickets)
+- Shared Ingestion Core: Common metadata, transform, chunking, embedding, ACL, and delete/update logic in `content-lake-common`
+- Idempotent Coexistence: `alfresco_modifiedAt` guard prevents stale batch/live writes from overwriting newer content
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  Phase 1: Fast Metadata Ingestion                        │
-│  Alfresco → Discovery → Metadata → hxpr (PENDING)        │
-└──────────────────────────────────────────────────────────┘
-                         ↓
-              Transformation Queue
-                         ↓
-┌──────────────────────────────────────────────────────────┐
-│  Phase 2: Async Content Processing                       │
-│  Transform → Chunk → Embed → Update (INDEXED)            │
-└──────────────────────────────────────────────────────────┘
-                         ↓
-┌──────────────────────────────────────────────────────────┐
-│  Phase 3: RAG (Retrieval-Augmented Generation)           │
-│  Query → Embed → Search → Augment → LLM → Answer         │
-└──────────────────────────────────────────────────────────┘
+```text
+                 ┌──────────────────────────────────────┐
+                 │ Alfresco Repository + Event2         │
+                 │ REST API + ActiveMQ topic            │
+                 └──────────────────────────────────────┘
+                          │                     │
+                          │                     │
+                          ▼                     ▼
+┌──────────────────────────────────────┐   ┌──────────────────────────────────────┐
+│ batch-ingester                       │   │ live-ingester                        │
+│ Discovery → Metadata → Queue         │   │ SDK Handlers → Filter → Sync        │
+└──────────────────────────────────────┘   └──────────────────────────────────────┘
+                          │                     │
+                          └──────────┬──────────┘
+                                     ▼
+               ┌──────────────────────────────────────────┐
+               │ content-lake-common                      │
+               │ Node sync, Transform, Chunk, Embed, ACL │
+               │ `alfresco_modifiedAt` idempotency guard  │
+               └──────────────────────────────────────────┘
+                                     ▼
+               ┌──────────────────────────────────────────┐
+               │ hxpr Content Lake                         │
+               └──────────────────────────────────────────┘
+                                     ▼
+               ┌──────────────────────────────────────────┐
+               │ rag-service                               │
+               │ Query → Embed → Search → Augment → LLM   │
+               └──────────────────────────────────────────┘
 ```
 
 ### Modules
 
 | Module | Port | Description |
 |--------|------|-------------|
-| `content-lake-common` | — | Shared clients (hxpr, Alfresco), embedding service, chunking |
-| `batch-ingester` | 9090 | Document discovery, sync, transformation, and embedding ingestion |
+| `content-lake-common` | — | Shared clients and ingestion pipeline: metadata sync, transform, chunking, embedding, ACL updates, idempotency |
+| `batch-ingester` | 9090 | Folder discovery, batch scheduling, metadata enqueueing, and `/api/sync/*` controllers |
+| `live-ingester` | 9092 | Alfresco Event2 listener over ActiveMQ using Alfresco Java SDK handlers and filters |
 | `rag-service` | 9091 | Semantic search and RAG question answering |
 
 ## Quick Start
@@ -88,8 +104,11 @@ export ALFRESCO_INTERNAL_USERNAME=admin
 export ALFRESCO_INTERNAL_PASSWORD=admin
 # ... (see full configuration below)
 
-# Run ingestion
+# Run batch ingestion
 java -jar batch-ingester/target/batch-ingester-1.0.0-SNAPSHOT.jar
+
+# Run live ingestion
+java -jar live-ingester/target/live-ingester-1.0.0-SNAPSHOT.jar
 
 # Run RAG service
 java -jar rag-service/target/rag-service-1.0.0-SNAPSHOT.jar
@@ -118,6 +137,12 @@ export HXPR_IDP_PASSWORD=password
 # Transform Service (batch-ingester only)
 export TRANSFORM_URL=http://localhost:10090
 export TRANSFORM_ENABLED=true
+
+# ActiveMQ / Event2 (live-ingester only)
+export ACTIVEMQ_URL=tcp://localhost:61616
+export ACTIVEMQ_USER=admin
+export ACTIVEMQ_PASSWORD=admin
+export ALFRESCO_EVENT_TOPIC=alfresco.repo.event2
 
 # AI/Embeddings (both services)
 export MODEL_RUNNER_URL=http://localhost:12434/engines/llama.cpp/v1
@@ -275,11 +300,35 @@ Semantic search applies a minimum similarity score to suppress low-quality vecto
 # Batch ingester (no auth required)
 curl http://localhost:9090/actuator/health
 
+# Live ingester (no auth required)
+curl http://localhost:9092/actuator/health
+
 # RAG service (no auth required)
 curl http://localhost:9091/actuator/health
 
 # RAG service detailed health (auth required)
 curl http://localhost:9091/api/rag/health -u admin:admin
+```
+
+### Live Ingester (port 9092)
+
+The live ingester consumes Alfresco Event2 messages from ActiveMQ using Alfresco Java SDK handler interfaces such as `OnNodeUpdatedEventHandler` and `OnPermissionUpdatedEventHandler`.
+
+It reuses the same shared ingestion pipeline as the batch ingester:
+
+- Fetch the current node snapshot from Alfresco REST API
+- Apply scope and exclusion rules
+- Sync metadata to hxpr
+- Extract text with Transform Service
+- Chunk and embed with Spring AI
+- Update permissions or delete when nodes move out of scope
+
+The live path is guarded by the same `alfresco_modifiedAt` staleness check used by batch ingestion, so batch and live runs can coexist safely.
+
+Status endpoint:
+
+```bash
+curl http://localhost:9092/api/live/status
 ```
 
 ## Configuration
@@ -299,6 +348,44 @@ ingestion:
     paths: ["*/surf-config/*", "*/thumbnails/*"]
     aspects: [cm:workingcopy]
 ```
+
+### Live Ingestion
+
+Edit `live-ingester/src/main/resources/application.yml`:
+
+```yaml
+spring:
+  activemq:
+    broker-url: ${ACTIVEMQ_URL:tcp://localhost:61616}
+    user: ${ACTIVEMQ_USER:admin}
+    password: ${ACTIVEMQ_PASSWORD:admin}
+  jms:
+    cache:
+      enabled: false
+
+alfresco:
+  events:
+    topic-name: ${ALFRESCO_EVENT_TOPIC:alfresco.repo.event2}
+    enable-handlers: true
+    enable-spring-integration: false
+
+live-ingester:
+  filter:
+    exclude-paths: ["*/surf-config/*", "*/thumbnails/*"]
+    exclude-aspects: [cm:workingcopy]
+  scope:
+    include-paths: []
+    required-aspects: []
+  dedup:
+    window: ${LIVE_INGESTER_DEDUP_WINDOW:PT2M}
+    max-entries: ${LIVE_INGESTER_DEDUP_MAX_ENTRIES:10000}
+```
+
+Notes:
+
+- `spring.jms.cache.enabled=false` is required so the Alfresco Java SDK can use the native ActiveMQ connection factory.
+- By default, the live ingester behaves as an exclude-only listener. Set `include-paths` or `required-aspects` to narrow the scope.
+- Transform Service receives the original Alfresco filename when available, improving binary format detection during text extraction.
 
 ### RAG
 
@@ -338,7 +425,7 @@ semantic-search:
 
 ### Next (Q2 2026 - Open Source Release)
 
-- [ ] Event-driven sync (near real-time)
+- [ ] Harden live-ingester with end-to-end Event2 coverage and operational guidance
 - [ ] OAuth2/Keycloak integration
 - [ ] Comprehensive testing suite
 - [ ] Production deployment guide
@@ -375,6 +462,11 @@ mvn test
 mvn spring-boot:run -pl batch-ingester
 # or
 java -jar batch-ingester/target/batch-ingester-1.0.0-SNAPSHOT.jar
+
+# Live Ingester
+mvn spring-boot:run -pl live-ingester
+# or
+java -jar live-ingester/target/live-ingester-1.0.0-SNAPSHOT.jar
 
 # RAG Service
 mvn spring-boot:run -pl rag-service

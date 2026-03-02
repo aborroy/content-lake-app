@@ -8,6 +8,7 @@ import org.alfresco.contentlake.client.HxprTokenProvider;
 import org.alfresco.contentlake.client.TransformClient;
 import org.alfresco.contentlake.service.Chunker;
 import org.alfresco.contentlake.service.EmbeddingService;
+import org.alfresco.contentlake.service.NodeSyncService;
 import org.alfresco.contentlake.service.chunking.*;
 import org.alfresco.contentlake.service.chunking.strategy.ChunkingStrategy.ChunkingConfig;
 import org.springframework.ai.embedding.EmbeddingModel;
@@ -154,6 +155,28 @@ public class AppConfig {
             NoiseReductionService noiseReduction,
             ChunkingConfig config) {
         return new SimpleChunkingService(noiseReduction, config);
+    }
+
+    @Bean
+    public NodeSyncService nodeSyncService(
+            org.alfresco.contentlake.client.AlfrescoClient alfrescoClient,
+            HxprDocumentApi documentApi,
+            HxprService hxprService,
+            TransformClient transformClient,
+            EmbeddingService embeddingService,
+            SimpleChunkingService chunkingService,
+            HxprProperties props
+    ) {
+        return new NodeSyncService(
+                alfrescoClient,
+                documentApi,
+                hxprService,
+                transformClient,
+                embeddingService,
+                chunkingService,
+                props.getTargetPath(),
+                props.getPathRepositoryId()
+        );
     }
 
     // ----------------------------------------------------------------------

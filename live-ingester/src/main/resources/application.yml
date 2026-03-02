@@ -1,0 +1,82 @@
+server:
+  port: 9092
+
+spring:
+  application:
+    name: live-ingester
+
+  activemq:
+    broker-url: ${ACTIVEMQ_URL:tcp://localhost:61616}
+    user: ${ACTIVEMQ_USER:admin}
+    password: ${ACTIVEMQ_PASSWORD:admin}
+  jms:
+    cache:
+      enabled: false
+
+  ai:
+    openai:
+      base-url: ${MODEL_RUNNER_URL:http://localhost:12434}
+      api-key: ${MODEL_RUNNER_API_KEY:not-needed}
+      embedding:
+        options:
+          model: ${EMBEDDING_MODEL:ai/mxbai-embed-large}
+
+# Alfresco SDK configuration (service account for node fetching)
+content:
+  service:
+    url: ${ALFRESCO_URL:http://localhost:80}
+    security:
+      basicAuth:
+        username: ${ALFRESCO_INTERNAL_USERNAME:admin}
+        password: ${ALFRESCO_INTERNAL_PASSWORD:admin}
+
+alfresco:
+  events:
+    topic-name: ${ALFRESCO_EVENT_TOPIC:alfresco.repo.event2}
+    enable-handlers: true
+    enable-spring-integration: false
+
+hxpr:
+  url: ${HXPR_URL:http://localhost:8080}
+  repository-id: ${HXPR_REPOSITORY_ID:default}
+  target-path: ${HXPR_TARGET_PATH:/alfresco-sync}
+  path-repository-id: ${HXPR_PATH_REPOSITORY_ID:}
+  idp:
+    token-url: ${HXPR_IDP_TOKEN_URL:http://localhost:5002/idp/connect/token}
+    client-id: ${HXPR_IDP_CLIENT_ID:nuxeo-client}
+    client-secret: ${HXPR_IDP_CLIENT_SECRET:secret}
+    username: ${HXPR_IDP_USERNAME:testuser}
+    password: ${HXPR_IDP_PASSWORD:password}
+
+transform:
+  url: ${TRANSFORM_URL:http://localhost:10090}
+  timeout-ms: ${TRANSFORM_TIMEOUT_MS:300000}
+  enabled: ${TRANSFORM_ENABLED:true}
+
+embedding:
+  model-name: ${EMBEDDING_MODEL:ai/mxbai-embed-large}
+
+live-ingester:
+  filter:
+    exclude-paths:
+      - "*/surf-config/*"
+      - "*/thumbnails/*"
+    exclude-aspects:
+      - cm:workingcopy
+  scope:
+    include-paths: []
+    required-aspects: []
+  dedup:
+    window: ${LIVE_INGESTER_DEDUP_WINDOW:PT2M}
+    max-entries: ${LIVE_INGESTER_DEDUP_MAX_ENTRIES:10000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    org.alfresco.contentlake: ${LOG_LEVEL:INFO}
+    org.springframework.integration: ${INTEGRATION_LOG_LEVEL:INFO}

@@ -34,6 +34,46 @@ services:
       EMBEDDING_CHUNK_SIZE: 1000
       EMBEDDING_CHUNK_OVERLAP: 200
 
+  live-ingester:
+    build:
+      context: ./live-ingester
+      dockerfile: Dockerfile
+    ports:
+      - "9092:9092"
+    environment:
+      # ActiveMQ — connect to the broker managed by the Alfresco deployment
+      ACTIVEMQ_URL: ${ACTIVEMQ_URL:tcp://localhost:61616}
+      ACTIVEMQ_USER: ${ACTIVEMQ_USER:admin}
+      ACTIVEMQ_PASSWORD: ${ACTIVEMQ_PASSWORD:admin}
+      ALFRESCO_EVENT_TOPIC: alfresco.repo.event2
+
+      # Alfresco SDK configuration
+      ALFRESCO_URL: http://localhost:8080
+      ALFRESCO_INTERNAL_USERNAME: admin
+      ALFRESCO_INTERNAL_PASSWORD: admin
+
+      # hxpr
+      HXPR_URL: http://localhost:8080
+      HXPR_REPOSITORY_ID: default
+      HXPR_TARGET_PATH: /alfresco-sync
+      HXPR_PATH_REPOSITORY_ID:
+      HXPR_IDP_TOKEN_URL: http://localhost:5002/idp/connect/token
+      HXPR_IDP_CLIENT_ID: nuxeo-client
+      HXPR_IDP_CLIENT_SECRET: secret
+      HXPR_IDP_USERNAME: testuser
+      HXPR_IDP_PASSWORD: password
+
+      # Docker Model Runner
+      MODEL_RUNNER_URL: http://model-runner.docker.internal/engines/llama.cpp/v1
+      EMBEDDING_MODEL: ai/mxbai-embed-large
+
+      # Transform Service
+      TRANSFORM_URL: http://localhost:10090
+      TRANSFORM_TIMEOUT_MS: 300000
+
+      # Concurrency
+      LIVE_INGESTER_CONCURRENCY: 1-4
+
   rag-service:
     build:
       context: ./rag-service
@@ -68,3 +108,4 @@ services:
       RAG_DEFAULT_TOP_K: 5
       RAG_DEFAULT_MIN_SCORE: 0.5
       RAG_MAX_CONTEXT_LENGTH: 12000
+
