@@ -14,18 +14,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Embedding service with intelligent fallback handling for oversized inputs.
+ * Embedding service with token-aware truncation for oversized inputs.
  *
  * <p>IMPORTANT: This service expects properly chunked input from the chunking layer.
- * If chunks are still too large for the embedding model, it will:
- * <ol>
- *   <li>Split the text at semantic boundaries</li>
- *   <li>Embed each half separately</li>
- *   <li>Average the vectors to create a single embedding</li>
- * </ol>
- *
- * <p>To avoid this fallback entirely, ensure your chunking strategy uses
- * appropriate maxChunkSize values (typically 800-1200 chars for most models).
+ * If chunks are still too large for the embedding model's token limit, the error
+ * message reports the actual token count, which is used to compute the precise
+ * truncation point — keeping as much text as possible while fitting the model's
+ * context window. The stored chunk text is never modified; only the text sent
+ * to the embedding model is truncated.</p>
  *
  * <h3>Asymmetric embedding (instruction prefix)</h3>
  * <p>Models like {@code mxbai-embed-large} are trained with an instruction-aware
@@ -46,6 +42,10 @@ public class EmbeddingService {
     // Safety cap for pathological inputs (e.g., malformed text, binary garbage)
     // This should rarely trigger if chunking is working correctly
     private static final int SAFETY_CAP = 3000;
+
+    // Target token count when truncating: stay under the model's 512-token limit
+    // with a small margin for tokeniser variance between the truncated and original text.
+    private static final int TARGET_TOKENS = 480;
 
     private static final int MIN_CHARS = 200;
 
@@ -168,84 +168,69 @@ public class EmbeddingService {
                 throw ex;
             }
 
-            // If already small, try aggressive trimming
-            if (text.length() <= MIN_CHARS) {
-                String trimmed = trimWorstParts(text);
-                if (trimmed.length() == text.length()) {
-                    // Last resort: cut to half
-                    int newLen = Math.max(1, text.length() / 2);
-                    log.warn("Embedding request still too large at {} chars; " +
-                            "last resort truncation to {} chars.", text.length(), newLen);
-                    trimmed = text.substring(0, newLen);
-                } else {
-                    log.warn("Embedding request too large at {} chars; " +
-                            "trimmed to {} chars using trimWorstParts().", text.length(), trimmed.length());
-                }
+            // Parse the actual token count from the error to compute precise truncation.
+            // E.g. "input (728 tokens) is too large" → 728
+            int reportedTokens = extractTokenCount(ex);
 
-                EmbeddingResponse response = embeddingModel.call(new EmbeddingRequest(List.of(trimmed), null));
-                float[] embedding = response.getResults().get(0).getOutput();
-                return toDoubleList(embedding);
+            String truncated;
+            if (reportedTokens > 0) {
+                // Calculate the maximum chars that fit in TARGET_TOKENS using the
+                // observed chars/token ratio from this specific text.
+                int safeChars = (int) ((long) text.length() * TARGET_TOKENS / reportedTokens);
+                safeChars = Math.max(safeChars, MIN_CHARS);
+                truncated = truncateAtBoundary(text, safeChars);
+
+                log.info("Embedding input too large ({} tokens from {} chars). " +
+                                "Truncating to {} chars (~{} tokens).",
+                        reportedTokens, text.length(), truncated.length(), TARGET_TOKENS);
+            } else {
+                // Could not parse token count — fall back to halving
+                truncated = truncateAtBoundary(text, text.length() / 2);
+                log.warn("Embedding input too large but could not parse token count. " +
+                        "Truncating from {} to {} chars.", text.length(), truncated.length());
             }
 
-            // Split and average: preserve both halves by embedding each and averaging vectors
-            int mid = findSplitPoint(text);
-            String left = text.substring(0, mid);
-            String right = text.substring(mid);
-
-            log.info("Embedding request too large ({} chars). " +
-                            "Splitting into two parts (left={}, right={}) and averaging vectors. " +
-                            "Consider reducing maxChunkSize in chunking config.",
-                    text.length(), left.length(), right.length());
-
-            List<Double> leftVec = embedWithFallback(left);
-            List<Double> rightVec = embedWithFallback(right);
-
-            // If one side failed into empty, return the other
-            if (leftVec.isEmpty()) {
-                return rightVec;
-            }
-            if (rightVec.isEmpty()) {
-                return leftVec;
-            }
-
-            if (leftVec.size() != rightVec.size()) {
-                throw new IllegalStateException(
-                        "Embedding dimension mismatch after split: " +
-                                "left=" + leftVec.size() + ", right=" + rightVec.size());
-            }
-
-            // Average element-wise
-            int dim = leftVec.size();
-            List<Double> avg = new ArrayList<>(dim);
-            for (int i = 0; i < dim; i++) {
-                avg.add((leftVec.get(i) + rightVec.get(i)) / 2.0d);
-            }
-            return avg;
+            // Recurse: the truncated text should now fit, but if the token density
+            // in the kept portion is higher than the overall average, another round
+            // of truncation will handle it.
+            return embedWithFallback(truncated);
         }
+    }
+
+    private int extractTokenCount(TransientAiException ex) {
+        if (ex.getMessage() == null) return -1;
+        Matcher m = TOO_LARGE.matcher(ex.getMessage());
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    private String truncateAtBoundary(String text, int maxChars) {
+        if (text.length() <= maxChars) return text;
+        int end = Math.min(maxChars, text.length());
+
+        // Prefer a sentence or word boundary near the target length
+        int best = lastIndexBefore(text, '.', end, 80);
+        if (best > 0) return text.substring(0, best + 1);
+
+        best = lastIndexBefore(text, '\n', end, 80);
+        if (best > 0) return text.substring(0, best);
+
+        best = lastIndexBefore(text, ' ', end, 40);
+        if (best > 0) return text.substring(0, best);
+
+        return text.substring(0, end);
     }
 
     private boolean looksLikeTooLarge(TransientAiException ex) {
         String msg = ex.getMessage();
         if (msg == null) return false;
         return TOO_LARGE.matcher(msg).find() || msg.contains("physical batch size");
-    }
-
-    private int findSplitPoint(String text) {
-        int mid = text.length() / 2;
-
-        // Prefer splitting on paragraph / sentence / whitespace near the midpoint
-        int best;
-
-        best = lastIndexBefore(text, '\n', mid, 120);
-        if (best > 0) return best;
-
-        best = lastIndexBefore(text, '.', mid, 120);
-        if (best > 0) return best + 1;
-
-        best = lastIndexBefore(text, ' ', mid, 120);
-        if (best > 0) return best;
-
-        return mid;
     }
 
     private int lastIndexBefore(String text, char ch, int from, int window) {
@@ -262,17 +247,6 @@ public class EmbeddingService {
         s = s.replaceAll("[ \\t\\x0B\\f\\r]+", " ");
         s = s.replaceAll("\\n{3,}", "\n\n");
         return s.trim();
-    }
-
-    private String trimWorstParts(String text) {
-        // Heuristic: drop very long "words" (often PDF garbage / encoded runs)
-        String[] parts = text.split(" ");
-        StringBuilder sb = new StringBuilder(text.length());
-        for (String p : parts) {
-            if (p.length() > 80) continue;
-            sb.append(p).append(' ');
-        }
-        return sb.toString().trim();
     }
 
     private List<Double> toDoubleList(float[] array) {
