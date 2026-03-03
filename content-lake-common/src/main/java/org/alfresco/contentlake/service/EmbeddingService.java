@@ -43,8 +43,8 @@ public class EmbeddingService {
     // This should rarely trigger if chunking is working correctly
     private static final int SAFETY_CAP = 3000;
 
-    // Target token count when truncating: stay under the model's 512-token limit
-    // with a small margin for tokeniser variance between the truncated and original text.
+    // Target token count for pre-truncation: 512 minus a small margin for
+    // tokeniser variance between estimated and actual counts.
     private static final int TARGET_TOKENS = 480;
 
     private static final int MIN_CHARS = 200;
@@ -158,6 +158,11 @@ public class EmbeddingService {
             text = text.substring(0, SAFETY_CAP);
         }
 
+        // Pre-truncate based on estimated token density to avoid exceeding the
+        // model's 512-token context limit. The estimate is intentionally
+        // conservative so the model call should always succeed.
+        text = pretruncateForTokenLimit(text);
+
         try {
             EmbeddingResponse response = embeddingModel.call(new EmbeddingRequest(List.of(text), null));
             float[] embedding = response.getResults().get(0).getOutput();
@@ -168,33 +173,72 @@ public class EmbeddingService {
                 throw ex;
             }
 
-            // Parse the actual token count from the error to compute precise truncation.
-            // E.g. "input (728 tokens) is too large" → 728
+            // Safety net: if the estimate was wrong and the model still rejected
+            // the input, use the reported token count for precise truncation.
             int reportedTokens = extractTokenCount(ex);
 
             String truncated;
             if (reportedTokens > 0) {
-                // Calculate the maximum chars that fit in TARGET_TOKENS using the
-                // observed chars/token ratio from this specific text.
                 int safeChars = (int) ((long) text.length() * TARGET_TOKENS / reportedTokens);
                 safeChars = Math.max(safeChars, MIN_CHARS);
                 truncated = truncateAtBoundary(text, safeChars);
-
-                log.info("Embedding input too large ({} tokens from {} chars). " +
-                                "Truncating to {} chars (~{} tokens).",
-                        reportedTokens, text.length(), truncated.length(), TARGET_TOKENS);
+                log.info("Pre-truncation estimate was insufficient ({} tokens from {} chars). " +
+                                "Re-truncating to {} chars.",
+                        reportedTokens, text.length(), truncated.length());
             } else {
-                // Could not parse token count — fall back to halving
                 truncated = truncateAtBoundary(text, text.length() / 2);
                 log.warn("Embedding input too large but could not parse token count. " +
                         "Truncating from {} to {} chars.", text.length(), truncated.length());
             }
 
-            // Recurse: the truncated text should now fit, but if the token density
-            // in the kept portion is higher than the overall average, another round
-            // of truncation will handle it.
             return embedWithFallback(truncated);
         }
+    }
+
+    /**
+     * Estimates the maximum number of characters that will fit in
+     * {@link #TARGET_TOKENS} tokens, based on the character composition of the
+     * text. The estimate is intentionally conservative (overestimates token count)
+     * so that the model call succeeds on the first attempt.
+     *
+     * <p>The heuristic: text with many non-alphanumeric characters (paths,
+     * punctuation, operators) tokenises at close to 1 token per character.
+     * Normal English prose tokenises at roughly 4 characters per token.
+     * We interpolate between these extremes using the ratio of special
+     * characters in the text.</p>
+     */
+    private String pretruncateForTokenLimit(String text) {
+        double charsPerToken = estimateCharsPerToken(text);
+        int maxChars = (int) (TARGET_TOKENS * charsPerToken);
+
+        if (text.length() <= maxChars) {
+            return text;
+        }
+
+        String truncated = truncateAtBoundary(text, maxChars);
+        log.debug("Pre-truncating embedding input from {} to {} chars " +
+                        "(estimated {} chars/token).",
+                text.length(), truncated.length(), String.format("%.1f", charsPerToken));
+        return truncated;
+    }
+
+    private double estimateCharsPerToken(String text) {
+        if (text.isEmpty()) return 1.0;
+
+        int specialCount = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (!Character.isLetterOrDigit(c) && !Character.isWhitespace(c)) {
+                specialCount++;
+            }
+        }
+
+        double specialRatio = (double) specialCount / text.length();
+        // specialRatio 0.00 (pure prose)   → 2.2 chars/token  → maxChars ≈ 1056
+        // specialRatio 0.10 (moderate)     → 1.7 chars/token  → maxChars ≈ 816
+        // specialRatio 0.20 (path-heavy)   → 1.2 chars/token  → maxChars ≈ 576
+        // specialRatio ≥ 0.24 (very dense) → 1.0 chars/token  → maxChars = 480
+        return Math.max(1.0, 2.2 - specialRatio * 5.0);
     }
 
     private int extractTokenCount(TransientAiException ex) {
