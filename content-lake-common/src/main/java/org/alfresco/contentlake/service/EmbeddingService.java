@@ -47,6 +47,13 @@ public class EmbeddingService {
     // This should rarely trigger if chunking is working correctly
     private static final int SAFETY_CAP = 3000;
 
+    // Proactive split threshold: mxbai-embed-large caps at 512 tokens.
+    // At ~4 chars/token for typical text this is ~2048 chars, but dense content
+    // (code, paths, punctuation-heavy text) can tokenise at 1-2 chars/token.
+    // Using 1400 chars as the pre-emptive split boundary catches dense content
+    // without being overly aggressive on normal prose.
+    private static final int PROACTIVE_SPLIT_THRESHOLD = 1400;
+
     private static final int MIN_CHARS = 200;
 
     /**
@@ -156,6 +163,33 @@ public class EmbeddingService {
                             "This indicates a chunking issue. Truncating and logging for investigation.",
                     text.length(), SAFETY_CAP);
             text = text.substring(0, SAFETY_CAP);
+        }
+
+        // Proactive split: avoid a round-trip to the model for inputs that are
+        // very likely to exceed the 512-token context limit. Dense content
+        // (code, paths, symbols) can tokenise at 1-2 chars/token, so 1400 chars
+        // can exceed 512 tokens even though typical English would be fine.
+        if (text.length() > PROACTIVE_SPLIT_THRESHOLD) {
+            int mid = findSplitPoint(text);
+            String left = text.substring(0, mid);
+            String right = text.substring(mid);
+            log.debug("Proactive split of {} chars into left={}, right={} to stay within token limit.",
+                    text.length(), left.length(), right.length());
+            List<Double> leftVec = embedWithFallback(left);
+            List<Double> rightVec = embedWithFallback(right);
+            if (leftVec.isEmpty()) return rightVec;
+            if (rightVec.isEmpty()) return leftVec;
+            if (leftVec.size() != rightVec.size()) {
+                throw new IllegalStateException(
+                        "Embedding dimension mismatch after proactive split: " +
+                                "left=" + leftVec.size() + ", right=" + rightVec.size());
+            }
+            int dim = leftVec.size();
+            List<Double> avg = new ArrayList<>(dim);
+            for (int i = 0; i < dim; i++) {
+                avg.add((leftVec.get(i) + rightVec.get(i)) / 2.0d);
+            }
+            return avg;
         }
 
         try {
