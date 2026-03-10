@@ -324,12 +324,35 @@ curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
   }'
 ```
 
+Multi-turn conversation (same `sessionId`):
+
+```bash
+# Turn 1
+curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "demo-session-1",
+    "question": "Summarize the Q4 report highlights"
+  }'
+
+# Turn 2 (follow-up resolved with history)
+curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "demo-session-1",
+    "question": "Can you expand on the second point?"
+  }'
+```
+
 Response:
 
 ```json
 {
   "answer": "The Q4 report highlights a 12% revenue increase...",
   "question": "What are the key findings in the Q4 report?",
+  "sessionId": "demo-session-1",
+  "retrievalQuery": "what are the key findings in the q4 report",
+  "historyTurnsUsed": 2,
   "model": "ai/gpt-oss",
   "searchTimeMs": 245,
   "generationTimeMs": 1830,
@@ -351,11 +374,19 @@ Response:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `question` | String | *required* | Natural-language question |
+| `sessionId` | String | user-scoped default | Conversation session id for multi-turn context |
+| `resetSession` | boolean | false | Clear conversation history for the target session before this prompt |
 | `topK` | int | 5 | Number of chunks to retrieve for context |
 | `minScore` | double | 0.5 | Minimum similarity threshold |
 | `filter` | String | — | Additional HXQL filter |
 | `systemPrompt` | String | — | Override the default LLM system prompt |
 | `includeContext` | boolean | false | Include retrieved chunks in response |
+
+| Response Field | Type | Description |
+|---------------|------|-------------|
+| `sessionId` | String | Effective session id used by server |
+| `retrievalQuery` | String | Query actually sent to retrieval (may be reformulated) |
+| `historyTurnsUsed` | Integer | Number of prior turns included in this generation |
 
 #### Semantic Search
 
@@ -606,6 +637,11 @@ rag:
     4. If the context does not contain enough information to fully answer the question,
     clearly state what you can answer and what is missing.
     5. Be concise and direct. Do not repeat the question or add unnecessary preamble.
+  conversation:
+    enabled: true
+    max-history-turns: 10
+    session-ttl-minutes: 30
+    query-reformulation: true
 
 semantic-search:
   default-min-score: 0.5
@@ -622,6 +658,11 @@ search:
     rrf-k: 60
     default-min-score: 0.0
 ```
+
+Conversation memory storage:
+
+- Default implementation is in-memory.
+- To use Redis or a database, provide a custom Spring bean implementing `ConversationMemoryStore`; the default in-memory store is only created when no other `ConversationMemoryStore` bean exists.
 
 ## Roadmap
 

@@ -47,4 +47,23 @@ public class RagProperties {
             4. If the context does not contain enough information to fully answer the question, clearly \
             state what you can answer and what is missing.
             5. Be concise and direct. Do not repeat the question or add unnecessary preamble.""";
+
+    /** Conversation memory settings. */
+    private ConversationProperties conversation = new ConversationProperties();
+
+    @Data
+    public static class ConversationProperties {
+
+        /** Enables/disables conversation memory features. */
+        private boolean enabled = true;
+
+        /** Number of most recent turns kept in memory per session. */
+        private int maxHistoryTurns = 10;
+
+        /** Session expiration timeout based on inactivity. */
+        private int sessionTtlMinutes = 30;
+
+        /** Enables/disables conversation-aware query reformulation. */
+        private boolean queryReformulation = true;
+    }
 }

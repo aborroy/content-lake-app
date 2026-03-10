@@ -2,6 +2,8 @@ package org.alfresco.contentlake.rag.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.alfresco.contentlake.rag.conversation.ConversationMemoryService;
+import org.alfresco.contentlake.rag.conversation.ConversationTurn;
 import org.alfresco.contentlake.rag.config.RagProperties;
 import org.alfresco.contentlake.rag.model.RagPromptRequest;
 import org.alfresco.contentlake.rag.model.RagPromptResponse;
@@ -10,6 +12,7 @@ import org.alfresco.contentlake.rag.model.RagPromptResponse.Source;
 import org.alfresco.contentlake.rag.model.SemanticSearchRequest;
 import org.alfresco.contentlake.rag.model.SemanticSearchResponse;
 import org.alfresco.contentlake.rag.model.SemanticSearchResponse.SearchHit;
+import org.alfresco.contentlake.security.SecurityContextService;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -42,6 +45,10 @@ public class RagService {
     private final SemanticSearchService semanticSearchService;
     private final ChatModel chatModel;
     private final RagProperties ragProperties;
+    private final ConversationMemoryService conversationMemoryService;
+    private final QueryReformulationService queryReformulationService;
+    private final RerankService rerankService;
+    private final SecurityContextService securityContextService;
 
     /**
      * Executes the full RAG pipeline for a given question.
@@ -52,38 +59,55 @@ public class RagService {
     public RagPromptResponse prompt(RagPromptRequest request) {
         long totalStart = System.currentTimeMillis();
 
+        boolean conversationEnabled = ragProperties.getConversation().isEnabled();
+        String sessionId = conversationEnabled ? resolveSessionId(request) : null;
+
+        if (conversationEnabled && request.isResetSession()) {
+            conversationMemoryService.resetSession(sessionId);
+        }
+
+        List<ConversationTurn> history = conversationEnabled
+                ? conversationMemoryService.getRecentTurns(sessionId)
+                : List.of();
+
+        String retrievalQuery = resolveRetrievalQuery(request.getQuestion(), history);
+
         // --- 1. RETRIEVE ---
         int topK = request.getTopK() > 0 ? request.getTopK() : ragProperties.getDefaultTopK();
         double minScore = request.getMinScore() > 0 ? request.getMinScore() : ragProperties.getDefaultMinScore();
 
         SemanticSearchRequest searchRequest = SemanticSearchRequest.builder()
-                .query(request.getQuestion())
+                .query(retrievalQuery)
                 .topK(topK)
                 .minScore(minScore)
                 .filter(request.getFilter())
                 .embeddingType(request.getEmbeddingType())
                 .build();
 
-        log.info("RAG retrieve phase: query=\"{}\", topK={}, minScore={}", request.getQuestion(), topK, minScore);
+        log.info("RAG retrieve phase: query=\"{}\", topK={}, minScore={}", retrievalQuery, topK, minScore);
         SemanticSearchResponse searchResponse = semanticSearchService.search(searchRequest);
         long searchTimeMs = searchResponse.getSearchTimeMs();
 
         List<SearchHit> hits = searchResponse.getResults() != null ? searchResponse.getResults() : List.of();
-        log.info("RAG retrieve phase complete: {} chunks retrieved in {}ms", hits.size(), searchTimeMs);
+        List<SearchHit> rerankedHits = rerankService.rerank(retrievalQuery, hits);
+        log.info("RAG retrieve phase complete: {} chunks retrieved in {}ms (reranked={})",
+                hits.size(), searchTimeMs, rerankedHits.size());
 
         // --- 2. AUGMENT ---
-        String contextBlock = assembleContext(hits);
+        String contextBlock = assembleContext(rerankedHits);
+        String historyBlock = assembleConversationHistory(history);
         String systemPrompt = resolveSystemPrompt(request);
-        String userPrompt = buildUserPrompt(request.getQuestion(), contextBlock);
+        String userPrompt = buildUserPrompt(request.getQuestion(), retrievalQuery, historyBlock, contextBlock);
 
-        log.debug("RAG augment phase: context length={} chars, {} sources", contextBlock.length(), hits.size());
+        log.debug("RAG augment phase: context length={} chars, {} sources, history turns={}",
+                contextBlock.length(), rerankedHits.size(), history.size());
 
         // --- 3. GENERATE ---
         long genStart = System.currentTimeMillis();
         String answer;
         String modelName;
 
-        if (hits.isEmpty()) {
+        if (rerankedHits.isEmpty()) {
             answer = "I couldn't find any relevant documents to answer your question. "
                     + "Please try rephrasing your query or ensure the relevant documents have been ingested.";
             modelName = "none (no context available)";
@@ -111,7 +135,7 @@ public class RagService {
         long totalTimeMs = System.currentTimeMillis() - totalStart;
 
         // --- BUILD RESPONSE ---
-        List<Source> sources = hits.stream()
+        List<Source> sources = rerankedHits.stream()
                 .map(hit -> Source.builder()
                         .documentId(hit.getSourceDocument() != null ? hit.getSourceDocument().getDocumentId() : null)
                         .nodeId(hit.getSourceDocument() != null ? hit.getSourceDocument().getNodeId() : null)
@@ -125,7 +149,7 @@ public class RagService {
 
         List<ContextChunk> contextChunks = null;
         if (request.isIncludeContext()) {
-            contextChunks = hits.stream()
+            contextChunks = rerankedHits.stream()
                     .map(hit -> ContextChunk.builder()
                             .rank(hit.getRank())
                             .score(hit.getScore())
@@ -136,9 +160,17 @@ public class RagService {
                     .toList();
         }
 
+        if (conversationEnabled) {
+            conversationMemoryService.appendUserTurn(sessionId, request.getQuestion());
+            conversationMemoryService.appendAssistantTurn(sessionId, answer);
+        }
+
         return RagPromptResponse.builder()
                 .answer(answer)
                 .question(request.getQuestion())
+                .sessionId(sessionId)
+                .retrievalQuery(retrievalQuery)
+                .historyTurnsUsed(conversationEnabled ? history.size() : null)
                 .model(modelName)
                 .searchTimeMs(searchTimeMs)
                 .generationTimeMs(generationTimeMs)
@@ -203,16 +235,66 @@ public class RagService {
     }
 
     private String buildUserPrompt(String question, String context) {
+        return buildUserPrompt(question, question, "", context);
+    }
+
+    private String buildUserPrompt(String question, String retrievalQuery, String history, String context) {
+        String conversationSection = history == null || history.isBlank() ? "(none)" : history;
         return String.format("""
-                Based on the following document context, answer the question.
+                Based on the conversation history and document context, answer the current question.
+
+                --- CONVERSATION HISTORY ---
+                %s
+                --- END CONVERSATION HISTORY ---
 
                 --- DOCUMENT CONTEXT ---
                 %s
                 --- END CONTEXT ---
 
-                Question: %s
+                Current question: %s
+                Retrieval query: %s
 
                 Answer:""",
-                context, question);
+                conversationSection, context, question, retrievalQuery);
+    }
+
+    private String assembleConversationHistory(List<ConversationTurn> turns) {
+        if (turns == null || turns.isEmpty()) {
+            return "";
+        }
+
+        StringBuilder history = new StringBuilder();
+        for (ConversationTurn turn : turns) {
+            String role = turn.getRole() == ConversationTurn.Role.ASSISTANT ? "Assistant" : "User";
+            if (turn.getContent() != null && !turn.getContent().isBlank()) {
+                history.append(role).append(": ").append(turn.getContent().trim()).append("\n");
+            }
+        }
+        return history.toString().trim();
+    }
+
+    private String resolveRetrievalQuery(String originalQuestion, List<ConversationTurn> history) {
+        if (!ragProperties.getConversation().isEnabled()) {
+            return originalQuestion;
+        }
+        if (!ragProperties.getConversation().isQueryReformulation() || history.isEmpty()) {
+            return originalQuestion;
+        }
+        String rewritten = queryReformulationService.reformulate(originalQuestion, history);
+        if (rewritten == null || rewritten.isBlank()) {
+            return originalQuestion;
+        }
+        return rewritten;
+    }
+
+    private String resolveSessionId(RagPromptRequest request) {
+        if (request.getSessionId() != null && !request.getSessionId().isBlank()) {
+            return request.getSessionId().trim();
+        }
+        String username = securityContextService.getCurrentUsername();
+        if (username == null || username.isBlank()) {
+            return "user:anonymous";
+        }
+        return "user:" + username.trim();
     }
 }

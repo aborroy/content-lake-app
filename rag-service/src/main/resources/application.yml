@@ -55,6 +55,11 @@ rag:
     4. If the context does not contain enough information to fully answer the question,
     clearly state what you can answer and what is missing.
     5. Be concise and direct. Do not repeat the question or add unnecessary preamble.
+  conversation:
+    enabled: ${RAG_CONVERSATION_ENABLED:true}
+    max-history-turns: ${RAG_CONVERSATION_MAX_HISTORY_TURNS:10}
+    session-ttl-minutes: ${RAG_CONVERSATION_SESSION_TTL_MINUTES:30}
+    query-reformulation: ${RAG_CONVERSATION_QUERY_REFORMULATION:true}
 
 # Semantic Search configuration
 semantic-search:

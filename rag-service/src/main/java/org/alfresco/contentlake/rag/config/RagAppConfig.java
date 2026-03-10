@@ -5,8 +5,11 @@ import org.alfresco.contentlake.client.HxprDocumentApi;
 import org.alfresco.contentlake.client.HxprQueryApi;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.client.HxprTokenProvider;
+import org.alfresco.contentlake.rag.conversation.ConversationMemoryStore;
+import org.alfresco.contentlake.rag.conversation.InMemoryConversationMemoryStore;
 import org.alfresco.contentlake.service.EmbeddingService;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -15,6 +18,8 @@ import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
+
+import java.time.Clock;
 
 /**
  * Central Spring configuration for the RAG service infrastructure.
@@ -81,6 +86,17 @@ public class RagAppConfig {
     public EmbeddingService embeddingService(EmbeddingModel embeddingModel) {
         return new EmbeddingService(embeddingModel,
                 embeddingModel.getClass().getSimpleName());
+    }
+
+    @Bean
+    public Clock clock() {
+        return Clock.systemUTC();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(ConversationMemoryStore.class)
+    public ConversationMemoryStore conversationMemoryStore() {
+        return new InMemoryConversationMemoryStore();
     }
 
     // ----------------------------------------------------------------------

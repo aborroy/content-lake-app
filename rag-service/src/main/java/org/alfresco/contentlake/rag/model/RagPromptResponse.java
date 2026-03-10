@@ -27,6 +27,15 @@ public class RagPromptResponse {
     /** The question that was asked. */
     private String question;
 
+    /** Effective conversation session id used for this request. */
+    private String sessionId;
+
+    /** Query actually used for retrieval (may be reformulated from the original question). */
+    private String retrievalQuery;
+
+    /** Number of prior turns included as conversation history context. */
+    private Integer historyTurnsUsed;
+
     /** LLM model used for generation. */
     private String model;
 

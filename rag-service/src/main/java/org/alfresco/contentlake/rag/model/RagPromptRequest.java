@@ -22,6 +22,13 @@ public class RagPromptRequest {
     /** The user's natural-language question. */
     private String question;
 
+    /** Optional conversation session id. If omitted, server derives a user-scoped session id. */
+    private String sessionId;
+
+    /** When true, clears the target conversation session before processing this prompt. */
+    @Builder.Default
+    private boolean resetSession = false;
+
     /** Number of chunks to retrieve for context (default: configured in rag.default-top-k). */
     @Builder.Default
     private int topK = 0;

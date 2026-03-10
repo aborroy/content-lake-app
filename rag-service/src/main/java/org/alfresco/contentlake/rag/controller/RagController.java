@@ -52,7 +52,7 @@ public class RagController {
     /**
      * Executes the RAG pipeline: retrieve relevant chunks, augment with context, generate answer.
      *
-     * @param request RAG prompt parameters (question, topK, minScore, filter, systemPrompt, includeContext)
+     * @param request RAG prompt parameters (question, sessionId, resetSession, topK, minScore, filter, systemPrompt, includeContext)
      * @return generated answer with sources and timing breakdown
      */
     @PostMapping("/prompt")
@@ -67,8 +67,9 @@ public class RagController {
             );
         }
 
-        log.info("RAG prompt request: question=\"{}\", topK={}, minScore={}, includeContext={}",
-                request.getQuestion(), request.getTopK(), request.getMinScore(), request.isIncludeContext());
+        log.info("RAG prompt request: question=\"{}\", sessionId={}, resetSession={}, topK={}, minScore={}, includeContext={}",
+                request.getQuestion(), request.getSessionId(), request.isResetSession(),
+                request.getTopK(), request.getMinScore(), request.isIncludeContext());
 
         RagPromptResponse response = ragService.prompt(request);
         return ResponseEntity.ok(response);
