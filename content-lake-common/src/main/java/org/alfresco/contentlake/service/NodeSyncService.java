@@ -310,12 +310,30 @@ public class NodeSyncService {
         hxprService.ensureFolder(parentPath);
 
         HxprDocument doc = buildDocument(node);
-        doc.setCinPaths(List.of(buildDocumentPath(parentPath, node)));
+        String documentPath = buildDocumentPath(parentPath, node);
+        doc.setCinPaths(List.of(documentPath));
 
-        HxprDocument created = hxprService.createDocument(parentPath, doc);
-        log.info("Created hxpr document {} for node {} at {}",
-                created.getSysId(), node.getId(), parentPath);
-        return created;
+        HxprDocument existingAtPath = hxprService.findByPath(documentPath);
+        if (existingAtPath != null) {
+            log.info("Reusing existing hxpr document {} for node {} at {}",
+                    existingAtPath.getSysId(), node.getId(), documentPath);
+            return updateDocument(existingAtPath, node);
+        }
+
+        try {
+            HxprDocument created = hxprService.createDocument(parentPath, doc);
+            log.info("Created hxpr document {} for node {} at {}",
+                    created.getSysId(), node.getId(), parentPath);
+            return created;
+        } catch (HttpClientErrorException.Conflict e) {
+            HxprDocument conflicted = hxprService.findByPath(documentPath);
+            if (conflicted != null) {
+                log.warn("Recovered from create conflict by reusing hxpr document {} for node {} at {}",
+                        conflicted.getSysId(), node.getId(), documentPath);
+                return updateDocument(conflicted, node);
+            }
+            throw e;
+        }
     }
 
     private HxprDocument updateDocument(HxprDocument existing, Node node) {

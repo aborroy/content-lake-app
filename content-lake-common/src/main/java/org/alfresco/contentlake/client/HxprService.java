@@ -79,6 +79,29 @@ public class HxprService {
     }
 
     /**
+     * Finds a document by its absolute repository path.
+     *
+     * @param absolutePath absolute path (with or without leading slash)
+     * @return matching document, or {@code null} when no document exists at that path
+     */
+    public HxprDocument findByPath(String absolutePath) {
+        String cleanPath = stripLeadingSlash(absolutePath);
+        try {
+            return restClient.get()
+                    .uri(buildDocumentPathUri(cleanPath, null))
+                    .retrieve()
+                    .body(HxprDocument.class);
+        } catch (HttpClientErrorException.NotFound e) {
+            return null;
+        } catch (RestClientResponseException e) {
+            if (e.getStatusCode().value() == 404) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
      * Creates a document under the given parent path.
      *
      * @param parentPath parent path (with or without leading slash)
