@@ -57,9 +57,10 @@ public class NodeSyncService {
     private static final String MIXIN_CIN_REMOTE = "CinRemote";
 
     /* ---- cin_ingestProperties keys ---- */
-    private static final String P_ALF_MODIFIED_AT = ContentLakeIngestProperties.ALFRESCO_MODIFIED_AT;
-    private static final String P_CL_SYNC_STATUS  = ContentLakeIngestProperties.CONTENT_LAKE_SYNC_STATUS;
-    private static final String P_CL_SYNC_ERROR   = ContentLakeIngestProperties.CONTENT_LAKE_SYNC_ERROR;
+    private static final String P_SOURCE_MODIFIED_AT = ContentLakeIngestProperties.SOURCE_MODIFIED_AT;
+    private static final String P_LEGACY_ALF_MODIFIED_AT = ContentLakeIngestProperties.ALFRESCO_MODIFIED_AT;
+    private static final String P_CL_SYNC_STATUS    = ContentLakeIngestProperties.CONTENT_LAKE_SYNC_STATUS;
+    private static final String P_CL_SYNC_ERROR     = ContentLakeIngestProperties.CONTENT_LAKE_SYNC_ERROR;
 
     /* ---- ACL constants ---- */
     private static final String EVERYONE_PRINCIPAL = "__Everyone__";
@@ -100,7 +101,7 @@ public class NodeSyncService {
      */
     public String syncNode(SourceNode node) {
         String nodeId = node.nodeId();
-        String sourceId = node.sourceId();
+        String sourceId = formatSourceId(node);
 
         HxprDocument existing = hxprService.findByNodeId(nodeId, sourceId);
         if (existing != null && isStale(existing, node)) {
@@ -135,7 +136,7 @@ public class NodeSyncService {
      */
     public SyncResult ingestMetadata(SourceNode node) {
         String nodeId = node.nodeId();
-        String sourceId = node.sourceId();
+        String sourceId = formatSourceId(node);
 
         HxprDocument existing = hxprService.findByNodeId(nodeId, sourceId);
         if (existing != null && isStale(existing, node)) {
@@ -221,7 +222,7 @@ public class NodeSyncService {
      * @param deletedAt timestamp associated with the delete/update-to-out-of-scope event
      */
     public void deleteNode(String nodeId, OffsetDateTime deletedAt) {
-        String sourceId = sourceClient.getSourceId();
+        String sourceId = formatSourceId(sourceClient.getSourceType(), sourceClient.getSourceId());
         HxprDocument existing = hxprService.findByNodeId(nodeId, sourceId);
         if (existing == null) {
             log.debug("No Content Lake document found for deleted node {}", nodeId);
@@ -248,13 +249,13 @@ public class NodeSyncService {
      * @param node source node carrying the updated read principals
      */
     public void updatePermissions(SourceNode node) {
-        String sourceId = node.sourceId();
-        HxprDocument existing = hxprService.findByNodeId(node.nodeId(), sourceId);
+        HxprDocument existing = hxprService.findByNodeId(node.nodeId(), formatSourceId(node));
         if (existing == null) {
             log.debug("No Content Lake document found for permission update on node {}", node.nodeId());
             return;
         }
 
+        String sourceId = node.sourceId();
         List<String> readerList = new ArrayList<>(node.readPrincipals());
         List<ACE> sysAcl = buildSysAcl(readerList, sourceId);
 
@@ -334,7 +335,7 @@ public class NodeSyncService {
         doc.setSysMixinTypes(List.of(MIXIN_CIN_REMOTE));
 
         doc.setCinId(node.nodeId());
-        doc.setCinSourceId(node.sourceId());
+        doc.setCinSourceId(formatSourceId(node));
         doc.setCinPaths(buildCinPaths(node));
 
         List<String> readerList = new ArrayList<>(node.readPrincipals());
@@ -564,6 +565,20 @@ public class NodeSyncService {
         return props;
     }
 
+    private String formatSourceId(SourceNode node) {
+        return formatSourceId(node.sourceType(), node.sourceId());
+    }
+
+    private String formatSourceId(String sourceType, String sourceId) {
+        if (sourceId == null || sourceId.isBlank()) {
+            return sourceId;
+        }
+        if (sourceType == null || sourceType.isBlank() || sourceId.contains(":")) {
+            return sourceId;
+        }
+        return sourceType + ":" + sourceId;
+    }
+
     private void applyFlattenedSourceNodeFields(HxprDocument doc, SourceNode node, List<String> readerList) {
         doc.setAlfrescoNodeId(node.nodeId());
         doc.setAlfrescoRepositoryId(node.sourceId());
@@ -647,7 +662,10 @@ public class NodeSyncService {
         Map<String, Object> ingestProps = existing.getCinIngestProperties();
         if (ingestProps == null) return null;
 
-        Object stored = ingestProps.get(P_ALF_MODIFIED_AT);
+        Object stored = ingestProps.get(P_SOURCE_MODIFIED_AT);
+        if (stored == null) {
+            stored = ingestProps.get(P_LEGACY_ALF_MODIFIED_AT);
+        }
         if (stored == null) return null;
 
         try {

@@ -32,7 +32,8 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class NodeSyncServicePathConflictTest {
 
-    private static final String SOURCE_ID  = "default";
+    private static final String SOURCE_ID = "default";
+    private static final String FORMATTED_SOURCE_ID = "alfresco:default";
     private static final String TARGET_PATH = "/alfresco-sync";
 
     @Mock
@@ -81,13 +82,19 @@ class NodeSyncServicePathConflictTest {
                 OffsetDateTime.parse("2026-03-13T12:00:00Z"),
                 false,
                 Set.of("GROUP_EVERYONE"),
-                Map.of(
-                        "alfresco_nodeId",       "node-123",
-                        "alfresco_repositoryId", SOURCE_ID,
-                        "alfresco_path",         "/Company Home/Sites/swsdp/documentLibrary/Meeting Notes",
-                        "alfresco_name",         "Meeting Notes 2011-01-27.doc",
-                        "alfresco_mimeType",     "application/msword",
-                        "alfresco_modifiedAt",   "2026-03-13T12:00:00Z"
+                Map.ofEntries(
+                        Map.entry("source_nodeId", "node-123"),
+                        Map.entry("source_type", "alfresco"),
+                        Map.entry("source_path", "/Company Home/Sites/swsdp/documentLibrary/Meeting Notes"),
+                        Map.entry("source_name", "Meeting Notes 2011-01-27.doc"),
+                        Map.entry("source_mimeType", "application/msword"),
+                        Map.entry("source_modifiedAt", "2026-03-13T12:00:00Z"),
+                        Map.entry("alfresco_nodeId", "node-123"),
+                        Map.entry("alfresco_repositoryId", SOURCE_ID),
+                        Map.entry("alfresco_path", "/Company Home/Sites/swsdp/documentLibrary/Meeting Notes"),
+                        Map.entry("alfresco_name", "Meeting Notes 2011-01-27.doc"),
+                        Map.entry("alfresco_mimeType", "application/msword"),
+                        Map.entry("alfresco_modifiedAt", "2026-03-13T12:00:00Z")
                 )
         );
 
@@ -97,12 +104,12 @@ class NodeSyncServicePathConflictTest {
         HxprDocument updated = new HxprDocument();
         updated.setSysId("hxpr-123");
         updated.setCinId("node-123");
-        updated.setCinSourceId(SOURCE_ID);
+        updated.setCinSourceId(FORMATTED_SOURCE_ID);
 
         String parentPath = "/alfresco-sync/default/Company Home/Sites/swsdp/documentLibrary/Meeting Notes";
         String documentPath = parentPath + "/Meeting Notes 2011-01-27.doc";
 
-        when(hxprService.findByNodeId("node-123", SOURCE_ID)).thenReturn(null);
+        when(hxprService.findByNodeId("node-123", FORMATTED_SOURCE_ID)).thenReturn(null);
         when(hxprService.findByPath(documentPath)).thenReturn(null, existingAtPath);
         when(hxprService.createDocument(eq(parentPath), any(HxprDocument.class)))
                 .thenThrow(HttpClientErrorException.create(
@@ -129,9 +136,12 @@ class NodeSyncServicePathConflictTest {
         HxprDocument updatePayload = captor.getValue();
         assertThat(updatePayload.getSysId()).isEqualTo("hxpr-123");
         assertThat(updatePayload.getCinId()).isEqualTo("node-123");
-        assertThat(updatePayload.getCinSourceId()).isEqualTo(SOURCE_ID);
+        assertThat(updatePayload.getCinSourceId()).isEqualTo(FORMATTED_SOURCE_ID);
         assertThat(updatePayload.getCinPaths()).containsExactly(documentPath);
         assertThat(updatePayload.getCinIngestProperties())
+                .containsEntry("source_nodeId",        "node-123")
+                .containsEntry("source_type",          "alfresco")
+                .containsEntry("source_path",          "/Company Home/Sites/swsdp/documentLibrary/Meeting Notes")
                 .containsEntry("alfresco_nodeId",       "node-123")
                 .containsEntry("alfresco_repositoryId", SOURCE_ID)
                 .containsEntry("alfresco_path",         "/Company Home/Sites/swsdp/documentLibrary/Meeting Notes");

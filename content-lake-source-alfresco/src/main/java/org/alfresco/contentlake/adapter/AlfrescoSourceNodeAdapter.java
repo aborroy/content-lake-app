@@ -48,16 +48,28 @@ public final class AlfrescoSourceNodeAdapter {
     }
 
     private static Map<String, Object> buildSourceProperties(Node node, String sourceId) {
+        String path     = node.getPath()    != null ? node.getPath().getName()       : null;
+        String mimeType = node.getContent() != null ? node.getContent().getMimeType() : null;
+        String modified = node.getModifiedAt() != null ? node.getModifiedAt().toString() : null;
+
         Map<String, Object> props = new LinkedHashMap<>();
+
+        // Generic source-agnostic keys (readable by any source-unaware consumer)
+        props.put(ContentLakeIngestProperties.SOURCE_NODE_ID,     node.getId());
+        props.put(ContentLakeIngestProperties.SOURCE_TYPE,        "alfresco");
+        props.put(ContentLakeIngestProperties.SOURCE_NAME,        node.getName());
+        props.put(ContentLakeIngestProperties.SOURCE_PATH,        path);
+        props.put(ContentLakeIngestProperties.SOURCE_MIME_TYPE,   mimeType);
+        props.put(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, modified);
+
+        // Alfresco-specific keys (preserved for adapter-aware consumers)
         props.put(ContentLakeIngestProperties.ALFRESCO_NODE_ID,       node.getId());
         props.put(ContentLakeIngestProperties.ALFRESCO_REPOSITORY_ID, sourceId);
         props.put(ContentLakeIngestProperties.ALFRESCO_NAME,          node.getName());
-        props.put(ContentLakeIngestProperties.ALFRESCO_PATH,
-                node.getPath() != null ? node.getPath().getName() : null);
-        props.put(ContentLakeIngestProperties.ALFRESCO_MIME_TYPE,
-                node.getContent() != null ? node.getContent().getMimeType() : null);
-        props.put(ContentLakeIngestProperties.ALFRESCO_MODIFIED_AT,
-                node.getModifiedAt() != null ? node.getModifiedAt().toString() : null);
+        props.put(ContentLakeIngestProperties.ALFRESCO_PATH,          path);
+        props.put(ContentLakeIngestProperties.ALFRESCO_MIME_TYPE,     mimeType);
+        props.put(ContentLakeIngestProperties.ALFRESCO_MODIFIED_AT,   modified);
+
         props.values().removeIf(Objects::isNull);
         return props;
     }

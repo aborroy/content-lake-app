@@ -47,7 +47,7 @@ public class ContentLakeNodeStatusService {
                 .distinct()
                 .toList();
 
-        String repositoryId = alfrescoClient.getRepositoryId();
+        String sourceId = formatSourceId(alfrescoClient.getSourceType(), alfrescoClient.getSourceId());
         Map<String, Node> nodesById = new LinkedHashMap<>();
         List<String> fileNodeIds = sanitizedIds.stream()
                 .map(nodeId -> {
@@ -61,7 +61,7 @@ public class ContentLakeNodeStatusService {
 
         Map<String, HxprDocument> documentsByNodeId = fileNodeIds.isEmpty()
                 ? Map.of()
-                : hxprService.findByNodeIds(fileNodeIds, repositoryId);
+                : hxprService.findByNodeIds(fileNodeIds, sourceId);
         Map<String, ContentLakeNodeStatus> statusesByNodeId = new LinkedHashMap<>();
 
         for (String nodeId : sanitizedIds) {
@@ -72,7 +72,7 @@ public class ContentLakeNodeStatusService {
             }
 
             if (Boolean.TRUE.equals(node.isIsFolder())) {
-                statusesByNodeId.put(nodeId, resolveFolderStatus(node, includeFolderAggregate, repositoryId));
+                statusesByNodeId.put(nodeId, resolveFolderStatus(node, includeFolderAggregate, sourceId));
             } else {
                 statusesByNodeId.put(nodeId, resolveFileStatus(node, documentsByNodeId.get(nodeId)));
             }
@@ -212,6 +212,16 @@ public class ContentLakeNodeStatusService {
             documentsByNodeId.putAll(hxprService.findByNodeIds(batch, repositoryId));
         }
         return documentsByNodeId;
+    }
+
+    private String formatSourceId(String sourceType, String sourceId) {
+        if (sourceId == null || sourceId.isBlank()) {
+            return sourceId;
+        }
+        if (sourceType == null || sourceType.isBlank() || sourceId.contains(":")) {
+            return sourceId;
+        }
+        return sourceType + ":" + sourceId;
     }
 
     private ContentLakeNodeStatus.Status readStoredStatus(HxprDocument document) {

@@ -14,8 +14,10 @@ import org.springframework.web.util.UriUtils;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -225,11 +227,16 @@ public class HxprService {
     }
 
     /**
-     * Finds a document by the stable Alfresco source identifier stored in
-     * {@code (cin_sourceId, cin_id)}.
+     * Finds a document by its source identifier stored in {@code (cin_sourceId, cin_id)}.
      *
-     * @param nodeId Alfresco node identifier
-     * @param sourceId Alfresco repository identifier
+     * <p><b>Migration compatibility:</b> {@code sourceId} should be supplied in the
+     * {@code "type:rawId"} format introduced in Issue 20 (e.g. {@code "alfresco:abc-uuid"}).
+     * When the colon-prefixed format is detected, the query also accepts the legacy raw-id
+     * format so that documents indexed before the migration remain discoverable during the
+     * transition window.</p>
+     *
+     * @param nodeId   source-system node identifier stored in {@code cin_id}
+     * @param sourceId formatted source identifier ({@code "type:rawId"}) or legacy raw id
      * @return matching document, or {@code null} if not found
      */
     public HxprDocument findByNodeId(String nodeId, String sourceId) {
@@ -237,14 +244,14 @@ public class HxprService {
             String hxql = "SELECT * FROM SysContent WHERE sys_primaryType = '" + SYS_FILE + "' AND cin_id = '"
                     + escapeHxql(nodeId) + "'";
             if (sourceId != null && !sourceId.isBlank()) {
-                hxql += " AND cin_sourceId = '" + escapeHxql(sourceId) + "'";
+                hxql += " AND " + buildSourceIdPredicate(sourceId);
             }
 
-            Query query = newQuery(hxql, 1, 0);
+            Query query = newQuery(hxql, 2, 0);
 
             HxprDocument.QueryResult result = queryApi.query(query);
             if (result != null && result.getDocuments() != null && !result.getDocuments().isEmpty()) {
-                return result.getDocuments().get(0);
+                return selectPreferredDocument(result.getDocuments(), sourceId);
             }
         } catch (Exception e) {
             log.warn("Failed to query hxpr for cin_sourceId={}, cin_id={} (will create new document): {}",
@@ -255,7 +262,11 @@ public class HxprService {
     }
 
     /**
-     * Finds multiple documents keyed by Alfresco node identifier.
+     * Finds multiple documents keyed by source-system node identifier.
+     *
+     * <p>When the supplied {@code sourceId} uses the Issue 20 {@code "type:rawId"}
+     * format, the query also matches the legacy raw-id form so pre-migration
+     * Alfresco documents remain visible during the transition window.</p>
      */
     public Map<String, HxprDocument> findByNodeIds(Collection<String> nodeIds, String sourceId) {
         List<String> sanitizedIds = nodeIds == null
@@ -276,10 +287,10 @@ public class HxprService {
 
             String hxql = "SELECT * FROM SysContent WHERE sys_primaryType = '" + SYS_FILE + "' AND " + idPredicate;
             if (sourceId != null && !sourceId.isBlank()) {
-                hxql += " AND cin_sourceId = '" + escapeHxql(sourceId) + "'";
+                hxql += " AND " + buildSourceIdPredicate(sourceId);
             }
 
-            HxprDocument.QueryResult result = query(hxql, sanitizedIds.size(), 0);
+            HxprDocument.QueryResult result = query(hxql, sanitizedIds.size() * 2, 0);
             if (result == null || result.getDocuments() == null) {
                 return Map.of();
             }
@@ -287,7 +298,11 @@ public class HxprService {
             Map<String, HxprDocument> documentsByNodeId = new LinkedHashMap<>();
             for (HxprDocument document : result.getDocuments()) {
                 if (document.getCinId() != null && !document.getCinId().isBlank()) {
-                    documentsByNodeId.put(document.getCinId(), document);
+                    documentsByNodeId.merge(
+                            document.getCinId(),
+                            document,
+                            (current, candidate) -> preferDocument(current, candidate, sourceId)
+                    );
                 }
             }
             return documentsByNodeId;
@@ -423,6 +438,67 @@ public class HxprService {
 
     private static String stripLeadingSlash(String path) {
         return (path != null && path.startsWith("/")) ? path.substring(1) : path;
+    }
+
+    private static String buildSourceIdPredicate(String sourceId) {
+        List<String> variants = sourceIdVariants(sourceId);
+        if (variants.size() == 1) {
+            return "cin_sourceId = '" + escapeHxql(variants.get(0)) + "'";
+        }
+
+        return variants.stream()
+                .map(variant -> "cin_sourceId = '" + escapeHxql(variant) + "'")
+                .collect(Collectors.joining(" OR ", "(", ")"));
+    }
+
+    private static List<String> sourceIdVariants(String sourceId) {
+        if (sourceId == null || sourceId.isBlank()) {
+            return List.of();
+        }
+
+        LinkedHashSet<String> variants = new LinkedHashSet<>();
+        variants.add(sourceId);
+
+        int separator = sourceId.indexOf(':');
+        if (separator > 0 && separator < sourceId.length() - 1) {
+            variants.add(sourceId.substring(separator + 1));
+        }
+
+        return new ArrayList<>(variants);
+    }
+
+    private static HxprDocument selectPreferredDocument(List<HxprDocument> documents, String sourceId) {
+        if (documents == null || documents.isEmpty()) {
+            return null;
+        }
+
+        HxprDocument preferred = documents.get(0);
+        for (int i = 1; i < documents.size(); i++) {
+            preferred = preferDocument(preferred, documents.get(i), sourceId);
+        }
+        return preferred;
+    }
+
+    private static HxprDocument preferDocument(HxprDocument current, HxprDocument candidate, String sourceId) {
+        if (current == null) {
+            return candidate;
+        }
+        if (candidate == null) {
+            return current;
+        }
+
+        if (sourceId == null || sourceId.isBlank()) {
+            return current;
+        }
+
+        boolean currentExact = sourceId.equals(current.getCinSourceId());
+        boolean candidateExact = sourceId.equals(candidate.getCinSourceId());
+
+        if (candidateExact && !currentExact) {
+            return candidate;
+        }
+
+        return current;
     }
 
     private static String escapeHxql(String value) {
