@@ -1,6 +1,5 @@
 package org.alfresco.contentlake.rag.service;
 
-import org.alfresco.contentlake.client.AlfrescoClient;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
@@ -37,13 +36,13 @@ class HybridSearchServiceTest {
     @Mock HxprService hxprService;
     @Mock EmbeddingService embeddingService;
     @Mock SecurityContextService securityContextService;
-    @Mock AlfrescoClient alfrescoClient;
     @Mock HybridSearchProperties properties;
 
     @InjectMocks HybridSearchService service;
 
     @BeforeEach
     void setUp() {
+        ReflectionTestUtils.setField(service, "repositoryId", "test-repo");
         ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
         ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
         ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
@@ -332,7 +331,6 @@ class HybridSearchServiceTest {
 
         @Test
         void buildPermissionFilter_includesEveryoneAndUser() {
-            when(alfrescoClient.getRepositoryId()).thenReturn("test-repo");
             HybridSearchService svc = spy(service);
             doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice");
 
@@ -344,19 +342,17 @@ class HybridSearchServiceTest {
 
         @Test
         void buildPermissionFilter_withGroups() {
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
             HybridSearchService svc = spy(service);
             doReturn(List.of("bob", "GROUP_EVERYONE", "GROUP_ENGINEERING"))
                     .when(svc).getUserAuthorities("bob");
 
             String filter = svc.buildPermissionFilter("bob", null);
 
-            assertThat(filter).contains("g:GROUP_ENGINEERING_#_repo");
+            assertThat(filter).contains("g:GROUP_ENGINEERING_#_test-repo");
         }
 
         @Test
         void buildPermissionFilter_withAdditionalFilter() {
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
             HybridSearchService svc = spy(service);
             doReturn(List.of("user")).when(svc).getUserAuthorities("user");
 
@@ -385,7 +381,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of());
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             HybridSearchService svc = spy(service);
             doReturn(List.of("user")).when(svc).getUserAuthorities(any());
@@ -410,7 +406,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1, 0.2));
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             Embedding emb = mock(Embedding.class);
             when(emb.getSysembedDocId()).thenReturn("doc-id-1");
@@ -453,7 +449,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1, 0.2));
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             Embedding emb = mock(Embedding.class);
             when(emb.getSysembedDocId()).thenReturn("doc-1");
@@ -490,7 +486,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of());
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             HybridSearchService svc = spy(service);
             doReturn(List.of("user")).when(svc).getUserAuthorities(any());
@@ -515,7 +511,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of());
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             HybridSearchService svc = spy(service);
             doReturn(List.of("user")).when(svc).getUserAuthorities(any());
@@ -540,7 +536,7 @@ class HybridSearchServiceTest {
             when(securityContextService.getCurrentUsername()).thenReturn("user");
             when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1));
             when(embeddingService.getModelName()).thenReturn("test-model");
-            when(alfrescoClient.getRepositoryId()).thenReturn("repo");
+
 
             Embedding emb1 = mock(Embedding.class);
             when(emb1.getSysembedDocId()).thenReturn("d1");

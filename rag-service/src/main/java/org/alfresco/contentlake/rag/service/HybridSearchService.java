@@ -2,7 +2,6 @@ package org.alfresco.contentlake.rag.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.alfresco.contentlake.client.AlfrescoClient;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
@@ -62,8 +61,10 @@ public class HybridSearchService {
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
     private final SecurityContextService securityContextService;
-    private final AlfrescoClient alfrescoClient;
     private final HybridSearchProperties properties;
+
+    @Value("${hxpr.repositoryId:default}")
+    private String repositoryId;
 
     @Value("${content.service.url}")
     private String alfrescoUrl;
@@ -527,7 +528,7 @@ public class HybridSearchService {
                 .distinct()
                 .toList();
 
-        String suffix = "_#_" + alfrescoClient.getRepositoryId();
+        String suffix = "_#_" + repositoryId;
 
         List<String> raclClauses = new ArrayList<>();
         raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");

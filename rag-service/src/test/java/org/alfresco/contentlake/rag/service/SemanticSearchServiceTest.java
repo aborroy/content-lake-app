@@ -1,6 +1,5 @@
 package org.alfresco.contentlake.rag.service;
 
-import org.alfresco.contentlake.client.AlfrescoClient;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
@@ -29,12 +28,12 @@ class SemanticSearchServiceTest {
     @Mock HxprService hxprService;
     @Mock EmbeddingService embeddingService;
     @Mock SecurityContextService securityContextService;
-    @Mock AlfrescoClient alfrescoClient;
 
     @InjectMocks SemanticSearchService service;
 
     @BeforeEach
     void setUp() {
+        ReflectionTestUtils.setField(service, "repositoryId", "test-repo");
         ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
         ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
         ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
@@ -47,7 +46,6 @@ class SemanticSearchServiceTest {
 
     @Test
     void buildPermissionFilter_adminUser_includesEveryoneAndUsername() {
-        when(alfrescoClient.getRepositoryId()).thenReturn("test-repo");
         SemanticSearchService svc = spy(service);
         doReturn(List.of("admin", "GROUP_EVERYONE")).when(svc).getUserAuthorities("admin");
 
@@ -63,7 +61,6 @@ class SemanticSearchServiceTest {
 
     @Test
     void buildPermissionFilter_userWithGroups_includesGroupRaclFormat() {
-        when(alfrescoClient.getRepositoryId()).thenReturn("test-repo");
         SemanticSearchService svc = spy(service);
         doReturn(List.of("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS"))
                 .when(svc).getUserAuthorities("alice");
@@ -78,7 +75,6 @@ class SemanticSearchServiceTest {
 
     @Test
     void buildPermissionFilter_withAdditionalFilter_combinesWithAnd() {
-        when(alfrescoClient.getRepositoryId()).thenReturn("test-repo");
         SemanticSearchService svc = spy(service);
         doReturn(List.of("alice")).when(svc).getUserAuthorities("alice");
 
@@ -137,7 +133,6 @@ class SemanticSearchServiceTest {
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
         when(embeddingService.getModelName()).thenReturn("test-model");
-        when(alfrescoClient.getRepositoryId()).thenReturn("repo");
         when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(null);
 
         SemanticSearchRequest request = SemanticSearchRequest.builder().query("test").build();
@@ -155,7 +150,6 @@ class SemanticSearchServiceTest {
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
         when(embeddingService.getModelName()).thenReturn("test-model");
-        when(alfrescoClient.getRepositoryId()).thenReturn("repo");
 
         Embedding highScore = mock(Embedding.class);
         when(highScore.getSysembedScore()).thenReturn(0.8d);

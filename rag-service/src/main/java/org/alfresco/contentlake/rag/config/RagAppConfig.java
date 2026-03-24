@@ -73,9 +73,8 @@ public class RagAppConfig {
     @Bean
     public HxprService hxprService(HxprDocumentApi documentApi,
                                    HxprQueryApi queryApi,
-                                   RestClient hxprRestClient,
-                                   HxprProperties props) {
-        return new HxprService(documentApi, queryApi, hxprRestClient, props.getRepositoryId());
+                                   RestClient hxprRestClient) {
+        return new HxprService(documentApi, queryApi, hxprRestClient);
     }
 
     // ----------------------------------------------------------------------

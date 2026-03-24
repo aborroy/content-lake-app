@@ -8,7 +8,6 @@ import org.alfresco.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
 import org.alfresco.contentlake.rag.model.SemanticSearchResponse.SearchHit;
 import org.alfresco.contentlake.rag.model.SemanticSearchResponse.SourceDocument;
 import org.alfresco.contentlake.security.SecurityContextService;
-import org.alfresco.contentlake.client.AlfrescoClient;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
@@ -53,7 +52,9 @@ public class SemanticSearchService {
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
     private final SecurityContextService securityContextService;
-    private final AlfrescoClient alfrescoClient;
+
+    @Value("${hxpr.repositoryId:default}")
+    private String repositoryId;
 
     @Value("${content.service.url}")
     private String alfrescoUrl;
@@ -384,6 +385,6 @@ public class SemanticSearchService {
     }
 
     private String buildSourceSystemSuffix() {
-        return "_#_" + alfrescoClient.getRepositoryId();
+        return "_#_" + repositoryId;
     }
 }

@@ -20,9 +20,10 @@
     <modules>
         <module>content-lake-repo-model</module>
         <module>content-lake-spi</module>
-        <module>content-lake-common</module>
-        <module>batch-ingester</module>
-        <module>live-ingester</module>
+        <module>content-lake-core</module>
+        <module>content-lake-source-alfresco</module>
+        <module>alfresco-batch-ingester</module>
+        <module>alfresco-live-ingester</module>
         <module>rag-service</module>
     </modules>
 

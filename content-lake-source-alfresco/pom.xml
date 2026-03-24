@@ -10,38 +10,36 @@
         <version>1.0.0-SNAPSHOT</version>
     </parent>
 
-    <artifactId>rag-service</artifactId>
-    <name>RAG Service</name>
-    <description>RAG (Retrieval-Augmented Generation) service for Alfresco Content Lake</description>
+    <artifactId>content-lake-source-alfresco</artifactId>
+    <name>Content Lake Source Alfresco</name>
+    <description>Alfresco-specific source adapter: AlfrescoClient, TransformClient, authentication, and scope resolver</description>
 
     <dependencies>
+        <!-- Core pipeline (source-agnostic) -->
         <dependency>
             <groupId>org.alfresco</groupId>
             <artifactId>content-lake-core</artifactId>
             <version>${project.version}</version>
         </dependency>
+
+        <!-- Alfresco Java SDK - REST API -->
         <dependency>
             <groupId>org.alfresco</groupId>
-            <artifactId>content-lake-spi</artifactId>
-            <version>${project.version}</version>
+            <artifactId>alfresco-acs-java-rest-api-spring-boot-starter</artifactId>
+            <version>${alfresco.sdk.version}</version>
         </dependency>
+
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-actuator</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-configuration-processor</artifactId>
-            <optional>true</optional>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.springframework.boot</groupId>
-                <artifactId>spring-boot-maven-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
+    <repositories>
+        <repository>
+            <id>alfresco-public</id>
+            <url>https://artifacts.alfresco.com/nexus/content/groups/public</url>
+        </repository>
+    </repositories>
 </project>
