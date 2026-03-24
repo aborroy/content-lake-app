@@ -22,6 +22,7 @@
         <module>content-lake-spi</module>
         <module>content-lake-core</module>
         <module>content-lake-source-alfresco</module>
+        <module>content-lake-source-nuxeo</module>
         <module>alfresco-batch-ingester</module>
         <module>alfresco-live-ingester</module>
         <module>rag-service</module>
