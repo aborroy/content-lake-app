@@ -1,12 +1,16 @@
 package org.alfresco.contentlake.service;
 
+import lombok.extern.slf4j.Slf4j;
 import org.alfresco.contentlake.spi.TextExtractor;
+import org.apache.tika.exception.TikaException;
 import org.apache.tika.metadata.Metadata;
 import org.apache.tika.parser.AutoDetectParser;
 import org.apache.tika.parser.ParseContext;
 import org.apache.tika.sax.BodyContentHandler;
 import org.springframework.core.io.Resource;
+import org.xml.sax.SAXException;
 
+import java.io.IOException;
 import java.io.InputStream;
 
 /**
@@ -16,6 +20,7 @@ import java.io.InputStream;
  * conversion endpoint. Plain-text documents are read directly by the shared sync
  * pipeline; binary formats are extracted locally through Tika.</p>
  */
+@Slf4j
 public class NuxeoTextExtractor implements TextExtractor {
 
     private final AutoDetectParser parser;
@@ -45,8 +50,11 @@ public class NuxeoTextExtractor implements TextExtractor {
             parser.parse(inputStream, handler, metadata, new ParseContext());
             String text = handler.toString();
             return text != null && !text.isBlank() ? text : null;
-        } catch (Exception e) {
-            throw new IllegalStateException("Failed to extract text with Apache Tika", e);
+        } catch (TikaException | SAXException e) {
+            log.warn("Tika could not parse document (mimeType={}); returning no text: {}", mimeType, e.getMessage());
+            return null;
+        } catch (IOException e) {
+            throw new IllegalStateException("I/O error reading document content for Tika extraction", e);
         }
     }
 }

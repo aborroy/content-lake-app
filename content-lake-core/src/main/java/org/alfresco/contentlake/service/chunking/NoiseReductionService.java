@@ -59,12 +59,22 @@ public class NoiseReductionService {
     // Whitespace normalization
     private static final Pattern HORIZONTAL_WHITESPACE = Pattern.compile("[ \\t\\x0B\\f\\r]+");
 
+    private final boolean enabled;
     private final boolean aggressive;
 
     /**
      * @param aggressive when true, applies more aggressive cleaning (removes more borderline content)
      */
     public NoiseReductionService(boolean aggressive) {
+        this(true, aggressive);
+    }
+
+    /**
+     * @param enabled    when false, {@link #clean(String)} is a no-op passthrough
+     * @param aggressive when true, applies more aggressive cleaning (removes more borderline content)
+     */
+    public NoiseReductionService(boolean enabled, boolean aggressive) {
+        this.enabled = enabled;
         this.aggressive = aggressive;
     }
 
@@ -77,6 +87,9 @@ public class NoiseReductionService {
     public String clean(String text) {
         if (text == null || text.isBlank()) {
             return "";
+        }
+        if (!enabled) {
+            return text;
         }
 
         String result = text;

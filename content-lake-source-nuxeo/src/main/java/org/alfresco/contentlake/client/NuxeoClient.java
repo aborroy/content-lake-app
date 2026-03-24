@@ -18,6 +18,7 @@ import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.util.UriUtils;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -47,7 +48,7 @@ public class NuxeoClient implements ContentSourceClient {
 
     public NuxeoClient(NuxeoProperties properties, NuxeoAuthentication authentication) {
         this(
-                buildApiBaseUrl(properties.getBaseUrl()),
+                properties.getBaseUrl(),
                 properties.getSourceId(),
                 properties.getBlobXpath(),
                 authentication
@@ -112,18 +113,19 @@ public class NuxeoClient implements ContentSourceClient {
             int pageIndex = currentSkip / pageSize;
             int startIndex = currentSkip % pageSize;
 
-            List<NuxeoDocument> page = fetchChildrenPage(containerId, pageIndex, pageSize);
-            if (page.isEmpty() || startIndex >= page.size()) {
+            NuxeoDocument.Page page = fetchChildrenPage(containerId, pageIndex, pageSize);
+            List<NuxeoDocument> entries = page.getEntries();
+            if (entries.isEmpty() || startIndex >= entries.size()) {
                 break;
             }
 
             int remaining = maxItems - results.size();
-            int endIndex = Math.min(page.size(), startIndex + remaining);
-            for (NuxeoDocument document : page.subList(startIndex, endIndex)) {
+            int endIndex = Math.min(entries.size(), startIndex + remaining);
+            for (NuxeoDocument document : entries.subList(startIndex, endIndex)) {
                 results.add(NuxeoSourceNodeAdapter.toSourceNode(document, sourceId, blobXpath));
             }
 
-            if (page.size() < pageSize) {
+            if (entries.size() < pageSize || !page.hasMore()) {
                 break;
             }
             currentSkip = (pageIndex + 1) * pageSize;
@@ -134,14 +136,33 @@ public class NuxeoClient implements ContentSourceClient {
 
     @Override
     public Resource downloadContent(String nodeId, String fileName) {
-        byte[] content = getContent(nodeId);
         String suffix = sanitizeTempSuffix(fileName);
+        Path tempFile = null;
         try {
-            Path tempFile = Files.createTempFile("nuxeo-", suffix);
-            Files.write(tempFile, content);
+            tempFile = Files.createTempFile("nuxeo-", suffix);
+            Path targetFile = tempFile;
+            restClient.get()
+                    .uri(blobUri(nodeId))
+                    .exchange((request, response) -> {
+                        if (response.getStatusCode().isError()) {
+                            throw new IllegalStateException("Failed to download Nuxeo content for " + nodeId
+                                    + " (HTTP " + response.getStatusCode().value() + ")");
+                        }
+                        try (InputStream stream = response.getBody()) {
+                            if (stream == null) {
+                                throw new IllegalStateException("Received empty response body for Nuxeo content " + nodeId);
+                            }
+                            Files.copy(stream, targetFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                        }
+                        return null;
+                    });
             return new FileSystemResource(tempFile);
         } catch (IOException e) {
+            deleteQuietly(tempFile);
             throw new IllegalStateException("Failed to write Nuxeo content to temp file for " + nodeId, e);
+        } catch (RuntimeException e) {
+            deleteQuietly(tempFile);
+            throw e;
         }
     }
 
@@ -159,6 +180,11 @@ public class NuxeoClient implements ContentSourceClient {
     }
 
     public List<SourceNode> searchByNxql(String nxql, int pageIndex, int pageSize) {
+        NuxeoDocument.Page page = searchPageByNxql(nxql, pageIndex, pageSize);
+        return page.getEntries().stream().map(this::toSourceNode).toList();
+    }
+
+    public NuxeoDocument.Page searchPageByNxql(String nxql, int pageIndex, int pageSize) {
         try {
             NuxeoDocument.Page response = restClient.get()
                     .uri(uriBuilder -> uriBuilder
@@ -171,12 +197,7 @@ public class NuxeoClient implements ContentSourceClient {
                     .accept(MediaType.APPLICATION_JSON)
                     .retrieve()
                     .body(NuxeoDocument.Page.class);
-            if (response == null || response.getEntries() == null) {
-                return List.of();
-            }
-            return response.getEntries().stream()
-                    .map(this::toSourceNode)
-                    .toList();
+            return response != null ? response : new NuxeoDocument.Page();
         } catch (RestClientResponseException e) {
             if (isUnsupportedSearchStatus(e.getStatusCode().value())) {
                 throw new UnsupportedOperationException("Nuxeo NXQL search endpoint is not available", e);
@@ -185,7 +206,7 @@ public class NuxeoClient implements ContentSourceClient {
         }
     }
 
-    private List<NuxeoDocument> fetchChildrenPage(String containerId, int pageIndex, int pageSize) {
+    private NuxeoDocument.Page fetchChildrenPage(String containerId, int pageIndex, int pageSize) {
         try {
             NuxeoDocument.Page response = restClient.get()
                     .uri(uriBuilder -> uriBuilder
@@ -197,13 +218,10 @@ public class NuxeoClient implements ContentSourceClient {
                     .accept(MediaType.APPLICATION_JSON)
                     .retrieve()
                     .body(NuxeoDocument.Page.class);
-            if (response == null || response.getEntries() == null) {
-                return List.of();
-            }
-            return response.getEntries();
+            return response != null ? response : new NuxeoDocument.Page();
         } catch (RestClientResponseException e) {
             if (e.getStatusCode().value() == 404) {
-                return List.of();
+                return new NuxeoDocument.Page();
             }
             throw new IllegalStateException("Failed to list Nuxeo children for " + containerId, e);
         }
@@ -255,6 +273,17 @@ public class NuxeoClient implements ContentSourceClient {
         String cleaned = (fileName == null || fileName.isBlank()) ? "content.bin" : fileName;
         cleaned = cleaned.replaceAll("[^A-Za-z0-9._-]", "_");
         return cleaned.startsWith(".") ? cleaned : "-" + cleaned;
+    }
+
+    private static void deleteQuietly(@Nullable Path path) {
+        if (path == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException ignored) {
+            // Best-effort cleanup for failed temp-file downloads.
+        }
     }
 
     private static String trimLeadingSlash(String value) {

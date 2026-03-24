@@ -10,7 +10,6 @@ import org.alfresco.contentlake.config.NuxeoProperties;
 import org.alfresco.contentlake.nuxeo.batch.service.NuxeoDiscoveryService;
 import org.alfresco.contentlake.service.EmbeddingService;
 import org.alfresco.contentlake.service.NodeSyncService;
-import org.alfresco.contentlake.service.NuxeoScopeResolver;
 import org.alfresco.contentlake.service.NuxeoTextExtractor;
 import org.alfresco.contentlake.service.chunking.NoiseReductionService;
 import org.alfresco.contentlake.service.chunking.SimpleChunkingService;
@@ -85,22 +84,14 @@ public class AppConfig {
     }
 
     @Bean
-    public NuxeoScopeResolver nuxeoScopeResolver(NuxeoProperties props) {
-        return new NuxeoScopeResolver(
-                props.getScope().getIncludedRoots(),
-                props.getScope().getIncludedTypes(),
-                props.getScope().getExcludedLifecycleStates()
-        );
-    }
-
-    @Bean
     public EmbeddingService embeddingService(EmbeddingModel embeddingModel, NuxeoBatchProperties props) {
         return new EmbeddingService(embeddingModel, props.getEmbedding().getModelName());
     }
 
     @Bean
     public NoiseReductionService noiseReductionService(NuxeoBatchProperties props) {
-        return new NoiseReductionService(props.getEmbedding().getNoiseReduction().isAggressive());
+        NuxeoBatchProperties.NoiseReduction cfg = props.getEmbedding().getNoiseReduction();
+        return new NoiseReductionService(cfg.isEnabled(), cfg.isAggressive());
     }
 
     @Bean

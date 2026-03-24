@@ -8,21 +8,32 @@ import org.alfresco.contentlake.spi.SourceNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 
 @Slf4j
 @Service
 public class NuxeoBatchIngestionService {
 
+    private static final int MAX_RETAINED_JOBS = 100;
+
     private final NuxeoDiscoveryService discoveryService;
     private final NodeSyncService nodeSyncService;
     private final Executor batchExecutor;
-    private final Map<String, IngestionJob> jobsById = new ConcurrentHashMap<>();
+    private final Map<String, IngestionJob> jobsById = Collections.synchronizedMap(
+            new LinkedHashMap<>(MAX_RETAINED_JOBS, 0.75f, false) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, IngestionJob> eldest) {
+                    return size() > MAX_RETAINED_JOBS;
+                }
+            }
+    );
 
     public NuxeoBatchIngestionService(NuxeoDiscoveryService discoveryService,
                                       NodeSyncService nodeSyncService,
@@ -34,13 +45,13 @@ public class NuxeoBatchIngestionService {
 
     public IngestionJob startConfiguredSync() {
         IngestionJob job = createJob("configured sync");
-        CompletableFuture.runAsync(() -> runSync(job, discoveryService.discoverFromConfig()), batchExecutor);
+        CompletableFuture.runAsync(() -> runJob(job, "configured sync", discoveryService::discoverFromConfig), batchExecutor);
         return job;
     }
 
     public IngestionJob startBatchSync(NuxeoSyncRequest request) {
         IngestionJob job = createJob("batch sync");
-        CompletableFuture.runAsync(() -> runSync(job, discoveryService.discover(request)), batchExecutor);
+        CompletableFuture.runAsync(() -> runJob(job, "batch sync", () -> discoveryService.discover(request)), batchExecutor);
         return job;
     }
 
@@ -49,7 +60,9 @@ public class NuxeoBatchIngestionService {
     }
 
     public Map<String, IngestionJob> getAllJobs() {
-        return jobsById;
+        synchronized (jobsById) {
+            return Collections.unmodifiableMap(new LinkedHashMap<>(jobsById));
+        }
     }
 
     private IngestionJob createJob(String label) {
@@ -60,8 +73,9 @@ public class NuxeoBatchIngestionService {
         return job;
     }
 
-    private void runSync(IngestionJob job, List<SourceNode> nodes) {
+    private void runJob(IngestionJob job, String label, Supplier<List<SourceNode>> discovery) {
         try {
+            List<SourceNode> nodes = discovery.get();
             nodes.forEach(node -> syncNode(node, job));
             job.complete();
             log.info("Nuxeo sync job {} completed. Discovered: {}, Synced: {}, Skipped: {}, Failed: {}",
@@ -72,7 +86,7 @@ public class NuxeoBatchIngestionService {
                     job.getFailedCountValue());
         } catch (Exception e) {
             job.fail();
-            log.error("Nuxeo sync job {} failed", job.getJobId(), e);
+            log.error("Nuxeo {} job {} failed", label, job.getJobId(), e);
         }
     }
 

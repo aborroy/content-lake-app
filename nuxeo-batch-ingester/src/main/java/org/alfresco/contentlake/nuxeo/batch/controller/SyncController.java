@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.alfresco.contentlake.nuxeo.batch.model.IngestionJob;
 import org.alfresco.contentlake.nuxeo.batch.model.NuxeoSyncRequest;
 import org.alfresco.contentlake.nuxeo.batch.service.NuxeoBatchIngestionService;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -31,8 +32,9 @@ public class SyncController {
     }
 
     @GetMapping("/status/{jobId}")
-    public IngestionJob getJobStatus(@PathVariable String jobId) {
-        return batchIngestionService.getJob(jobId);
+    public ResponseEntity<IngestionJob> getJobStatus(@PathVariable String jobId) {
+        IngestionJob job = batchIngestionService.getJob(jobId);
+        return job != null ? ResponseEntity.ok(job) : ResponseEntity.notFound().build();
     }
 
     @GetMapping("/status")

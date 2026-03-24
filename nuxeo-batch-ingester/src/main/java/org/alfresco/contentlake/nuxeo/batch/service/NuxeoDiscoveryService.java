@@ -2,8 +2,10 @@ package org.alfresco.contentlake.nuxeo.batch.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.alfresco.contentlake.adapter.NuxeoSourceNodeAdapter;
 import org.alfresco.contentlake.client.NuxeoClient;
 import org.alfresco.contentlake.config.NuxeoProperties;
+import org.alfresco.contentlake.model.NuxeoDocument;
 import org.alfresco.contentlake.nuxeo.batch.model.NuxeoSyncRequest;
 import org.alfresco.contentlake.service.NuxeoScopeResolver;
 import org.alfresco.contentlake.spi.SourceNode;
@@ -50,19 +52,22 @@ public class NuxeoDiscoveryService {
     private List<SourceNode> discoverWithNxql(DiscoverySettings settings) {
         NuxeoScopeResolver scopeResolver = settings.scopeResolver();
         String query = buildNxqlQuery(settings);
+        String sourceId = props.getSourceId();
+        String blobXpath = props.getBlobXpath();
         int pageIndex = 0;
         List<SourceNode> discovered = new ArrayList<>();
 
         while (true) {
-            List<SourceNode> page = nuxeoClient.searchByNxql(query, pageIndex, settings.pageSize());
-            if (page.isEmpty()) {
+            NuxeoDocument.Page page = nuxeoClient.searchPageByNxql(query, pageIndex, settings.pageSize());
+            if (page.getEntries().isEmpty()) {
                 break;
             }
-            page.stream()
+            page.getEntries().stream()
+                    .map(doc -> NuxeoSourceNodeAdapter.toSourceNode(doc, sourceId, blobXpath))
                     .filter(scopeResolver::isInScope)
                     .forEach(discovered::add);
 
-            if (page.size() < settings.pageSize()) {
+            if (page.getEntries().size() < settings.pageSize() || !page.hasMore()) {
                 break;
             }
             pageIndex++;
@@ -156,20 +161,26 @@ public class NuxeoDiscoveryService {
                 .map(root -> "ecm:path STARTSWITH '" + escapeNxql(root) + "'")
                 .collect(java.util.stream.Collectors.joining(" OR ", "(", ")"));
 
-        String typeClause = settings.includedTypes().stream()
-                .map(type -> "'" + escapeNxql(type) + "'")
-                .collect(java.util.stream.Collectors.joining(", "));
+        StringBuilder query = new StringBuilder("SELECT * FROM Document WHERE ")
+                .append(pathClause);
 
-        String lifecycleClause = settings.excludedLifecycleStates().stream()
-                .map(state -> "'" + escapeNxql(state) + "'")
-                .collect(java.util.stream.Collectors.joining(", "));
+        if (!settings.includedTypes().isEmpty()) {
+            String typeClause = settings.includedTypes().stream()
+                    .map(type -> "'" + escapeNxql(type) + "'")
+                    .collect(java.util.stream.Collectors.joining(", "));
+            query.append(" AND ecm:primaryType IN (").append(typeClause).append(")");
+        }
 
-        return "SELECT * FROM Document WHERE "
-                + pathClause
-                + " AND ecm:primaryType IN (" + typeClause + ")"
-                + " AND ecm:currentLifeCycleState NOT IN (" + lifecycleClause + ")"
-                + " AND ecm:isProxy = 0"
-                + " AND ecm:isCheckedInVersion = 0";
+        if (!settings.excludedLifecycleStates().isEmpty()) {
+            String lifecycleClause = settings.excludedLifecycleStates().stream()
+                    .map(state -> "'" + escapeNxql(state) + "'")
+                    .collect(java.util.stream.Collectors.joining(", "));
+            query.append(" AND ecm:currentLifeCycleState NOT IN (").append(lifecycleClause).append(")");
+        }
+
+        return query.append(" AND ecm:isProxy = 0")
+                .append(" AND ecm:isCheckedInVersion = 0")
+                .toString();
     }
 
     private static List<String> firstNonEmpty(List<String> preferred, List<String> fallback) {

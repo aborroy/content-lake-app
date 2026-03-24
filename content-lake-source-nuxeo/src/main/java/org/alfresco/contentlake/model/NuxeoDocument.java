@@ -3,6 +3,7 @@ package org.alfresco.contentlake.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
@@ -13,6 +14,7 @@ import java.util.Map;
 /**
  * Minimal representation of the Nuxeo REST API document payload used by the adapter.
  */
+@Slf4j
 @Data
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class NuxeoDocument {
@@ -60,6 +62,7 @@ public class NuxeoDocument {
         try {
             return OffsetDateTime.parse(modifiedAt);
         } catch (DateTimeParseException e) {
+            log.warn("Could not parse dc:modified value '{}' for document {}; staleness check will be skipped", modifiedAt, uid);
             return null;
         }
     }
@@ -121,6 +124,12 @@ public class NuxeoDocument {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Page {
         private List<NuxeoDocument> entries = List.of();
-        private boolean isNextPageAvailable;
+
+        @JsonProperty("isNextPageAvailable")
+        private boolean nextPageAvailable;
+
+        public boolean hasMore() {
+            return nextPageAvailable;
+        }
     }
 }

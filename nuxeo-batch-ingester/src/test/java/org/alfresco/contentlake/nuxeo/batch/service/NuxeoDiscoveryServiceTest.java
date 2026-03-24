@@ -2,6 +2,7 @@ package org.alfresco.contentlake.nuxeo.batch.service;
 
 import org.alfresco.contentlake.client.NuxeoClient;
 import org.alfresco.contentlake.config.NuxeoProperties;
+import org.alfresco.contentlake.model.NuxeoDocument;
 import org.alfresco.contentlake.nuxeo.batch.model.NuxeoSyncRequest;
 import org.alfresco.contentlake.spi.SourceNode;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +13,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,18 +44,21 @@ class NuxeoDiscoveryServiceTest {
 
     @Test
     void discover_usesNxqlAndFiltersOutOfScopeNodes() {
-        when(nuxeoClient.searchByNxql(anyString(), anyInt(), anyInt()))
-                .thenReturn(List.of(
-                        fileNode("doc-1", "/default-domain/workspaces/finance/doc-1.pdf", "File", "project"),
-                        fileNode("doc-2", "/default-domain/workspaces/finance/doc-2.pdf", "Picture", "project")
-                ))
-                .thenReturn(List.of());
+        NuxeoDocument.Page firstPage = pageOf(true,
+                nuxeoDoc("doc-1", "/default-domain/workspaces/finance/doc-1.pdf", "File", "project"),
+                nuxeoDoc("doc-2", "/default-domain/workspaces/finance/doc-2.pdf", "Picture", "project")
+        );
+        NuxeoDocument.Page emptyPage = pageOf(false);
+
+        when(nuxeoClient.searchPageByNxql(anyString(), anyInt(), anyInt()))
+                .thenReturn(firstPage)
+                .thenReturn(emptyPage);
 
         List<SourceNode> discovered = service.discoverFromConfig();
 
         assertThat(discovered).extracting(SourceNode::nodeId).containsExactly("doc-1");
-        verify(nuxeoClient).searchByNxql(anyString(), org.mockito.ArgumentMatchers.eq(0), org.mockito.ArgumentMatchers.eq(2));
-        verify(nuxeoClient).searchByNxql(anyString(), org.mockito.ArgumentMatchers.eq(1), org.mockito.ArgumentMatchers.eq(2));
+        verify(nuxeoClient).searchPageByNxql(anyString(), org.mockito.ArgumentMatchers.eq(0), org.mockito.ArgumentMatchers.eq(2));
+        verify(nuxeoClient).searchPageByNxql(anyString(), org.mockito.ArgumentMatchers.eq(1), org.mockito.ArgumentMatchers.eq(2));
     }
 
     @Test
@@ -61,8 +66,8 @@ class NuxeoDiscoveryServiceTest {
         SourceNode root = folderNode("folder-1", "/default-domain/workspaces");
         SourceNode child = fileNode("doc-3", "/default-domain/workspaces/finance/doc-3.pdf", "File", "project");
 
-        when(nuxeoClient.searchByNxql(anyString(), anyInt(), anyInt()))
-                .thenThrow(new UnsupportedOperationException("not supported"));
+        when(nuxeoClient.searchPageByNxql(anyString(), anyInt(), anyInt()))
+                .thenThrow(new UnsupportedOperationException("not supported"));  // triggers CHILDREN fallback
         when(nuxeoClient.getNodeByPath("/default-domain/workspaces")).thenReturn(root);
         when(nuxeoClient.getChildren("folder-1", 0, 2)).thenReturn(List.of(child));
 
@@ -83,7 +88,7 @@ class NuxeoDiscoveryServiceTest {
                 OffsetDateTime.parse("2026-03-24T10:00:00Z"),
                 false,
                 Set.of(),
-                java.util.Map.of(
+                Map.of(
                         "nuxeo_path", fullPath,
                         "nuxeo_documentType", type,
                         "nuxeo_lifecycleState", lifecycleState
@@ -102,11 +107,32 @@ class NuxeoDiscoveryServiceTest {
                 OffsetDateTime.parse("2026-03-24T10:00:00Z"),
                 true,
                 Set.of(),
-                java.util.Map.of(
+                Map.of(
                         "nuxeo_path", fullPath,
                         "nuxeo_documentType", "Workspace",
                         "nuxeo_lifecycleState", "project"
                 )
         );
+    }
+
+    private static NuxeoDocument nuxeoDoc(String uid, String path, String type, String lifecycleState) {
+        NuxeoDocument doc = new NuxeoDocument();
+        doc.setUid(uid);
+        doc.setPath(path);
+        doc.setType(type);
+        doc.setState(lifecycleState);
+        doc.setTitle(uid);
+        doc.setProperties(Map.of(
+                "dc:modified", "2026-03-24T10:00:00Z",
+                "file:content", Map.of("mime-type", "application/pdf")
+        ));
+        return doc;
+    }
+
+    private static NuxeoDocument.Page pageOf(boolean hasMore, NuxeoDocument... docs) {
+        NuxeoDocument.Page page = new NuxeoDocument.Page();
+        page.setEntries(List.of(docs));
+        page.setNextPageAvailable(hasMore);  // Lombok setter for field nextPageAvailable
+        return page;
     }
 }

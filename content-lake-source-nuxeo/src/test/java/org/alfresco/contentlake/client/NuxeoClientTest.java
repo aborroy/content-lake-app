@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class NuxeoClientTest {
 
@@ -95,6 +96,7 @@ class NuxeoClientTest {
             if ("currentPageIndex=0&pageSize=2".equals(query)) {
                 writeJson(exchange, """
                         {
+                          "isNextPageAvailable": true,
                           "entries": [
                             { "uid": "doc-1", "path": "/default-domain/workspaces/ws/doc-1", "type": "File", "title": "Doc 1", "state": "project", "properties": { "dc:modified": "2026-03-24T10:00:00Z", "file:content": { "mime-type": "application/pdf" } } },
                             { "uid": "doc-2", "path": "/default-domain/workspaces/ws/doc-2", "type": "File", "title": "Doc 2", "state": "project", "properties": { "dc:modified": "2026-03-24T10:01:00Z", "file:content": { "mime-type": "application/pdf" } } }
@@ -227,6 +229,19 @@ class NuxeoClientTest {
                 .containsOnly("/nuxeo/api/v1/id/doc-123/@blob/files:files/0/file");
     }
 
+    @Test
+    void downloadContent_throwsOnHttpError() throws IOException {
+        server.createContext("/nuxeo/api/v1/id/doc-404/@blob/file:content", exchange ->
+                writeResponse(exchange, 404, "missing".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        server.start();
+
+        NuxeoClient client = client("file:content");
+
+        assertThatThrownBy(() -> client.downloadContent("doc-404", "missing.bin"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("HTTP 404");
+    }
+
     private NuxeoClient client(String blobXpath) {
         return new NuxeoClient(
                 "http://localhost:" + server.getAddress().getPort() + "/nuxeo",
@@ -241,8 +256,12 @@ class NuxeoClientTest {
     }
 
     private static void writeBytes(HttpExchange exchange, byte[] body, String contentType) throws IOException {
+        writeResponse(exchange, 200, body, contentType);
+    }
+
+    private static void writeResponse(HttpExchange exchange, int status, byte[] body, String contentType) throws IOException {
         exchange.getResponseHeaders().set("Content-Type", contentType);
-        exchange.sendResponseHeaders(200, body.length);
+        exchange.sendResponseHeaders(status, body.length);
         try (OutputStream outputStream = exchange.getResponseBody()) {
             outputStream.write(body);
         }
