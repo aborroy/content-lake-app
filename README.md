@@ -15,6 +15,7 @@
 
 - [alfresco-content-lake-ui](https://github.com/aborroy/alfresco-content-lake-ui) - ACA-based frontend for semantic search and RAG over Content Lake.
 - [alfresco-content-lake-deploy](https://github.com/aborroy/alfresco-content-lake-deploy) - Docker Compose deployment for Alfresco, hxpr, Content Lake services, and the UI.
+- [nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) - Companion project that builds and runs the local Nuxeo server. Required when using `compose.nuxeo.yaml` in this repo.
 
 ## Overview
 
@@ -234,7 +235,23 @@ export EMBEDDING_CHUNK_OVERLAP=120
 
 ## Nuxeo Full Backfill
 
-For local Nuxeo-only ingestion development, start the dedicated stack:
+`compose.nuxeo.yaml` starts only the `nuxeo-batch-ingester`.  The Nuxeo
+server itself is provided by the
+[nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) companion
+project, which must be running before you start this stack.
+
+**Step 1 — start Nuxeo** (in a separate terminal, from the sibling
+`nuxeo-deployment/` directory):
+
+```bash
+git clone https://github.com/aborroy/nuxeo-deployment.git ../nuxeo-deployment
+cd ../nuxeo-deployment
+docker compose up --build
+```
+
+Nuxeo will be available at `http://localhost:8081/nuxeo` once healthy.
+
+**Step 2 — start the batch ingester** (from this directory):
 
 ```bash
 docker compose -f compose.nuxeo.yaml up --build
@@ -242,8 +259,8 @@ docker compose -f compose.nuxeo.yaml up --build
 
 This starts:
 
-- `nuxeo:latest` on `http://localhost:8081/nuxeo`
-- `nuxeo-batch-ingester` on `http://localhost:9093`
+- `nuxeo-batch-ingester` on `http://localhost:9093`, pointing at the
+  `nuxeo-deployment` instance on `http://host.docker.internal:8081/nuxeo`
 
 Defaults:
 

@@ -1,44 +1,24 @@
+# The Nuxeo server and its PostgreSQL database are no longer owned here.
+# Use the nuxeo-deployment companion project to provide a local Nuxeo instance:
+#
+#   git clone https://github.com/aborroy/nuxeo-deployment.git ../nuxeo-deployment
+#   cd ../nuxeo-deployment && docker compose up --build
+#
+# The image built there (nuxeo-deployment:nuxeo-local) must be present in the
+# local Docker daemon before running this compose file.
+# See nuxeo-deployment/README.md for the full build and run contract.
+
 services:
-  nuxeo-db:
-    image: postgres:12
-    environment:
-      POSTGRES_PASSWORD: nuxeo
-      POSTGRES_USER: nuxeo
-      POSTGRES_DB: nuxeo
-    volumes:
-      - nuxeo-db-data:/var/lib/postgresql/data
-
-  nuxeo:
-    image: nuxeo:latest
-    depends_on:
-      - nuxeo-db
-    environment:
-      NUXEO_DB_NAME: nuxeo
-      NUXEO_DB_USER: nuxeo
-      NUXEO_DB_PWD: nuxeo
-      NUXEO_DB_HOST: nuxeo-db
-      NUXEO_DB_PORT: 5432
-      NUXEO_DB_TYPE: postgresql
-      NUXEO_PACKAGES: "nuxeo-web-ui"
-      NUXEO_DEV: "true"
-    ports:
-      - "8081:8080"
-    volumes:
-      - nuxeo-data:/var/lib/nuxeo
-      - nuxeo-config:/etc/nuxeo
-
   nuxeo-batch-ingester:
     build:
       context: .
       dockerfile: nuxeo-batch-ingester/Dockerfile
-    depends_on:
-      - nuxeo
     ports:
       - "9093:9093"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      NUXEO_URL: http://nuxeo:8080/nuxeo
+      NUXEO_URL: http://host.docker.internal:8081/nuxeo
       NUXEO_USERNAME: ${NUXEO_USERNAME:-Administrator}
       NUXEO_PASSWORD: ${NUXEO_PASSWORD:-Administrator}
       NUXEO_SOURCE_ID: ${NUXEO_SOURCE_ID:-local}
@@ -53,7 +33,3 @@ services:
       MODEL_RUNNER_URL: ${MODEL_RUNNER_URL:-http://host.docker.internal:12434}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-ai/mxbai-embed-large}
 
-volumes:
-  nuxeo-db-data:
-  nuxeo-data:
-  nuxeo-config:
