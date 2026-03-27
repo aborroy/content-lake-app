@@ -31,7 +31,8 @@ public final class NuxeoSourceNodeAdapter {
     public static SourceNode toSourceNode(NuxeoDocument document,
                                           String sourceId,
                                           String blobXpath,
-                                          Set<String> readPrincipals) {
+                                          Set<String> readPrincipals,
+                                          Set<String> denyPrincipals) {
         boolean folder = isContainerType(document.getType());
         String fullPath = document.getPath();
         String nodePath = folder ? fullPath : document.getParentPath();
@@ -61,6 +62,7 @@ public final class NuxeoSourceNodeAdapter {
                 document.getModifiedAt(),
                 folder,
                 new LinkedHashSet<>(readPrincipals),
+                new LinkedHashSet<>(denyPrincipals),
                 props
         );
     }

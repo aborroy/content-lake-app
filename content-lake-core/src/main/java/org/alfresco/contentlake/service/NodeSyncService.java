@@ -260,11 +260,14 @@ public class NodeSyncService {
         }
 
         String sourceId = node.sourceId();
-        List<String> readerList = new ArrayList<>(node.readPrincipals());
+        List<String> readerList = toSortedPrincipals(node.readPrincipals());
+        List<String> denyList = toSortedPrincipals(node.denyPrincipals());
         List<ACE> sysAcl = buildSysAcl(readerList, sourceId);
 
         HxprDocument update = new HxprDocument();
         update.setSysAcl(sysAcl);
+        update.setCinRead(readerList);
+        update.setCinDeny(denyList);
         documentApi.updateById(existing.getSysId(), update);
 
         log.info("Updated ACL for Content Lake document {} (node {})", existing.getSysId(), node.nodeId());
@@ -342,7 +345,10 @@ public class NodeSyncService {
         doc.setCinSourceId(formatSourceId(node));
         doc.setCinPaths(buildCinPaths(node));
 
-        List<String> readerList = new ArrayList<>(node.readPrincipals());
+        List<String> readerList = toSortedPrincipals(node.readPrincipals());
+        List<String> denyList = toSortedPrincipals(node.denyPrincipals());
+        doc.setCinRead(readerList);
+        doc.setCinDeny(denyList);
         doc.setSysAcl(buildSysAcl(readerList, node.sourceId()));
 
         Map<String, Object> props = buildIngestProperties(node);
@@ -373,6 +379,18 @@ public class NodeSyncService {
             }
         }
         return acl;
+    }
+
+    private List<String> toSortedPrincipals(Set<String> principals) {
+        if (principals == null || principals.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return principals.stream()
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(s -> !s.isBlank())
+                .sorted()
+                .toList();
     }
 
     private ACE buildUserAce(String userId) {

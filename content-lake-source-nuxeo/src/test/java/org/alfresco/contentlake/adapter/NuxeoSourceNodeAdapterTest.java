@@ -28,7 +28,8 @@ class NuxeoSourceNodeAdapterTest {
                 document,
                 "nuxeo-dev",
                 "file:content",
-                Set.of("Administrator", "GROUP_members")
+                Set.of("Administrator", "GROUP_members"),
+                Set.of("GROUP_archived")
         );
 
         assertThat(node.nodeId()).isEqualTo("doc-123");
@@ -39,6 +40,7 @@ class NuxeoSourceNodeAdapterTest {
         assertThat(node.mimeType()).isEqualTo("application/pdf");
         assertThat(node.folder()).isFalse();
         assertThat(node.readPrincipals()).containsExactlyInAnyOrder("Administrator", "GROUP_members");
+        assertThat(node.denyPrincipals()).containsExactly("GROUP_archived");
         assertThat(node.sourceProperties())
                 .containsEntry("source_nodeId", "doc-123")
                 .containsEntry("source_type", "nuxeo")
@@ -62,7 +64,8 @@ class NuxeoSourceNodeAdapterTest {
                 document,
                 "nuxeo-dev",
                 "file:content",
-                Set.of("GROUP_members")
+                Set.of("GROUP_members"),
+                Set.of()
         );
 
         assertThat(node.folder()).isTrue();

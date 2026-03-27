@@ -43,6 +43,7 @@ public final class AlfrescoSourceNodeAdapter {
                 node.getModifiedAt(),
                 Boolean.TRUE.equals(node.isIsFolder()),
                 readPrincipals,
+                Set.of(),
                 buildSourceProperties(node, sourceId)
         );
     }

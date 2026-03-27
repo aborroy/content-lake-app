@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -45,6 +46,9 @@ class HybridSearchServiceTest {
         ReflectionTestUtils.setField(service, "repositoryId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
+        ReflectionTestUtils.setField(service, "nuxeoUrl", "http://localhost:8081/nuxeo");
+        ReflectionTestUtils.setField(service, "nuxeoUsername", "Administrator");
+        ReflectionTestUtils.setField(service, "nuxeoPassword", "Administrator");
         ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
         ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
         ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
@@ -334,7 +338,7 @@ class HybridSearchServiceTest {
         @Test
         void buildPermissionFilter_includesEveryoneAndUser() {
             HybridSearchService svc = spy(service);
-            doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice");
+            doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice", "test-repo");
 
             String filter = svc.buildPermissionFilter("alice", null);
 
@@ -346,7 +350,7 @@ class HybridSearchServiceTest {
         void buildPermissionFilter_withGroups() {
             HybridSearchService svc = spy(service);
             doReturn(List.of("bob", "GROUP_EVERYONE", "GROUP_ENGINEERING"))
-                    .when(svc).getUserAuthorities("bob");
+                    .when(svc).getUserAuthorities("bob", "test-repo");
 
             String filter = svc.buildPermissionFilter("bob", null);
 
@@ -356,7 +360,7 @@ class HybridSearchServiceTest {
         @Test
         void buildPermissionFilter_withAdditionalFilter() {
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user");
+            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "my-repo");
 
             String filter = svc.buildPermissionFilter("user", "cin_sourceId = 'my-repo'");
 
@@ -367,12 +371,26 @@ class HybridSearchServiceTest {
         @Test
         void buildPermissionFilter_withSourceFilter_usesFilteredSourceId() {
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user");
+            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
 
             String filter = svc.buildPermissionFilter("user", "cin_sourceId = 'nuxeo:nuxeo-demo'");
 
             assertThat(filter).contains("sys_racl = 'user_#_nuxeo-demo'");
             assertThat(filter).doesNotContain("user_#_test-repo");
+        }
+
+        @Test
+        void buildPermissionFilter_keepsGroupsScopedToTheirSource() {
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
+            doReturn(List.of("user", "GROUP_ACCOUNTING")).when(svc).getUserAuthorities("user", "test-repo");
+            doReturn(List.of("user", "GROUP_MEMBERS")).when(svc).getUserAuthorities("user", "nuxeo-demo");
+
+            String filter = svc.buildPermissionFilter("user", null);
+
+            assertThat(filter).contains("g:GROUP_ACCOUNTING_#_test-repo");
+            assertThat(filter).contains("g:GROUP_MEMBERS_#_nuxeo-demo");
+            assertThat(filter).doesNotContain("g:GROUP_MEMBERS_#_test-repo");
         }
     }
 
@@ -397,7 +415,7 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -435,7 +453,7 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -477,7 +495,7 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -502,7 +520,7 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             HybridSearchRequest request = HybridSearchRequest.builder()
@@ -527,7 +545,7 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             HybridSearchRequest request = HybridSearchRequest.builder()
@@ -572,7 +590,7 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vr);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
 
             // Set minScore high enough to filter the second result

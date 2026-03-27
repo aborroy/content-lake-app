@@ -254,19 +254,43 @@ public class NuxeoClient implements ContentSourceClient {
     }
 
     public SourceNode toSourceNode(NuxeoDocument document) {
+        PermissionSnapshot permissions = extractPermissionSnapshot(document);
         return NuxeoSourceNodeAdapter.toSourceNode(
                 document,
                 sourceId,
                 blobXpath,
-                extractReadPrincipals(document)
+                permissions.readers(),
+                permissions.denies()
         );
     }
 
-    private Set<String> extractReadPrincipals(NuxeoDocument document) {
+    private PermissionSnapshot extractPermissionSnapshot(NuxeoDocument document) {
+        List<NormalizedAce> effectiveReadAces = extractEffectiveReadAces(document);
+        LinkedHashSet<String> candidatePrincipals = new LinkedHashSet<>();
+        LinkedHashSet<String> explicitDenies = new LinkedHashSet<>();
+
+        for (NormalizedAce ace : effectiveReadAces) {
+            candidatePrincipals.add(ace.principal());
+            if (!ace.granted()) {
+                explicitDenies.add(ace.principal());
+            }
+        }
+
         LinkedHashSet<String> readers = new LinkedHashSet<>();
+        for (String principal : candidatePrincipals) {
+            if (hasEffectiveReadGrant(principal, effectiveReadAces)) {
+                readers.add(principal);
+            }
+        }
+
+        return new PermissionSnapshot(readers, explicitDenies);
+    }
+
+    private List<NormalizedAce> extractEffectiveReadAces(NuxeoDocument document) {
+        List<NormalizedAce> readAces = new ArrayList<>();
         NuxeoDocument.ContextParameters contextParameters = document.getContextParameters();
         if (contextParameters == null || contextParameters.getAcls() == null) {
-            return readers;
+            return readAces;
         }
 
         for (NuxeoDocument.Acl acl : contextParameters.getAcls()) {
@@ -274,38 +298,57 @@ public class NuxeoClient implements ContentSourceClient {
                 continue;
             }
             for (NuxeoDocument.Ace ace : acl.getAces()) {
-                if (!hasEffectiveReadAccess(ace)) {
+                if (!hasEffectiveStatus(ace)) {
+                    continue;
+                }
+                if (!isReadPermission(ace.getPermission())) {
+                    logUnrecognizedReadPermission(ace);
                     continue;
                 }
                 String principal = normalizePrincipal(ace.getUsername());
                 if (principal != null) {
-                    readers.add(principal);
+                    readAces.add(new NormalizedAce(principal, Boolean.TRUE.equals(ace.getGranted())));
                 }
             }
         }
-        return readers;
+        return readAces;
     }
 
-    private boolean hasEffectiveReadAccess(@Nullable NuxeoDocument.Ace ace) {
-        if (ace == null || !Boolean.TRUE.equals(ace.getGranted())) {
+    private boolean hasEffectiveStatus(@Nullable NuxeoDocument.Ace ace) {
+        if (ace == null) {
             return false;
         }
         String status = ace.getStatus();
-        if (status != null && !status.isBlank() && !"effective".equalsIgnoreCase(status)) {
-            return false;
-        }
+        return status == null || status.isBlank() || "effective".equalsIgnoreCase(status);
+    }
 
+    private boolean isReadPermission(@Nullable String permission) {
+        return permission != null && READ_PERMISSIONS.contains(permission);
+    }
+
+    private void logUnrecognizedReadPermission(@Nullable NuxeoDocument.Ace ace) {
+        if (ace == null || !Boolean.TRUE.equals(ace.getGranted())) {
+            return;
+        }
         String permission = ace.getPermission();
-        if (READ_PERMISSIONS.contains(permission)) {
-            return ace.getUsername() != null && !ace.getUsername().isBlank();
-        }
-
         if (permission != null
                 && log.isDebugEnabled()
                 && UNRECOGNIZED_ALLOWED_PERMISSION_NAMES.add(permission)) {
             log.debug("Ignoring granted Nuxeo permission '{}' when computing read principals", permission);
         }
+    }
+
+    private boolean hasEffectiveReadGrant(String principal, List<NormalizedAce> effectiveReadAces) {
+        for (NormalizedAce ace : effectiveReadAces) {
+            if (matchesPrincipal(ace.principal(), principal)) {
+                return ace.granted();
+            }
+        }
         return false;
+    }
+
+    private boolean matchesPrincipal(String acePrincipal, String principal) {
+        return EVERYONE_GROUP.equals(acePrincipal) || acePrincipal.equals(principal);
     }
 
     private @Nullable String normalizePrincipal(@Nullable String principal) {
@@ -346,6 +389,10 @@ public class NuxeoClient implements ContentSourceClient {
             return false;
         }
     }
+
+    private record NormalizedAce(String principal, boolean granted) {}
+
+    private record PermissionSnapshot(Set<String> readers, Set<String> denies) {}
 
     private URI blobUri(String nodeId) {
         String encodedNodeId = UriUtils.encodePathSegment(nodeId, StandardCharsets.UTF_8);

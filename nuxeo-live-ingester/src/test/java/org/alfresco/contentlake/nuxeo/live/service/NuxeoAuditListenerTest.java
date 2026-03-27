@@ -245,6 +245,26 @@ class NuxeoAuditListenerTest {
     }
 
     @Test
+    void listen_permissionUpdate_updatesAclWithoutFullResync() {
+        AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
+        OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
+        NuxeoAuditEntry securityUpdated = entry(53, "documentSecurityUpdated", "doc-53",
+                "2026-03-26T16:48:50.000Z", "2026-03-26T16:48:50.050Z");
+        SourceNode sourceNode = sourceNode("doc-53");
+
+        when(cursorStore.load("nuxeo:local")).thenReturn(Optional.of(initialCursor));
+        when(auditClient.fetchPage(initialCursor, windowEnd, 2)).thenReturn(pageOf(false, securityUpdated));
+        when(nuxeoClient.getNode("doc-53")).thenReturn(sourceNode);
+        when(scopeResolver.isInScope(sourceNode)).thenReturn(true);
+
+        listener.listen();
+
+        verify(nodeSyncService).updatePermissions(sourceNode);
+        verify(nodeSyncService, never()).syncNode(sourceNode);
+        assertThat(outcomeCount("documentSecurityUpdated", "updated")).isEqualTo(1.0);
+    }
+
+    @Test
     void listen_doesNotPersistCursorWhenAuditFetchFails() {
         AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
         OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
@@ -303,6 +323,7 @@ class NuxeoAuditListenerTest {
                 OffsetDateTime.parse("2026-03-26T16:48:00Z"),
                 false,
                 Set.of("GROUP_EVERYONE"),
+                Set.of(),
                 Map.of("nuxeo_documentType", "Note", "nuxeo_path", "/default-domain/workspaces/" + nodeId)
         );
     }

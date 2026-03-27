@@ -98,6 +98,7 @@ class NuxeoClientTest {
         assertThat(node.name()).isEqualTo("Quarterly Report");
         assertThat(node.path()).isEqualTo("/default-domain/workspaces/finance");
         assertThat(node.readPrincipals()).containsExactlyInAnyOrder("Administrator", "GROUP_members");
+        assertThat(node.denyPrincipals()).isEmpty();
         assertThat(node.sourceProperties())
                 .containsEntry("nuxeo_path", "/default-domain/workspaces/finance/q1-report.pdf");
         assertThat(capture.authorization).startsWith("Basic ");
@@ -150,6 +151,68 @@ class NuxeoClientTest {
         // "Everyone" is Nuxeo's virtual group for unauthenticated/public access — must map to GROUP_EVERYONE
         // so NodeSyncService can translate it to the __Everyone__ sys_acl principal
         assertThat(node.readPrincipals()).containsExactly("GROUP_EVERYONE");
+        assertThat(node.denyPrincipals()).isEmpty();
+    }
+
+    @Test
+    void getNode_deniesRemoveReadersButPreserveExplicitDenyPrincipals() throws IOException {
+        server.createContext("/nuxeo/api/v1/id/restricted-doc", exchange ->
+                writeJson(exchange, """
+                        {
+                          "entity-type": "document",
+                          "uid": "restricted-doc",
+                          "path": "/default-domain/workspaces/finance/restricted.pdf",
+                          "type": "File",
+                          "title": "Restricted",
+                          "state": "project",
+                          "properties": {
+                            "dc:modified": "2026-03-25T08:00:00Z",
+                            "file:content": {
+                              "name": "restricted.pdf",
+                              "mime-type": "application/pdf"
+                            }
+                          },
+                          "contextParameters": {
+                            "acls": [
+                              {
+                                "name": "local",
+                                "aces": [
+                                  { "username": "members", "permission": "Read", "granted": false, "status": "effective" },
+                                  { "username": "alice", "permission": "Read", "granted": true, "status": "effective" }
+                                ]
+                              },
+                              {
+                                "name": "inherited",
+                                "aces": [
+                                  { "username": "members", "permission": "Read", "granted": true, "status": "effective" },
+                                  { "username": "Everyone", "permission": "Read", "granted": true, "status": "effective" }
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                        """));
+        server.createContext("/nuxeo/api/v1/group/members", exchange ->
+                writeJson(exchange, """
+                        {
+                          "entity-type": "group",
+                          "id": "members",
+                          "groupname": "members"
+                        }
+                        """));
+        server.createContext("/nuxeo/api/v1/group/alice", exchange -> {
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        server.start();
+
+        NuxeoClient client = client("file:content");
+
+        SourceNode node = client.getNode("restricted-doc");
+
+        assertThat(node).isNotNull();
+        assertThat(node.readPrincipals()).containsExactlyInAnyOrder("alice", "GROUP_EVERYONE");
+        assertThat(node.denyPrincipals()).containsExactly("GROUP_members");
     }
 
     @Test

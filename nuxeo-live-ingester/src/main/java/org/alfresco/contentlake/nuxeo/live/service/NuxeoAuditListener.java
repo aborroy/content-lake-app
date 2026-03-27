@@ -112,6 +112,7 @@ public class NuxeoAuditListener {
         try {
             switch (eventId) {
                 case "documentCreated", "documentModified" -> processUpsert(repositoryKey, entry);
+                case "documentSecurityUpdated" -> processPermissionUpdate(repositoryKey, entry);
                 case "documentTrashed", "documentRemoved" -> processDelete(repositoryKey, entry);
                 default -> {
                     metrics.recordEvent(repositoryKey, eventId, "skipped");
@@ -147,6 +148,24 @@ public class NuxeoAuditListener {
 
         nodeSyncService.syncNode(node);
         metrics.recordEvent(repositoryKey, entry.eventId(), "synced");
+    }
+
+    private void processPermissionUpdate(String repositoryKey, NuxeoAuditEntry entry) {
+        SourceNode node = nuxeoClient.getNode(entry.docUUID());
+        if (node == null) {
+            boolean deleted = nodeSyncService.deleteNode(entry.docUUID(), effectiveEventTime(entry));
+            metrics.recordEvent(repositoryKey, entry.eventId(), deleted ? "deleted" : "skipped");
+            return;
+        }
+
+        if (!scopeResolver.isInScope(node)) {
+            boolean deleted = nodeSyncService.deleteNode(entry.docUUID(), effectiveEventTime(entry));
+            metrics.recordEvent(repositoryKey, entry.eventId(), deleted ? "deleted" : "skipped");
+            return;
+        }
+
+        nodeSyncService.updatePermissions(node);
+        metrics.recordEvent(repositoryKey, entry.eventId(), "updated");
     }
 
     private void processDelete(String repositoryKey, NuxeoAuditEntry entry) {

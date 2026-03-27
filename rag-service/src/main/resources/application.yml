@@ -29,6 +29,12 @@ content:
         username: ${ALFRESCO_INTERNAL_USERNAME:admin}
         password: ${ALFRESCO_INTERNAL_PASSWORD:admin}
 
+nuxeo:
+  base-url: ${NUXEO_URL:http://localhost:8081/nuxeo}
+  username: ${NUXEO_USERNAME:Administrator}
+  password: ${NUXEO_PASSWORD:Administrator}
+  source-id: ${NUXEO_SOURCE_ID:}
+
 # hxpr Content Lake connection
 hxpr:
   url: ${HXPR_URL:http://localhost:8080}

@@ -151,7 +151,7 @@ class NuxeoBatchIngestionServiceTest {
                 "/default-domain/workspaces/finance",
                 "application/pdf",
                 OffsetDateTime.parse("2026-03-24T10:00:00Z"),
-                false, Set.of(),
+                false, Set.of(), Set.of(),
                 Map.of("nuxeo_path", "/default-domain/workspaces/finance/" + nodeId + ".pdf",
                         "nuxeo_documentType", "File",
                         "nuxeo_lifecycleState", "project")

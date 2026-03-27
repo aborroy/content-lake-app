@@ -20,6 +20,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -36,6 +37,9 @@ class SemanticSearchServiceTest {
         ReflectionTestUtils.setField(service, "repositoryId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
+        ReflectionTestUtils.setField(service, "nuxeoUrl", "http://localhost:8081/nuxeo");
+        ReflectionTestUtils.setField(service, "nuxeoUsername", "Administrator");
+        ReflectionTestUtils.setField(service, "nuxeoPassword", "Administrator");
         ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
         ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
         ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
@@ -49,7 +53,7 @@ class SemanticSearchServiceTest {
     @Test
     void buildPermissionFilter_adminUser_includesEveryoneAndUsername() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("admin", "GROUP_EVERYONE")).when(svc).getUserAuthorities("admin");
+        doReturn(List.of("admin", "GROUP_EVERYONE")).when(svc).getUserAuthorities("admin", "test-repo");
 
         String filter = svc.buildPermissionFilter("admin", null);
 
@@ -64,7 +68,7 @@ class SemanticSearchServiceTest {
     void buildPermissionFilter_userWithGroups_includesGroupRaclFormat() {
         SemanticSearchService svc = spy(service);
         doReturn(List.of("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS"))
-                .when(svc).getUserAuthorities("alice");
+                .when(svc).getUserAuthorities("alice", "test-repo");
 
         String filter = svc.buildPermissionFilter("alice", null);
 
@@ -77,7 +81,7 @@ class SemanticSearchServiceTest {
     @Test
     void buildPermissionFilter_withAdditionalFilter_combinesWithAnd() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice");
+        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "my-repo");
 
         String filter = svc.buildPermissionFilter("alice", "cin_sourceId = 'my-repo'");
 
@@ -88,7 +92,7 @@ class SemanticSearchServiceTest {
     @Test
     void buildPermissionFilter_withSourceFilter_usesFilteredSourceId() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice");
+        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
 
         String filter = svc.buildPermissionFilter("alice", "cin_sourceId = 'nuxeo:nuxeo-demo'");
 
@@ -100,12 +104,15 @@ class SemanticSearchServiceTest {
     void buildPermissionFilter_withConfiguredExtraSourceIds_includesAllNamespaces() {
         SemanticSearchService svc = spy(service);
         ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-        doReturn(List.of("alice", "GROUP_ENGINEERING")).when(svc).getUserAuthorities("alice");
+        doReturn(List.of("alice", "GROUP_DEVELOPERS")).when(svc).getUserAuthorities("alice", "test-repo");
+        doReturn(List.of("alice", "GROUP_ENGINEERING")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
 
         String filter = svc.buildPermissionFilter("alice", null);
 
+        assertThat(filter).contains("sys_racl = 'g:GROUP_DEVELOPERS_#_test-repo'");
         assertThat(filter).contains("sys_racl = 'alice_#_nuxeo-demo'");
         assertThat(filter).contains("sys_racl = 'g:GROUP_ENGINEERING_#_nuxeo-demo'");
+        assertThat(filter).doesNotContain("g:GROUP_ENGINEERING_#_test-repo'");
     }
 
     // -----------------------------------------------------------------------
@@ -152,7 +159,7 @@ class SemanticSearchServiceTest {
     @Test
     void search_noResults_returnsEmptyResponse() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -169,7 +176,7 @@ class SemanticSearchServiceTest {
     @Test
     void search_minScoreFiltering_excludesLowScoringResults() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(any());
+        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));

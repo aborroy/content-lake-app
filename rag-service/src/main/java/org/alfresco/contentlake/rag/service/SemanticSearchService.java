@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
  * <p>Workflow:
  * <ol>
  *   <li>Embed the query text using the same model used at ingestion time</li>
- *   <li>Retrieve the authenticated user group memberships from Alfresco</li>
+ *   <li>Retrieve the authenticated user authorities from each configured content source</li>
  *   <li>Build an HXQL permission filter matching the user authorities against {@code sys_racl}</li>
  *   <li>Execute kNN vector search via HXPR</li>
  *   <li>Enrich results with parent document metadata</li>
@@ -64,6 +64,15 @@ public class SemanticSearchService {
 
     @Value("${nuxeo.source-id:}")
     private String nuxeoSourceId;
+
+    @Value("${nuxeo.base-url:http://localhost:8081/nuxeo}")
+    private String nuxeoUrl;
+
+    @Value("${nuxeo.username:Administrator}")
+    private String nuxeoUsername;
+
+    @Value("${nuxeo.password:Administrator}")
+    private String nuxeoPassword;
 
     @Value("${content.service.url}")
     private String alfrescoUrl;
@@ -164,33 +173,23 @@ public class SemanticSearchService {
         StringBuilder hxql = new StringBuilder(BASE_QUERY);
         List<String> conditions = new ArrayList<>();
 
-        List<String> authorities = getUserAuthorities(username);
-
-        authorities = authorities.stream()
-                .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(s -> !s.isBlank())
-                .distinct()
-                .toList();
-
         List<String> sourceIds = resolvePermissionSourceIds(additionalFilter);
+        Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
 
         List<String> raclClauses = new ArrayList<>();
         raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");
 
-        if (!authorities.isEmpty()) {
+        for (String sourceId : sourceIds) {
+            List<String> authorities = authoritiesBySource.getOrDefault(sourceId, defaultAuthorities(username));
             for (String authority : authorities) {
                 if ("GROUP_EVERYONE".equals(authority)) {
                     continue;
                 }
-                raclClauses.addAll(buildAuthorityClauses(authority, sourceIds));
+                raclClauses.add(buildAuthorityClause(authority, sourceId));
             }
-            log.debug("Permission filter with {} authorities for user: {} (sourceIds={})",
-                    authorities.size(), username, sourceIds);
-        } else {
-            raclClauses.addAll(buildAuthorityClauses(username, sourceIds));
-            log.debug("No authorities resolved, falling back to username only for user: {}", username);
         }
+
+        log.debug("Permission filter with source-scoped authorities for user {} (sourceIds={})", username, sourceIds);
 
         conditions.add("(" + String.join(" OR ", raclClauses) + ")");
 
@@ -203,25 +202,33 @@ public class SemanticSearchService {
         return hxql.toString();
     }
 
-    List<String> getUserAuthorities(String username) {
-        List<String> authorities = new ArrayList<>();
-        authorities.add(username);
-        authorities.add("GROUP_EVERYONE");
+    Map<String, List<String>> resolveAuthoritiesBySource(String username, List<String> sourceIds) {
+        Map<String, List<String>> authoritiesBySource = new LinkedHashMap<>();
+        for (String sourceId : sourceIds) {
+            authoritiesBySource.put(sourceId, getUserAuthorities(username, sourceId));
+        }
+        return authoritiesBySource;
+    }
 
+    List<String> getUserAuthorities(String username, String sourceId) {
+        LinkedHashSet<String> authorities = new LinkedHashSet<>(defaultAuthorities(username));
         try {
-            List<String> groups = fetchUserGroups(username);
-            authorities.addAll(groups);
-            log.debug("Resolved {} authorities for user {}", authorities.size(), username);
+            if (isAlfrescoSource(sourceId)) {
+                authorities.addAll(fetchAlfrescoGroups(username));
+            } else if (isNuxeoSource(sourceId)) {
+                authorities.addAll(fetchNuxeoGroups(username));
+            }
+            log.debug("Resolved {} authorities for user {} on source {}", authorities.size(), username, sourceId);
         } catch (Exception e) {
-            log.warn("Failed to retrieve groups for user {} (proceeding with username + GROUP_EVERYONE): {}",
-                    username, e.getMessage());
+            log.warn("Failed to retrieve authorities for user {} on source {} (proceeding with username + GROUP_EVERYONE): {}",
+                    username, sourceId, e.getMessage());
         }
 
-        return authorities;
+        return List.copyOf(authorities);
     }
 
     @SuppressWarnings("unchecked")
-    private List<String> fetchUserGroups(String username) {
+    private List<String> fetchAlfrescoGroups(String username) {
         RestTemplate restTemplate = new RestTemplate();
 
         String url = alfrescoUrl
@@ -235,7 +242,7 @@ public class SemanticSearchService {
         ResponseEntity<Map> response = restTemplate.exchange(
                 url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
 
-        List<String> groups = new ArrayList<>();
+        LinkedHashSet<String> groups = new LinkedHashSet<>();
         if (response.getBody() != null) {
             Map<String, Object> body = response.getBody();
             Map<String, Object> list = (Map<String, Object>) body.get("list");
@@ -253,7 +260,54 @@ public class SemanticSearchService {
         }
 
         log.debug("Retrieved {} groups for user {}", groups.size(), username);
-        return groups;
+        return List.copyOf(groups);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> fetchNuxeoGroups(String username) {
+        RestTemplate restTemplate = new RestTemplate();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+        headers.setBasicAuth(nuxeoUsername, nuxeoPassword);
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+                buildNuxeoApiUrl() + "/user/{username}",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                Map.class,
+                username
+        );
+
+        LinkedHashSet<String> groups = new LinkedHashSet<>();
+        if (response.getBody() == null) {
+            return List.of();
+        }
+
+        Map<String, Object> body = response.getBody();
+        Object directGroups = body.get("groups");
+        if (directGroups instanceof List<?> values) {
+            values.forEach(value -> addNuxeoGroup(groups, value));
+        }
+
+        Object extendedGroups = body.get("extendedGroups");
+        if (extendedGroups instanceof List<?> values) {
+            for (Object value : values) {
+                if (value instanceof Map<?, ?> map) {
+                    addNuxeoGroup(groups, firstString(map.get("name"), map.get("groupname"), map.get("id")));
+                }
+            }
+        }
+
+        Object propertiesObject = body.get("properties");
+        if (propertiesObject instanceof Map<?, ?> properties) {
+            Object propertyGroups = properties.get("groups");
+            if (propertyGroups instanceof List<?> values) {
+                values.forEach(value -> addNuxeoGroup(groups, value));
+            }
+        }
+
+        log.debug("Retrieved {} Nuxeo groups for user {}", groups.size(), username);
+        return List.copyOf(groups);
     }
 
     // ---------------------------------------------------------------
@@ -390,23 +444,12 @@ public class SemanticSearchService {
         return value == null ? "" : value.replace("'", "''");
     }
 
-    private List<String> buildAuthorityClauses(String authority, List<String> sourceIds) {
-        LinkedHashSet<String> principals = new LinkedHashSet<>();
-        if (authority.startsWith(GROUP_PREFIX)) {
-            for (String sourceId : sourceIds) {
-                String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
-                principals.add(GROUP_RACL_PREFIX + namespaced);
-            }
-        } else {
-            for (String sourceId : sourceIds) {
-                String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
-                principals.add(namespaced);
-            }
-        }
-
-        return principals.stream()
-                .map(principal -> RACL_FIELD + " = '" + escapeHxql(principal) + "'")
-                .toList();
+    private String buildAuthorityClause(String authority, String sourceId) {
+        String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
+        String principal = authority.startsWith(GROUP_PREFIX)
+                ? GROUP_RACL_PREFIX + namespaced
+                : namespaced;
+        return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
     }
 
     private List<String> resolvePermissionSourceIds(String additionalFilter) {
@@ -447,5 +490,42 @@ public class SemanticSearchService {
         sourceIds.add(separator >= 0 && separator < trimmed.length() - 1
                 ? trimmed.substring(separator + 1)
                 : trimmed);
+    }
+
+    private List<String> defaultAuthorities(String username) {
+        return List.of(username, "GROUP_EVERYONE");
+    }
+
+    private boolean isAlfrescoSource(String sourceId) {
+        return sourceId != null && sourceId.equals(repositoryId);
+    }
+
+    private boolean isNuxeoSource(String sourceId) {
+        return sourceId != null && !sourceId.isBlank() && sourceId.equals(nuxeoSourceId);
+    }
+
+    private String buildNuxeoApiUrl() {
+        String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
+        return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
+    }
+
+    private void addNuxeoGroup(Set<String> groups, Object candidate) {
+        if (candidate == null) {
+            return;
+        }
+        String group = candidate.toString().trim();
+        if (group.isBlank()) {
+            return;
+        }
+        groups.add(group.startsWith(GROUP_PREFIX) ? group : GROUP_PREFIX + group);
+    }
+
+    private String firstString(Object... candidates) {
+        for (Object candidate : candidates) {
+            if (candidate instanceof String value && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 }

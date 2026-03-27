@@ -33,7 +33,7 @@ public class NuxeoAuditClient {
 
     private static final String SOURCE_EVENT_QUERY = """
             SELECT * FROM LogEntry
-            WHERE eventId IN ("documentCreated","documentModified","documentTrashed","documentRemoved")
+            WHERE eventId IN ("documentCreated","documentModified","documentSecurityUpdated","documentTrashed","documentRemoved")
               AND (
                     logDate > TIMESTAMP "%s"
                  OR (logDate = TIMESTAMP "%s" AND id > %d)

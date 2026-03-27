@@ -84,6 +84,7 @@ class NuxeoScopeResolverTest {
                 OffsetDateTime.parse("2026-03-24T09:15:30Z"),
                 false,
                 Set.of(),
+                Set.of(),
                 Map.of(
                         "nuxeo_path", fullPath,
                         "nuxeo_documentType", type,
@@ -102,6 +103,7 @@ class NuxeoScopeResolverTest {
                 null,
                 OffsetDateTime.parse("2026-03-24T09:15:30Z"),
                 true,
+                Set.of(),
                 Set.of(),
                 Map.of(
                         "nuxeo_path", fullPath,

@@ -76,6 +76,7 @@ class NuxeoAuditClientTest {
         assertThat(capture.method).isEqualTo("POST");
         assertThat(capture.contentType).startsWith("application/json");
         assertThat(capture.authorization).startsWith("Basic ");
+        assertThat(capture.body).contains("documentSecurityUpdated");
         assertThat(capture.body).contains("logDate > TIMESTAMP \\\"2026-03-26 16:48:41.235\\\"");
         assertThat(capture.body).contains("logDate = TIMESTAMP \\\"2026-03-26 16:48:41.235\\\" AND id > 46");
         assertThat(capture.body).contains("logDate <= TIMESTAMP \\\"2026-03-26 16:49:00.000\\\"");

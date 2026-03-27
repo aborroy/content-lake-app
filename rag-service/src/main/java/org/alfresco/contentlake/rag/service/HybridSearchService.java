@@ -74,6 +74,15 @@ public class HybridSearchService {
     @Value("${nuxeo.source-id:}")
     private String nuxeoSourceId;
 
+    @Value("${nuxeo.base-url:http://localhost:8081/nuxeo}")
+    private String nuxeoUrl;
+
+    @Value("${nuxeo.username:Administrator}")
+    private String nuxeoUsername;
+
+    @Value("${nuxeo.password:Administrator}")
+    private String nuxeoPassword;
+
     @Value("${content.service.url}")
     private String alfrescoUrl;
 
@@ -527,29 +536,20 @@ public class HybridSearchService {
         StringBuilder hxql = new StringBuilder(BASE_QUERY);
         List<String> conditions = new ArrayList<>();
 
-        List<String> authorities = getUserAuthorities(username);
-
-        authorities = authorities.stream()
-                .filter(Objects::nonNull)
-                .map(String::trim)
-                .filter(s -> !s.isBlank())
-                .distinct()
-                .toList();
-
         List<String> sourceIds = resolvePermissionSourceIds(additionalFilter);
+        Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
 
         List<String> raclClauses = new ArrayList<>();
         raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");
 
-        if (!authorities.isEmpty()) {
+        for (String sourceId : sourceIds) {
+            List<String> authorities = authoritiesBySource.getOrDefault(sourceId, defaultAuthorities(username));
             for (String authority : authorities) {
                 if ("GROUP_EVERYONE".equals(authority)) {
                     continue;
                 }
-                raclClauses.addAll(buildAuthorityClauses(authority, sourceIds));
+                raclClauses.add(buildAuthorityClause(authority, sourceId));
             }
-        } else {
-            raclClauses.addAll(buildAuthorityClauses(username, sourceIds));
         }
 
         conditions.add("(" + String.join(" OR ", raclClauses) + ")");
@@ -562,46 +562,29 @@ public class HybridSearchService {
         return hxql.toString();
     }
 
+    Map<String, List<String>> resolveAuthoritiesBySource(String username, List<String> sourceIds) {
+        Map<String, List<String>> authoritiesBySource = new LinkedHashMap<>();
+        for (String sourceId : sourceIds) {
+            authoritiesBySource.put(sourceId, getUserAuthorities(username, sourceId));
+        }
+        return authoritiesBySource;
+    }
+
     @SuppressWarnings("unchecked")
-    List<String> getUserAuthorities(String username) {
-        List<String> authorities = new ArrayList<>();
-        authorities.add(username);
-        authorities.add("GROUP_EVERYONE");
-
+    List<String> getUserAuthorities(String username, String sourceId) {
+        LinkedHashSet<String> authorities = new LinkedHashSet<>(defaultAuthorities(username));
         try {
-            RestTemplate restTemplate = new RestTemplate();
-            String url = alfrescoUrl
-                    + "/alfresco/api/-default-/public/alfresco/versions/1/people/"
-                    + username + "/groups?skipCount=0&maxItems=1000";
-
-            HttpHeaders headers = new HttpHeaders();
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-            headers.setBasicAuth(serviceAccountUsername, serviceAccountPassword);
-
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-
-            if (response.getBody() != null) {
-                Map<String, Object> body = response.getBody();
-                Map<String, Object> list = (Map<String, Object>) body.get("list");
-                if (list != null) {
-                    List<Map<String, Object>> entries = (List<Map<String, Object>>) list.get("entries");
-                    if (entries != null) {
-                        for (Map<String, Object> entry : entries) {
-                            Map<String, Object> entryData = (Map<String, Object>) entry.get("entry");
-                            if (entryData != null && entryData.get("id") != null) {
-                                authorities.add((String) entryData.get("id"));
-                            }
-                        }
-                    }
-                }
+            if (isAlfrescoSource(sourceId)) {
+                authorities.addAll(fetchAlfrescoGroups(username));
+            } else if (isNuxeoSource(sourceId)) {
+                authorities.addAll(fetchNuxeoGroups(username));
             }
         } catch (Exception e) {
-            log.warn("Failed to retrieve groups for user {} (proceeding with username + GROUP_EVERYONE): {}",
-                    username, e.getMessage());
+            log.warn("Failed to retrieve authorities for user {} on source {} (proceeding with username + GROUP_EVERYONE): {}",
+                    username, sourceId, e.getMessage());
         }
 
-        return authorities;
+        return List.copyOf(authorities);
     }
 
     // ---------------------------------------------------------------
@@ -654,23 +637,12 @@ public class HybridSearchService {
         return value == null ? "" : value.replace("'", "''");
     }
 
-    private List<String> buildAuthorityClauses(String authority, List<String> sourceIds) {
-        LinkedHashSet<String> principals = new LinkedHashSet<>();
-        if (authority.startsWith(GROUP_PREFIX)) {
-            for (String sourceId : sourceIds) {
-                String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
-                principals.add(GROUP_RACL_PREFIX + namespaced);
-            }
-        } else {
-            for (String sourceId : sourceIds) {
-                String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
-                principals.add(namespaced);
-            }
-        }
-
-        return principals.stream()
-                .map(principal -> RACL_FIELD + " = '" + escapeHxql(principal) + "'")
-                .toList();
+    private String buildAuthorityClause(String authority, String sourceId) {
+        String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
+        String principal = authority.startsWith(GROUP_PREFIX)
+                ? GROUP_RACL_PREFIX + namespaced
+                : namespaced;
+        return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
     }
 
     private List<String> resolvePermissionSourceIds(String additionalFilter) {
@@ -711,6 +683,122 @@ public class HybridSearchService {
         sourceIds.add(separator >= 0 && separator < trimmed.length() - 1
                 ? trimmed.substring(separator + 1)
                 : trimmed);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> fetchAlfrescoGroups(String username) {
+        RestTemplate restTemplate = new RestTemplate();
+        String url = alfrescoUrl
+                + "/alfresco/api/-default-/public/alfresco/versions/1/people/"
+                + username + "/groups?skipCount=0&maxItems=1000";
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+        headers.setBasicAuth(serviceAccountUsername, serviceAccountPassword);
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+                url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+
+        LinkedHashSet<String> groups = new LinkedHashSet<>();
+        if (response.getBody() != null) {
+            Map<String, Object> body = response.getBody();
+            Map<String, Object> list = (Map<String, Object>) body.get("list");
+            if (list != null) {
+                List<Map<String, Object>> entries = (List<Map<String, Object>>) list.get("entries");
+                if (entries != null) {
+                    for (Map<String, Object> entry : entries) {
+                        Map<String, Object> entryData = (Map<String, Object>) entry.get("entry");
+                        if (entryData != null && entryData.get("id") != null) {
+                            groups.add((String) entryData.get("id"));
+                        }
+                    }
+                }
+            }
+        }
+        return List.copyOf(groups);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> fetchNuxeoGroups(String username) {
+        RestTemplate restTemplate = new RestTemplate();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+        headers.setBasicAuth(nuxeoUsername, nuxeoPassword);
+
+        ResponseEntity<Map> response = restTemplate.exchange(
+                buildNuxeoApiUrl() + "/user/{username}",
+                HttpMethod.GET,
+                new HttpEntity<>(headers),
+                Map.class,
+                username
+        );
+
+        LinkedHashSet<String> groups = new LinkedHashSet<>();
+        if (response.getBody() == null) {
+            return List.of();
+        }
+
+        Map<String, Object> body = response.getBody();
+        Object directGroups = body.get("groups");
+        if (directGroups instanceof List<?> values) {
+            values.forEach(value -> addNuxeoGroup(groups, value));
+        }
+
+        Object extendedGroups = body.get("extendedGroups");
+        if (extendedGroups instanceof List<?> values) {
+            for (Object value : values) {
+                if (value instanceof Map<?, ?> map) {
+                    addNuxeoGroup(groups, firstString(map.get("name"), map.get("groupname"), map.get("id")));
+                }
+            }
+        }
+
+        Object propertiesObject = body.get("properties");
+        if (propertiesObject instanceof Map<?, ?> properties) {
+            Object propertyGroups = properties.get("groups");
+            if (propertyGroups instanceof List<?> values) {
+                values.forEach(value -> addNuxeoGroup(groups, value));
+            }
+        }
+
+        return List.copyOf(groups);
+    }
+
+    private List<String> defaultAuthorities(String username) {
+        return List.of(username, "GROUP_EVERYONE");
+    }
+
+    private boolean isAlfrescoSource(String sourceId) {
+        return sourceId != null && sourceId.equals(repositoryId);
+    }
+
+    private boolean isNuxeoSource(String sourceId) {
+        return sourceId != null && !sourceId.isBlank() && sourceId.equals(nuxeoSourceId);
+    }
+
+    private String buildNuxeoApiUrl() {
+        String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
+        return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
+    }
+
+    private void addNuxeoGroup(Set<String> groups, Object candidate) {
+        if (candidate == null) {
+            return;
+        }
+        String group = candidate.toString().trim();
+        if (group.isBlank()) {
+            return;
+        }
+        groups.add(group.startsWith(GROUP_PREFIX) ? group : GROUP_PREFIX + group);
+    }
+
+    private String firstString(Object... candidates) {
+        for (Object candidate : candidates) {
+            if (candidate instanceof String value && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------

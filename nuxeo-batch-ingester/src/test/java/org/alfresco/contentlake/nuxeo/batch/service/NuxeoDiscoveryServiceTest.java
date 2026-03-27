@@ -91,6 +91,7 @@ class NuxeoDiscoveryServiceTest {
                 OffsetDateTime.parse("2026-03-24T10:00:00Z"),
                 false,
                 Set.of(),
+                Set.of(),
                 Map.of(
                         "nuxeo_path", fullPath,
                         "nuxeo_documentType", type,
@@ -109,6 +110,7 @@ class NuxeoDiscoveryServiceTest {
                 null,
                 OffsetDateTime.parse("2026-03-24T10:00:00Z"),
                 true,
+                Set.of(),
                 Set.of(),
                 Map.of(
                         "nuxeo_path", fullPath,

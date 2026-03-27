@@ -84,6 +84,7 @@ class NodeSyncServicePathConflictTest {
                 OffsetDateTime.parse("2026-03-13T12:00:00Z"),
                 false,
                 Set.of("GROUP_EVERYONE"),
+                Set.of(),
                 Map.ofEntries(
                         Map.entry("source_nodeId", "node-123"),
                         Map.entry("source_type", "alfresco"),
@@ -164,6 +165,7 @@ class NodeSyncServicePathConflictTest {
                 OffsetDateTime.parse("2026-03-25T08:00:00Z"),
                 false,
                 Set.of("GROUP_EVERYONE", "GROUP_sales", "bob"),
+                Set.of("GROUP_secret"),
                 Map.of("source_nodeId", "node-acl")
         );
 
@@ -179,8 +181,11 @@ class NodeSyncServicePathConflictTest {
         ArgumentCaptor<HxprDocument> captor = ArgumentCaptor.forClass(HxprDocument.class);
         verify(hxprService).createDocument(any(), captor.capture());
 
-        List<ACE> sysAcl = captor.getValue().getSysAcl();
+        HxprDocument payload = captor.getValue();
+        List<ACE> sysAcl = payload.getSysAcl();
         assertThat(sysAcl).hasSize(3);
+        assertThat(payload.getCinRead()).containsExactly("GROUP_EVERYONE", "GROUP_sales", "bob");
+        assertThat(payload.getCinDeny()).containsExactly("GROUP_secret");
 
         assertThat(sysAcl).anyMatch(ace ->
                 ace.getUser() != null
@@ -199,5 +204,38 @@ class NodeSyncServicePathConflictTest {
                 && ("bob_#_" + SOURCE_ID).equals(ace.getUser().getId())
                 && Boolean.TRUE.equals(ace.getGranted())
                 && "Read".equals(ace.getPermission()));
+    }
+
+    @Test
+    void updatePermissions_patchesSysAclCinReadAndCinDenyWithoutContentChanges() {
+        SourceNode node = new SourceNode(
+                "node-acl",
+                SOURCE_ID,
+                "alfresco",
+                "report.pdf",
+                "/docs",
+                "application/pdf",
+                OffsetDateTime.parse("2026-03-25T08:00:00Z"),
+                false,
+                Set.of("GROUP_EVERYONE", "GROUP_sales", "bob"),
+                Set.of("GROUP_secret"),
+                Map.of("source_nodeId", "node-acl")
+        );
+
+        HxprDocument existing = new HxprDocument();
+        existing.setSysId("hxpr-acl");
+        when(hxprService.findByNodeId("node-acl", FORMATTED_SOURCE_ID)).thenReturn(existing);
+
+        service.updatePermissions(node);
+
+        ArgumentCaptor<HxprDocument> captor = ArgumentCaptor.forClass(HxprDocument.class);
+        verify(documentApi).updateById(eq("hxpr-acl"), captor.capture());
+
+        HxprDocument update = captor.getValue();
+        assertThat(update.getCinRead()).containsExactly("GROUP_EVERYONE", "GROUP_sales", "bob");
+        assertThat(update.getCinDeny()).containsExactly("GROUP_secret");
+        assertThat(update.getSysAcl()).hasSize(3);
+        assertThat(update.getSysFulltextBinary()).isNull();
+        assertThat(update.getSysembedEmbeddings()).isNull();
     }
 }

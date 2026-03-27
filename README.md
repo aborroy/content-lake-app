@@ -213,6 +213,12 @@ export ACTIVEMQ_USER=admin
 export ACTIVEMQ_PASSWORD=admin
 export ALFRESCO_EVENT_TOPIC=alfresco.repo.event2
 
+# Nuxeo (Nuxeo ingesters + rag-service authority lookup)
+export NUXEO_URL=http://localhost:8081/nuxeo
+export NUXEO_USERNAME=Administrator
+export NUXEO_PASSWORD=Administrator
+export NUXEO_SOURCE_ID=local
+
 # AI/Embeddings (both services)
 # Spring AI appends /v1 itself; use the Docker Model Runner root URL.
 export MODEL_RUNNER_URL=http://localhost:12434
@@ -327,6 +333,16 @@ REST API authentication is source-specific:
 | **Ticket (header)** | `curl -H "Authorization: Basic BASE64(TICKET_xxx)" ...` |
 
 **Note:** Bearer token authentication (OAuth2/OIDC with Keycloak) is not yet supported.
+
+### Source-Native ACL Filtering
+
+Current mixed-source filtering keeps Alfresco and Nuxeo principals source-native:
+
+- Ingested ACLs are written to hxpr with the source instance suffix `_#_<sourceId>`.
+- Alfresco and Nuxeo principals are not normalized to a shared identity yet.
+- `rag-service` expands Alfresco groups from Alfresco and Nuxeo groups from Nuxeo, then applies them only to matching source IDs.
+- This mode assumes the authenticated username is the same login string in each source you want to query.
+- Nuxeo group expansion in `rag-service` uses the configured `NUXEO_USERNAME` and `NUXEO_PASSWORD` service credentials to read `/api/v1/user/{username}`.
 
 ### Quick Example
 

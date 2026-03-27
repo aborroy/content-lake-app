@@ -19,7 +19,10 @@ import java.util.Set;
  * @param mimeType         MIME type of the primary content blob; {@code null} for folders
  * @param modifiedAt       last-modified timestamp used for staleness checks
  * @param folder           {@code true} when this node is a container, not a document
- * @param readPrincipals   identities that have read access (used to populate {@code sys_acl})
+ * @param readPrincipals   identities that have effective read access (used to populate {@code sys_acl}
+ *                         and {@code cin_read})
+ * @param denyPrincipals   identities explicitly denied read access by the source ACL model; stored for
+ *                         diagnostics in {@code cin_deny} but not written into {@code sys_acl}
  * @param sourceProperties source-specific metadata stored in {@code cin_ingestProperties}
  *                         alongside the generic keys; keyed by adapter-owned namespaces
  *                         such as {@code alfresco_*} or {@code nuxeo_*}
@@ -34,5 +37,6 @@ public record SourceNode(
         OffsetDateTime modifiedAt,
         boolean folder,
         Set<String> readPrincipals,
+        Set<String> denyPrincipals,
         Map<String, Object> sourceProperties
 ) {}
