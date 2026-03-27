@@ -49,6 +49,10 @@ hxpr:
     client-secret: ${HXPR_IDP_CLIENT_SECRET:secret}
     username: ${HXPR_IDP_USERNAME:testuser}
     password: ${HXPR_IDP_PASSWORD:password}
+  model:
+    bootstrap:
+      enabled: true
+    fragments: classpath:model-fragments.json
 
 transform:
   url: ${TRANSFORM_URL:http://localhost:10090}
