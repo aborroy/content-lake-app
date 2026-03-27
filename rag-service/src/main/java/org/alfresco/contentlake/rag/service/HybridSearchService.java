@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
+import org.alfresco.contentlake.model.ContentLakeIngestProperties;
 import org.alfresco.contentlake.model.HxprDocument;
 import org.alfresco.contentlake.model.HxprEmbedding;
 import org.alfresco.contentlake.rag.config.HybridSearchProperties;
@@ -54,9 +55,9 @@ public class HybridSearchService {
     private static final String GROUP_RACL_PREFIX = "g:";
     private static final String SOURCE_ID_SEPARATOR = "_#_";
     private static final String INGEST_PROP_PREFIX = "cin_ingestProperties.";
-    private static final String ALF_MIME_PROP = INGEST_PROP_PREFIX + "alfresco_mimeType";
-    private static final String ALF_PATH_PROP = INGEST_PROP_PREFIX + "alfresco_path";
-    private static final String ALF_MODIFIED_PROP = INGEST_PROP_PREFIX + "alfresco_modifiedAt";
+    private static final String SOURCE_MIME_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_MIME_TYPE;
+    private static final String SOURCE_PATH_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_PATH;
+    private static final String SOURCE_MODIFIED_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_MODIFIED_AT;
     private static final Pattern CUSTOM_PROP_KEY_PATTERN = Pattern.compile("[A-Za-z0-9_:-]+");
     private static final Pattern SOURCE_ID_EQUALS_PATTERN = Pattern.compile("cin_sourceId\\s*=\\s*'([^']+)'");
 
@@ -64,6 +65,7 @@ public class HybridSearchService {
     private final EmbeddingService embeddingService;
     private final SecurityContextService securityContextService;
     private final HybridSearchProperties properties;
+    private final SourceMetadataResolver sourceMetadataResolver;
 
     @Value("${hxpr.repositoryId:default}")
     private String repositoryId;
@@ -100,9 +102,11 @@ public class HybridSearchService {
         long startTime = System.currentTimeMillis();
 
         String username = securityContextService.getCurrentUsername();
+        String sourceTypeFilter = buildSourceTypeFilter(request.getSourceType());
         String metadataFilter = buildMetadataFilter(request.getMetadata());
         String additionalFilter = combineFilters(request.getFilter(), metadataFilter);
-        String permissionFilter = buildPermissionFilter(username, additionalFilter);
+        additionalFilter = combineFilters(additionalFilter, sourceTypeFilter);
+        String permissionFilter = buildPermissionFilter(username, request.getSourceType(), additionalFilter);
 
         int candidateCount = resolveCandidateCount(request);
         int maxResults = resolveMaxResults(request);
@@ -381,7 +385,7 @@ public class HybridSearchService {
                 if (result != null && result.getDocuments() != null) {
                     result.getDocuments().stream()
                             .findFirst()
-                            .ifPresent(doc -> cache.put(docId, buildSourceDocument(docId, doc)));
+                            .ifPresent(doc -> cache.put(docId, sourceMetadataResolver.resolveSourceDocument(docId, doc)));
                 }
             } catch (Exception e) {
                 log.warn("Failed to fetch metadata for document {}: {}", docId, e.getMessage());
@@ -389,29 +393,6 @@ public class HybridSearchService {
         }
 
         return cache;
-    }
-
-    private SourceDocument buildSourceDocument(String docId, HxprDocument doc) {
-        String path = (doc.getCinPaths() != null && !doc.getCinPaths().isEmpty())
-                ? doc.getCinPaths().getFirst() : null;
-
-        String name = null;
-        String mimeType = null;
-        if (doc.getCinIngestProperties() != null) {
-            Object nameObj = doc.getCinIngestProperties().get("alfresco_name");
-            if (nameObj != null) name = nameObj.toString();
-            Object mimeObj = doc.getCinIngestProperties().get("alfresco_mimeType");
-            if (mimeObj != null) mimeType = mimeObj.toString();
-        }
-
-        return SourceDocument.builder()
-                .documentId(docId)
-                .nodeId(doc.getCinId() != null ? doc.getCinId() : doc.getSysName())
-                .sourceId(doc.getCinSourceId())
-                .name(name)
-                .path(path)
-                .mimeType(mimeType)
-                .build();
     }
 
     // ---------------------------------------------------------------
@@ -483,21 +464,21 @@ public class HybridSearchService {
         List<String> clauses = new ArrayList<>();
 
         if (metadata.getMimeType() != null && !metadata.getMimeType().isBlank()) {
-            clauses.add(ALF_MIME_PROP + " = '" + escapeHxql(metadata.getMimeType().trim()) + "'");
+            clauses.add(SOURCE_MIME_PROP + " = '" + escapeHxql(metadata.getMimeType().trim()) + "'");
         }
 
         if (metadata.getPathPrefix() != null && !metadata.getPathPrefix().isBlank()) {
             String escapedPrefix = escapeHxql(metadata.getPathPrefix().trim());
-            clauses.add("(" + ALF_PATH_PROP + " >= '" + escapedPrefix + "' AND "
-                    + ALF_PATH_PROP + " < '" + escapedPrefix + "\uFFFF')");
+            clauses.add("(" + SOURCE_PATH_PROP + " >= '" + escapedPrefix + "' AND "
+                    + SOURCE_PATH_PROP + " < '" + escapedPrefix + "\uFFFF')");
         }
 
         if (metadata.getModifiedAfter() != null && !metadata.getModifiedAfter().isBlank()) {
-            clauses.add(ALF_MODIFIED_PROP + " >= '" + escapeHxql(metadata.getModifiedAfter().trim()) + "'");
+            clauses.add(SOURCE_MODIFIED_PROP + " >= '" + escapeHxql(metadata.getModifiedAfter().trim()) + "'");
         }
 
         if (metadata.getModifiedBefore() != null && !metadata.getModifiedBefore().isBlank()) {
-            clauses.add(ALF_MODIFIED_PROP + " <= '" + escapeHxql(metadata.getModifiedBefore().trim()) + "'");
+            clauses.add(SOURCE_MODIFIED_PROP + " <= '" + escapeHxql(metadata.getModifiedBefore().trim()) + "'");
         }
 
         if (metadata.getProperties() != null && !metadata.getProperties().isEmpty()) {
@@ -533,10 +514,14 @@ public class HybridSearchService {
     // ---------------------------------------------------------------
 
     String buildPermissionFilter(String username, String additionalFilter) {
+        return buildPermissionFilter(username, null, additionalFilter);
+    }
+
+    String buildPermissionFilter(String username, String sourceType, String additionalFilter) {
         StringBuilder hxql = new StringBuilder(BASE_QUERY);
         List<String> conditions = new ArrayList<>();
 
-        List<String> sourceIds = resolvePermissionSourceIds(additionalFilter);
+        List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
         Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
 
         List<String> raclClauses = new ArrayList<>();
@@ -637,6 +622,15 @@ public class HybridSearchService {
         return value == null ? "" : value.replace("'", "''");
     }
 
+    private String buildSourceTypeFilter(String sourceType) {
+        String normalized = normalizeSourceType(sourceType);
+        if (normalized == null) {
+            return null;
+        }
+        return "cin_ingestProperties." + ContentLakeIngestProperties.SOURCE_TYPE
+                + " = '" + escapeHxql(normalized) + "'";
+    }
+
     private String buildAuthorityClause(String authority, String sourceId) {
         String namespaced = authority + SOURCE_ID_SEPARATOR + sourceId;
         String principal = authority.startsWith(GROUP_PREFIX)
@@ -645,7 +639,7 @@ public class HybridSearchService {
         return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
     }
 
-    private List<String> resolvePermissionSourceIds(String additionalFilter) {
+    private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {
         LinkedHashSet<String> sourceIds = new LinkedHashSet<>();
 
         if (additionalFilter != null && !additionalFilter.isBlank()) {
@@ -655,6 +649,11 @@ public class HybridSearchService {
             }
         }
 
+        if (!sourceIds.isEmpty()) {
+            return List.copyOf(sourceIds);
+        }
+
+        addSourceIdsForType(sourceIds, sourceType);
         if (!sourceIds.isEmpty()) {
             return List.copyOf(sourceIds);
         }
@@ -669,6 +668,23 @@ public class HybridSearchService {
         }
 
         return List.copyOf(sourceIds);
+    }
+
+    private void addSourceIdsForType(Set<String> sourceIds, String sourceType) {
+        String normalized = normalizeSourceType(sourceType);
+        if ("alfresco".equals(normalized)) {
+            addSourceId(sourceIds, repositoryId);
+        } else if ("nuxeo".equals(normalized)) {
+            addSourceId(sourceIds, nuxeoSourceId);
+        }
+    }
+
+    private String normalizeSourceType(String sourceType) {
+        if (sourceType == null) {
+            return null;
+        }
+        String trimmed = sourceType.trim().toLowerCase(Locale.ROOT);
+        return trimmed.isBlank() ? null : trimmed;
     }
 
     private static void addSourceId(Set<String> sourceIds, String candidate) {

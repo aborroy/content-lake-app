@@ -51,6 +51,9 @@ public class RagProperties {
     /** Conversation memory settings. */
     private ConversationProperties conversation = new ConversationProperties();
 
+    /** Source-specific deep-link templates returned in search and RAG responses. */
+    private SourceLinkProperties sourceLinks = new SourceLinkProperties();
+
     @Data
     public static class ConversationProperties {
 
@@ -65,5 +68,17 @@ public class RagProperties {
 
         /** Enables/disables conversation-aware query reformulation. */
         private boolean queryReformulation = true;
+    }
+
+    @Data
+    public static class SourceLinkProperties {
+
+        /** Share-style deep link for Alfresco documents. */
+        private String alfrescoTemplate =
+                "${content.service.url}/share/page/document-details?nodeRef=workspace://SpacesStore/{nodeId}";
+
+        /** Default Nuxeo Web UI browse link using the full repository path. */
+        private String nuxeoTemplate =
+                "${nuxeo.base-url}/ui/#!/browse{nuxeoPath}";
     }
 }

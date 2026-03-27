@@ -213,6 +213,7 @@ public class RagService {
                 .topK(topK)
                 .minScore(minScore)
                 .filter(request.getFilter())
+                .sourceType(request.getSourceType())
                 .embeddingType(request.getEmbeddingType())
                 .build();
 
@@ -337,8 +338,10 @@ public class RagService {
                         .documentId(hit.getSourceDocument() != null ? hit.getSourceDocument().getDocumentId() : null)
                         .nodeId(hit.getSourceDocument() != null ? hit.getSourceDocument().getNodeId() : null)
                         .sourceId(hit.getSourceDocument() != null ? hit.getSourceDocument().getSourceId() : null)
+                        .sourceType(hit.getSourceDocument() != null ? hit.getSourceDocument().getSourceType() : null)
                         .name(hit.getSourceDocument() != null ? hit.getSourceDocument().getName() : null)
                         .path(hit.getSourceDocument() != null ? hit.getSourceDocument().getPath() : null)
+                        .openInSourceUrl(hit.getSourceDocument() != null ? hit.getSourceDocument().getOpenInSourceUrl() : null)
                         .chunkText(hit.getChunkText())
                         .score(hit.getScore())
                         .build())
@@ -353,6 +356,8 @@ public class RagService {
                         .text(hit.getChunkText())
                         .sourceName(hit.getSourceDocument() != null ? hit.getSourceDocument().getName() : null)
                         .sourcePath(hit.getSourceDocument() != null ? hit.getSourceDocument().getPath() : null)
+                        .sourceType(hit.getSourceDocument() != null ? hit.getSourceDocument().getSourceType() : null)
+                        .openInSourceUrl(hit.getSourceDocument() != null ? hit.getSourceDocument().getOpenInSourceUrl() : null)
                         .build())
                 .toList();
     }

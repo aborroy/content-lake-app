@@ -40,6 +40,9 @@ public class RagPromptRequest {
     /** Optional HXQL filter to scope the search. */
     private String filter;
 
+    /** Optional source type filter (`alfresco` or `nuxeo`). */
+    private String sourceType;
+
     /** Embedding type to match. */
     private String embeddingType;
 

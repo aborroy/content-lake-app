@@ -70,17 +70,23 @@ public class RagPromptResponse {
         /** HXPR internal document identifier. */
         private String documentId;
 
-        /** Alfresco node identifier. */
+        /** Source node identifier. */
         private String nodeId;
 
-        /** Alfresco repository identifier. */
+        /** Source-system identifier stored in cin_sourceId. */
         private String sourceId;
 
-        /** Document name from Alfresco. */
+        /** Short source type label such as `alfresco` or `nuxeo`. */
+        private String sourceType;
+
+        /** Source document name. */
         private String name;
 
-        /** Document path from Alfresco. */
+        /** Source document path. */
         private String path;
+
+        /** Deep link to open the document in its native source UI. */
+        private String openInSourceUrl;
 
         /** Relevant chunk text from this source. */
         private String chunkText;
@@ -110,5 +116,11 @@ public class RagPromptResponse {
 
         /** Source document path. */
         private String sourcePath;
+
+        /** Source type for this context chunk. */
+        private String sourceType;
+
+        /** Deep link to open the source document for this context chunk. */
+        private String openInSourceUrl;
     }
 }

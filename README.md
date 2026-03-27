@@ -413,7 +413,7 @@ curl "http://localhost:9090/api/content-lake/nodes/{folderId}/status?includeFold
 
 #### RAG Prompt
 
-Ask a question and get an LLM-generated answer grounded in your Alfresco documents:
+Ask a question and get an LLM-generated answer grounded in your indexed Alfresco and Nuxeo documents:
 
 ```bash
 curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
@@ -428,6 +428,7 @@ curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
   -H "Content-Type: application/json" \
   -d '{
     "question": "Summarize the budget proposal",
+    "sourceType": "nuxeo",
     "topK": 10,
     "minScore": 0.6,
     "includeContext": true
@@ -472,9 +473,12 @@ Response:
   "sources": [
     {
       "documentId": "abc-123",
+      "sourceId": "nuxeo:nuxeo-demo",
+      "sourceType": "nuxeo",
       "nodeId": "e4f5a6b7-...",
       "name": "Q4-Financial-Report.pdf",
-      "path": "/Company Home/Reports/Q4-Financial-Report.pdf",
+      "path": "/default-domain/workspaces/finance",
+      "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4-Financial-Report.pdf",
       "chunkText": "Revenue for Q4 increased by 12%...",
       "score": 0.87
     }
@@ -490,6 +494,7 @@ Response:
 | `topK` | int | 5 | Number of chunks to retrieve for context |
 | `minScore` | double | 0.5 | Minimum similarity threshold |
 | `filter` | String | — | Additional HXQL filter |
+| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
 | `systemPrompt` | String | — | Override the default LLM system prompt |
 | `includeContext` | boolean | false | Include retrieved chunks in response |
 
@@ -499,6 +504,8 @@ Response:
 | `retrievalQuery` | String | Query actually sent to retrieval (may be reformulated) |
 | `historyTurnsUsed` | Integer | Number of prior turns included in this generation |
 | `tokenCount` | Integer | Total token usage (prompt + completion) when provider reports it |
+| `sources[].sourceType` | String | Source type for each cited document |
+| `sources[].openInSourceUrl` | String | Native-source deep link (Share for Alfresco, Web UI for Nuxeo) |
 
 #### Chat Stream (SSE)
 
@@ -543,6 +550,7 @@ Query params for `GET`:
 | `topK` | int | 5 | Number of chunks to retrieve for context |
 | `minScore` | double | 0.5 | Minimum similarity threshold |
 | `filter` | String | — | Additional HXQL filter |
+| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
 | `embeddingType` | String | model default | Embedding type to match |
 | `systemPrompt` | String | — | Override the default LLM system prompt |
 | `includeContext` | boolean | false | Include retrieved chunks in final metadata |
@@ -564,7 +572,7 @@ event: token
 data: {"token":"grew 12% in Q4."}
 
 event: metadata
-data: {"answer":"Revenue grew 12% in Q4.","question":"What changed in Q4?","model":"ai/gpt-oss","tokenCount":672,"searchTimeMs":245,"generationTimeMs":1830,"totalTimeMs":2075,"sourcesUsed":3,"sources":[{"documentId":"abc-123","nodeId":"e4f5a6b7-...","name":"Q4-Financial-Report.pdf","path":"/Company Home/Reports/Q4-Financial-Report.pdf","chunkText":"Revenue for Q4 increased by 12%...","score":0.87}]}
+data: {"answer":"Revenue grew 12% in Q4.","question":"What changed in Q4?","model":"ai/gpt-oss","tokenCount":672,"searchTimeMs":245,"generationTimeMs":1830,"totalTimeMs":2075,"sourcesUsed":3,"sources":[{"documentId":"abc-123","sourceId":"nuxeo:nuxeo-demo","sourceType":"nuxeo","nodeId":"e4f5a6b7-...","name":"Q4-Financial-Report.pdf","path":"/default-domain/workspaces/finance","openInSourceUrl":"http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4-Financial-Report.pdf","chunkText":"Revenue for Q4 increased by 12%...","score":0.87}]}
 
 event: done
 data: {"status":"ok"}
@@ -584,10 +592,51 @@ Search directly against the embedded chunks without LLM generation:
 ```bash
 curl -X POST http://localhost:9091/api/rag/search/semantic -u admin:admin \
   -H "Content-Type: application/json" \
-  -d '{ "query": "a girl falls in a crater", "topK": 5, "minScore": 0.6 }'
+  -d '{ "query": "contract renewal terms", "topK": 5, "minScore": 0.6 }'
 ```
 
 Semantic search applies a minimum similarity score to suppress low-quality vector matches when no strong semantic relation exists.
+
+Results can include both Alfresco and Nuxeo hits in the same response. Each hit now includes `sourceType` and `openInSourceUrl` so clients can label and open the native source system directly.
+
+```json
+{
+  "query": "contract renewal terms",
+  "resultCount": 2,
+  "results": [
+    {
+      "rank": 1,
+      "score": 0.91,
+      "chunkText": "The renewal clause starts on page 3...",
+      "sourceDocument": {
+        "documentId": "doc-alf-1",
+        "sourceId": "alfresco:repo-main",
+        "sourceType": "alfresco",
+        "nodeId": "550e8400-e29b-41d4-a716-446655440000",
+        "name": "Vendor Contract.pdf",
+        "path": "/Company Home/Sites/legal/documentLibrary",
+        "mimeType": "application/pdf",
+        "openInSourceUrl": "http://localhost:80/share/page/document-details?nodeRef=workspace://SpacesStore/550e8400-e29b-41d4-a716-446655440000"
+      }
+    },
+    {
+      "rank": 2,
+      "score": 0.88,
+      "chunkText": "Renewal requires 30 days notice...",
+      "sourceDocument": {
+        "documentId": "doc-nux-1",
+        "sourceId": "nuxeo:nuxeo-demo",
+        "sourceType": "nuxeo",
+        "nodeId": "660e8400-e29b-41d4-a716-446655440000",
+        "name": "Supplier Agreement.docx",
+        "path": "/default-domain/workspaces/legal",
+        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/legal/Supplier%20Agreement.docx"
+      }
+    }
+  ]
+}
+```
 
 * Default value: `0.5`
 * Applied server-side after vector retrieval
@@ -618,6 +667,7 @@ curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
 ```
 
 Structured metadata filters are optional. You can still pass a raw HXQL `filter` for advanced cases.
+Use `sourceType` when you want to restrict the request to a single source system without writing raw HXQL.
 
 Response example:
 
@@ -636,6 +686,16 @@ Response example:
       "rank": 1,
       "score": 0.0325,
       "chunkText": "The budget approval workflow starts with...",
+      "sourceDocument": {
+        "documentId": "doc-nux-1",
+        "sourceId": "nuxeo:nuxeo-demo",
+        "sourceType": "nuxeo",
+        "nodeId": "660e8400-e29b-41d4-a716-446655440000",
+        "name": "Budget Policy.pdf",
+        "path": "/default-domain/workspaces/finance",
+        "mimeType": "application/pdf",
+        "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Budget%20Policy.pdf"
+      },
       "vectorScore": 0.87,
       "keywordScore": 1.0,
       "vectorRank": 2,
@@ -655,10 +715,11 @@ Response example:
 | `vectorWeight` | double | `0.7` | Weight when `strategy=weighted` |
 | `textWeight` | double | `0.3` | Weight when `strategy=weighted` |
 | `filter` | String | — | Additional raw HXQL filter |
+| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
 | `metadata.mimeType` | String | — | MIME type filter (for example `application/pdf`) |
 | `metadata.pathPrefix` | String | — | Path prefix filter (starts-with match) |
-| `metadata.modifiedAfter` | String | — | Inclusive lower bound for `alfresco_modifiedAt` |
-| `metadata.modifiedBefore` | String | — | Inclusive upper bound for `alfresco_modifiedAt` |
+| `metadata.modifiedAfter` | String | — | Inclusive lower bound for `source_modifiedAt` |
+| `metadata.modifiedBefore` | String | — | Inclusive upper bound for `source_modifiedAt` |
 | `metadata.properties` | Map<String,String> | — | Exact-match filters on `cin_ingestProperties.<key>` |
 
 | Response Field | Type | Description |
@@ -685,6 +746,7 @@ Use this checklist to validate issue #14 end-to-end:
 2. Call hybrid search without metadata constraints and verify `resultCount > 0`.
 3. Call hybrid search with a restrictive metadata filter (for example `mimeType: application/pdf`) and confirm results narrow.
 4. Switch strategy to `weighted` and confirm response field `strategy` is `weighted`.
+5. Confirm Nuxeo hits expose `openInSourceUrl` values that open in Nuxeo Web UI.
 
 Example smoke-test requests:
 
@@ -697,7 +759,7 @@ curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
 # Restrictive metadata
 curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
   -H "Content-Type: application/json" \
-  -d '{"query":"budget approval process","strategy":"rrf","metadata":{"mimeType":"application/pdf"}}'
+  -d '{"query":"budget approval process","strategy":"rrf","sourceType":"nuxeo","metadata":{"mimeType":"application/pdf"}}'
 
 # Weighted strategy
 curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \

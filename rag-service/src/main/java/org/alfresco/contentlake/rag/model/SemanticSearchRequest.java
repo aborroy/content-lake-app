@@ -29,6 +29,9 @@ public class SemanticSearchRequest {
     /** Optional HXQL filter to scope the search (appended to the permission filter). */
     private String filter;
 
+    /** Optional source type filter (`alfresco` or `nuxeo`). */
+    private String sourceType;
+
     /** Embedding type to match. Defaults to wildcard ("*") which matches all types. */
     private String embeddingType;
 

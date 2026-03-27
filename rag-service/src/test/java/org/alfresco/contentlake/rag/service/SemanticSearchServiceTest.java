@@ -21,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -29,6 +30,7 @@ class SemanticSearchServiceTest {
     @Mock HxprService hxprService;
     @Mock EmbeddingService embeddingService;
     @Mock SecurityContextService securityContextService;
+    @Mock SourceMetadataResolver sourceMetadataResolver;
 
     @InjectMocks SemanticSearchService service;
 
@@ -113,6 +115,18 @@ class SemanticSearchServiceTest {
         assertThat(filter).contains("sys_racl = 'alice_#_nuxeo-demo'");
         assertThat(filter).contains("sys_racl = 'g:GROUP_ENGINEERING_#_nuxeo-demo'");
         assertThat(filter).doesNotContain("g:GROUP_ENGINEERING_#_test-repo'");
+    }
+
+    @Test
+    void buildPermissionFilter_withSourceType_usesOnlyMatchingSourceId() {
+        SemanticSearchService svc = spy(service);
+        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
+        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
+
+        String filter = svc.buildPermissionFilter("alice", "nuxeo", null);
+
+        assertThat(filter).contains("sys_racl = 'alice_#_nuxeo-demo'");
+        assertThat(filter).doesNotContain("alice_#_test-repo");
     }
 
     // -----------------------------------------------------------------------
@@ -210,5 +224,31 @@ class SemanticSearchServiceTest {
         assertThat(response.getResults()).hasSize(1);
         assertThat(response.getResults().get(0).getScore()).isEqualTo(0.8d);
         assertThat(response.getResults().get(0).getChunkText()).isEqualTo("relevant chunk");
+    }
+
+    @Test
+    void search_withSourceType_addsGenericSourceFilterAndNarrowsAuthorities() {
+        SemanticSearchService svc = spy(service);
+        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
+        doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
+
+        when(securityContextService.getCurrentUsername()).thenReturn("user");
+        when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
+        when(embeddingService.getModelName()).thenReturn("test-model");
+        when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(null);
+
+        SemanticSearchRequest request = SemanticSearchRequest.builder()
+                .query("test")
+                .sourceType("nuxeo")
+                .build();
+
+        svc.search(request);
+
+        verify(hxprService).vectorSearch(any(), any(), argThat(filter ->
+                filter.contains("cin_ingestProperties.source_type = 'nuxeo'")
+                        && filter.contains("sys_racl = 'user_#_nuxeo-demo'")
+                        && !filter.contains("user_#_test-repo")
+        ), anyInt());
+        verify(svc, never()).getUserAuthorities(eq("user"), eq("test-repo"));
     }
 }

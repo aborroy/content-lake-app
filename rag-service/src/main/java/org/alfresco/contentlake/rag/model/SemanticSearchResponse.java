@@ -78,17 +78,23 @@ public class SemanticSearchResponse {
         /** Alfresco node identifier (stored in cin_id). */
         private String nodeId;
 
-        /** Alfresco repository identifier (stored in cin_sourceId). */
+        /** Source-system identifier stored in cin_sourceId. */
         private String sourceId;
 
-        /** Document name from Alfresco. */
+        /** Short source type label such as `alfresco` or `nuxeo`. */
+        private String sourceType;
+
+        /** Source document name. */
         private String name;
 
-        /** Document path from Alfresco. */
+        /** Source document path. */
         private String path;
 
         /** MIME type of the source document. */
         private String mimeType;
+
+        /** Deep link to open the document in its native source UI. */
+        private String openInSourceUrl;
     }
 
     @Data

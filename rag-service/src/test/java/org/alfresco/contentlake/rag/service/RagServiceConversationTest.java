@@ -86,6 +86,7 @@ class RagServiceConversationTest {
         RagPromptRequest request = RagPromptRequest.builder()
                 .question("Can you expand on the second point?")
                 .sessionId("session-1")
+                .sourceType("nuxeo")
                 .build();
 
         RagPromptResponse response = ragService.prompt(request);
@@ -93,6 +94,7 @@ class RagServiceConversationTest {
         ArgumentCaptor<SemanticSearchRequest> searchCaptor = ArgumentCaptor.forClass(SemanticSearchRequest.class);
         verify(semanticSearchService).search(searchCaptor.capture());
         assertThat(searchCaptor.getValue().getQuery()).isEqualTo("expand second point from Q4 report");
+        assertThat(searchCaptor.getValue().getSourceType()).isEqualTo("nuxeo");
         assertThat(response.getRetrievalQuery()).isEqualTo("expand second point from Q4 report");
         assertThat(response.getSessionId()).isEqualTo("session-1");
         assertThat(response.getHistoryTurnsUsed()).isEqualTo(2);
@@ -218,8 +220,11 @@ class RagServiceConversationTest {
         SemanticSearchResponse.SourceDocument source = SemanticSearchResponse.SourceDocument.builder()
                 .documentId("doc-1")
                 .nodeId("node-1")
+                .sourceId("nuxeo:nuxeo-demo")
+                .sourceType("nuxeo")
                 .name("Q4.pdf")
-                .path("/Company Home/Q4.pdf")
+                .path("/default-domain/workspaces/finance")
+                .openInSourceUrl("http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4.pdf")
                 .build();
         SemanticSearchResponse.SearchHit hit = SemanticSearchResponse.SearchHit.builder()
                 .rank(1)
@@ -243,12 +248,20 @@ class RagServiceConversationTest {
 
         RagPromptResponse response = ragService.prompt(RagPromptRequest.builder()
                 .question("What changed in Q4?")
+                .includeContext(true)
                 .build());
 
         assertThat(response.getAnswer()).isEqualTo("Revenue increased by 12% in Q4.");
         assertThat(response.getModel()).isEqualTo("ai/gpt-oss");
         assertThat(response.getTokenCount()).isEqualTo(321);
         assertThat(response.getSourcesUsed()).isEqualTo(1);
+        assertThat(response.getSources().getFirst().getSourceType()).isEqualTo("nuxeo");
+        assertThat(response.getSources().getFirst().getOpenInSourceUrl())
+                .isEqualTo("http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4.pdf");
+        assertThat(response.getContext()).hasSize(1);
+        assertThat(response.getContext().getFirst().getSourceType()).isEqualTo("nuxeo");
+        assertThat(response.getContext().getFirst().getOpenInSourceUrl())
+                .isEqualTo("http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4.pdf");
         verify(chatModel).call(any(Prompt.class));
         verifyNoInteractions(conversationMemoryService, queryReformulationService, securityContextService);
     }

@@ -29,6 +29,7 @@ import static org.assertj.core.api.Assertions.within;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -38,6 +39,7 @@ class HybridSearchServiceTest {
     @Mock EmbeddingService embeddingService;
     @Mock SecurityContextService securityContextService;
     @Mock HybridSearchProperties properties;
+    @Mock SourceMetadataResolver sourceMetadataResolver;
 
     @InjectMocks HybridSearchService service;
 
@@ -310,10 +312,10 @@ class HybridSearchServiceTest {
 
             String filter = service.buildMetadataFilter(metadata);
 
-            assertThat(filter).contains("cin_ingestProperties.alfresco_mimeType = 'application/pdf'");
-            assertThat(filter).contains("(cin_ingestProperties.alfresco_path >= '/Company Home/Sites/Finance' AND cin_ingestProperties.alfresco_path < '/Company Home/Sites/Finance\uFFFF')");
-            assertThat(filter).contains("cin_ingestProperties.alfresco_modifiedAt >= '2026-01-01T00:00:00Z'");
-            assertThat(filter).contains("cin_ingestProperties.alfresco_modifiedAt <= '2026-12-31T23:59:59Z'");
+            assertThat(filter).contains("cin_ingestProperties.source_mimeType = 'application/pdf'");
+            assertThat(filter).contains("(cin_ingestProperties.source_path >= '/Company Home/Sites/Finance' AND cin_ingestProperties.source_path < '/Company Home/Sites/Finance\uFFFF')");
+            assertThat(filter).contains("cin_ingestProperties.source_modifiedAt >= '2026-01-01T00:00:00Z'");
+            assertThat(filter).contains("cin_ingestProperties.source_modifiedAt <= '2026-12-31T23:59:59Z'");
             assertThat(filter).contains("cin_ingestProperties.cm:title = 'Budget 2026'");
         }
 
@@ -392,6 +394,18 @@ class HybridSearchServiceTest {
             assertThat(filter).contains("g:GROUP_MEMBERS_#_nuxeo-demo");
             assertThat(filter).doesNotContain("g:GROUP_MEMBERS_#_test-repo");
         }
+
+        @Test
+        void buildPermissionFilter_withSourceType_usesOnlyMatchingSourceId() {
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
+            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
+
+            String filter = svc.buildPermissionFilter("user", "nuxeo", null);
+
+            assertThat(filter).contains("sys_racl = 'user_#_nuxeo-demo'");
+            assertThat(filter).doesNotContain("user_#_test-repo");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -424,6 +438,40 @@ class HybridSearchServiceTest {
             assertThat(response.getResultCount()).isZero();
             assertThat(response.getStrategy()).isEqualTo("rrf");
             assertThat(response.getQuery()).isEqualTo("test");
+        }
+
+        @Test
+        void search_withSourceType_addsGenericSourceFilterAndNarrowsAuthorities() {
+            when(properties.getStrategy()).thenReturn("rrf");
+            when(properties.getCandidateCount()).thenReturn(20);
+            when(properties.getMaxResults()).thenReturn(5);
+            when(properties.getRrfK()).thenReturn(60);
+            when(properties.getDefaultMinScore()).thenReturn(0.0);
+
+            when(securityContextService.getCurrentUsername()).thenReturn("user");
+            when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
+            when(embeddingService.getModelName()).thenReturn("test-model");
+
+            VectorSearchResult vectorResult = mock(VectorSearchResult.class);
+            when(vectorResult.getEmbeddings()).thenReturn(List.of());
+            when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
+
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
+            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
+            doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt());
+
+            svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .sourceType("nuxeo")
+                    .build());
+
+            verify(hxprService).vectorSearch(any(), any(), argThat(filter ->
+                    filter.contains("cin_ingestProperties.source_type = 'nuxeo'")
+                            && filter.contains("sys_racl = 'user_#_nuxeo-demo'")
+                            && !filter.contains("user_#_test-repo")
+            ), anyInt());
+            verify(svc, never()).getUserAuthorities(eq("user"), eq("test-repo"));
         }
 
         @Test

@@ -11,6 +11,7 @@ import org.alfresco.contentlake.security.SecurityContextService;
 import org.alfresco.contentlake.client.HxprService;
 import org.alfresco.contentlake.hxpr.api.model.Embedding;
 import org.alfresco.contentlake.hxpr.api.model.VectorSearchResult;
+import org.alfresco.contentlake.model.ContentLakeIngestProperties;
 import org.alfresco.contentlake.model.HxprDocument;
 import org.alfresco.contentlake.service.EmbeddingService;
 import org.springframework.beans.factory.annotation.Value;
@@ -55,6 +56,7 @@ public class SemanticSearchService {
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
     private final SecurityContextService securityContextService;
+    private final SourceMetadataResolver sourceMetadataResolver;
 
     @Value("${hxpr.repositoryId:default}")
     private String repositoryId;
@@ -105,7 +107,9 @@ public class SemanticSearchService {
         }
 
         // 2) Build permission filter using sys_racl
-        String hxqlFilter = buildPermissionFilter(username, request.getFilter());
+        String sourceTypeFilter = buildSourceTypeFilter(request.getSourceType());
+        String additionalFilter = combineFilters(request.getFilter(), sourceTypeFilter);
+        String hxqlFilter = buildPermissionFilter(username, request.getSourceType(), additionalFilter);
 
         // 3) Vector search
         log.debug("Executing vector search with filter: {}", hxqlFilter);
@@ -170,10 +174,14 @@ public class SemanticSearchService {
     // ---------------------------------------------------------------
 
     String buildPermissionFilter(String username, String additionalFilter) {
+        return buildPermissionFilter(username, null, additionalFilter);
+    }
+
+    String buildPermissionFilter(String username, String sourceType, String additionalFilter) {
         StringBuilder hxql = new StringBuilder(BASE_QUERY);
         List<String> conditions = new ArrayList<>();
 
-        List<String> sourceIds = resolvePermissionSourceIds(additionalFilter);
+        List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
         Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
 
         List<String> raclClauses = new ArrayList<>();
@@ -337,7 +345,7 @@ public class SemanticSearchService {
                 if (result != null && result.getDocuments() != null) {
                     result.getDocuments().stream()
                             .findFirst()
-                            .ifPresent(doc -> cache.put(docId, buildSourceDocument(docId, doc)));
+                            .ifPresent(doc -> cache.put(docId, sourceMetadataResolver.resolveSourceDocument(docId, doc)));
                 }
             } catch (Exception e) {
                 log.warn("Failed to fetch metadata for document {}: {}", docId, e.getMessage());
@@ -346,29 +354,6 @@ public class SemanticSearchService {
 
         log.debug("Enriched {} / {} document references", cache.size(), docIds.size());
         return cache;
-    }
-
-    private SourceDocument buildSourceDocument(String docId, HxprDocument doc) {
-        String path = (doc.getCinPaths() != null && !doc.getCinPaths().isEmpty())
-                ? doc.getCinPaths().getFirst() : null;
-
-        String name = null;
-        String mimeType = null;
-        if (doc.getCinIngestProperties() != null) {
-            Object nameObj = doc.getCinIngestProperties().get("alfresco_name");
-            if (nameObj != null) name = nameObj.toString();
-            Object mimeObj = doc.getCinIngestProperties().get("alfresco_mimeType");
-            if (mimeObj != null) mimeType = mimeObj.toString();
-        }
-
-        return SourceDocument.builder()
-                .documentId(docId)
-                .nodeId(doc.getCinId() != null ? doc.getCinId() : doc.getSysName())
-                .sourceId(doc.getCinSourceId())
-                .name(name)
-                .path(path)
-                .mimeType(mimeType)
-                .build();
     }
 
     // ---------------------------------------------------------------
@@ -440,8 +425,33 @@ public class SemanticSearchService {
         return value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     }
 
+    static String combineFilters(String filterA, String filterB) {
+        boolean hasA = filterA != null && !filterA.isBlank();
+        boolean hasB = filterB != null && !filterB.isBlank();
+
+        if (hasA && hasB) {
+            return "(" + filterA.trim() + ") AND (" + filterB.trim() + ")";
+        }
+        if (hasA) {
+            return filterA.trim();
+        }
+        if (hasB) {
+            return filterB.trim();
+        }
+        return null;
+    }
+
     private static String escapeHxql(String value) {
         return value == null ? "" : value.replace("'", "''");
+    }
+
+    private String buildSourceTypeFilter(String sourceType) {
+        String normalized = normalizeSourceType(sourceType);
+        if (normalized == null) {
+            return null;
+        }
+        return "cin_ingestProperties." + ContentLakeIngestProperties.SOURCE_TYPE
+                + " = '" + escapeHxql(normalized) + "'";
     }
 
     private String buildAuthorityClause(String authority, String sourceId) {
@@ -452,7 +462,7 @@ public class SemanticSearchService {
         return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
     }
 
-    private List<String> resolvePermissionSourceIds(String additionalFilter) {
+    private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {
         LinkedHashSet<String> sourceIds = new LinkedHashSet<>();
 
         if (additionalFilter != null && !additionalFilter.isBlank()) {
@@ -462,6 +472,11 @@ public class SemanticSearchService {
             }
         }
 
+        if (!sourceIds.isEmpty()) {
+            return List.copyOf(sourceIds);
+        }
+
+        addSourceIdsForType(sourceIds, sourceType);
         if (!sourceIds.isEmpty()) {
             return List.copyOf(sourceIds);
         }
@@ -476,6 +491,23 @@ public class SemanticSearchService {
         }
 
         return List.copyOf(sourceIds);
+    }
+
+    private void addSourceIdsForType(Set<String> sourceIds, String sourceType) {
+        String normalized = normalizeSourceType(sourceType);
+        if ("alfresco".equals(normalized)) {
+            addSourceId(sourceIds, repositoryId);
+        } else if ("nuxeo".equals(normalized)) {
+            addSourceId(sourceIds, nuxeoSourceId);
+        }
+    }
+
+    private String normalizeSourceType(String sourceType) {
+        if (sourceType == null) {
+            return null;
+        }
+        String trimmed = sourceType.trim().toLowerCase(Locale.ROOT);
+        return trimmed.isBlank() ? null : trimmed;
     }
 
     private static void addSourceId(Set<String> sourceIds, String candidate) {

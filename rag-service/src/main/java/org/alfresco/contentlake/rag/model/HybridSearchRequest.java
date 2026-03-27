@@ -49,7 +49,10 @@ public class HybridSearchRequest {
     /** Optional HXQL filter appended to the permission filter. */
     private String filter;
 
-    /** Optional structured metadata filter layer (mime, path, modified range, custom properties). */
+    /** Optional source type filter (`alfresco` or `nuxeo`). */
+    private String sourceType;
+
+    /** Optional structured metadata filter layer (source mime, path, modified range, custom properties). */
     private MetadataFilter metadata;
 
     /** Embedding type to match. Defaults to wildcard ("*"). */
@@ -66,16 +69,16 @@ public class HybridSearchRequest {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class MetadataFilter {
 
-        /** Filter by Alfresco MIME type (for example: "application/pdf"). */
+        /** Filter by source MIME type (for example: "application/pdf"). */
         private String mimeType;
 
-        /** Restrict results to documents whose Alfresco path starts with this prefix. */
+        /** Restrict results to documents whose source path starts with this prefix. */
         private String pathPrefix;
 
-        /** Inclusive lower bound for Alfresco modified timestamp (ISO-8601 string). */
+        /** Inclusive lower bound for source modified timestamp (ISO-8601 string). */
         private String modifiedAfter;
 
-        /** Inclusive upper bound for Alfresco modified timestamp (ISO-8601 string). */
+        /** Inclusive upper bound for source modified timestamp (ISO-8601 string). */
         private String modifiedBefore;
 
         /** Optional exact-match filters against cin_ingestProperties keys. */
