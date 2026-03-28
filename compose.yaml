@@ -1,7 +1,7 @@
 services:
   batch-ingester:
     build:
-      context: ./batch-ingester
+      context: ./alfresco/alfresco-batch-ingester
       dockerfile: Dockerfile
     ports:
       - "9090:9090"
@@ -41,7 +41,7 @@ services:
 
   live-ingester:
     build:
-      context: ./live-ingester
+      context: ./alfresco/alfresco-live-ingester
       dockerfile: Dockerfile
     ports:
       - "9092:9092"
@@ -85,7 +85,7 @@ services:
 
   rag-service:
     build:
-      context: ./rag-service
+      context: ./common/rag-service
       dockerfile: Dockerfile
     ports:
       - "9091:9091"

@@ -47,7 +47,7 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 ```text
   ┌────────────────────────────────────┐   ┌────────────────────────────────────┐
   │ Alfresco Repository + Event2       │   │ Nuxeo + Audit Stream               │
-  │ REST API + ActiveMQ topic          │   │ REST API + audit log watermark      │
+  │ REST API + ActiveMQ topic          │   │ REST API + audit log watermark     │
   └────────────────────────────────────┘   └────────────────────────────────────┘
          │                   │                    │                   │
          ▼                   ▼                    ▼                   ▼
@@ -71,7 +71,7 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
                                           ▼
                     ┌──────────────────────────────────────────┐
                     │ rag-service                              │
-                    │ Query → Embed → Search → Augment → LLM  │
+                    │ Query → Embed → Search → Augment → LLM   │
                     └──────────────────────────────────────────┘
 ```
 
