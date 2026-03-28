@@ -11,23 +11,16 @@
         <relativePath/>
     </parent>
 
-    <groupId>org.alfresco</groupId>
-    <artifactId>alfresco-content-lake</artifactId>
+    <groupId>org.hyland</groupId>
+    <artifactId>content-lake-app</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>pom</packaging>
-    <name>Alfresco Content Lake</name>
+    <name>Content Lake App</name>
 
     <modules>
-        <module>content-lake-repo-model</module>
-        <module>content-lake-spi</module>
-        <module>content-lake-core</module>
-        <module>content-lake-source-alfresco</module>
-        <module>content-lake-source-nuxeo</module>
-        <module>alfresco-batch-ingester</module>
-        <module>nuxeo-batch-ingester</module>
-        <module>alfresco-live-ingester</module>
-        <module>nuxeo-live-ingester</module>
-        <module>rag-service</module>
+        <module>common</module>
+        <module>alfresco</module>
+        <module>nuxeo</module>
     </modules>
 
     <properties>
