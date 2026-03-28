@@ -1,4 +1,4 @@
-package org.hyland.contentlake.adapter;
+package org.hyland.nuxeo.contentlake.adapter;
 
 import org.hyland.nuxeo.contentlake.model.NuxeoDocument;
 import org.hyland.contentlake.spi.SourceNode;

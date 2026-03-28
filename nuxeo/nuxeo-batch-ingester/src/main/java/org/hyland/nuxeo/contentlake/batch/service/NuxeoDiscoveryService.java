@@ -149,7 +149,8 @@ public class NuxeoDiscoveryService {
                 sanitizeValues(includedTypes),
                 sanitizeValues(excludedStates),
                 pageSize,
-                discoveryMode
+                discoveryMode,
+                nuxeoClient
         );
     }
 
@@ -200,13 +201,14 @@ public class NuxeoDiscoveryService {
                                      List<String> includedTypes,
                                      List<String> excludedLifecycleStates,
                                      int pageSize,
-                                     NuxeoProperties.Mode discoveryMode) {
+                                     NuxeoProperties.Mode discoveryMode,
+                                     NuxeoClient nuxeoClient) {
 
         private NuxeoScopeResolver scopeResolver() {
             List<String> normalizedStates = excludedLifecycleStates.stream()
                     .map(state -> state.toLowerCase(Locale.ROOT))
                     .toList();
-            return new NuxeoScopeResolver(includedRoots, includedTypes, normalizedStates);
+            return new NuxeoScopeResolver(includedRoots, includedTypes, normalizedStates, nuxeoClient);
         }
     }
 }

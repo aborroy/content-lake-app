@@ -1,4 +1,4 @@
-package org.hyland.contentlake.security;
+package org.hyland.alfresco.contentlake.security;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;

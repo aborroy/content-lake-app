@@ -1,4 +1,4 @@
-package org.hyland.contentlake.client;
+package org.hyland.alfresco.contentlake.client;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;

@@ -1,4 +1,4 @@
-package org.hyland.contentlake.client;
+package org.hyland.alfresco.contentlake.client;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;

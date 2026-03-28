@@ -1,4 +1,4 @@
-package org.hyland.contentlake.adapter;
+package org.hyland.nuxeo.contentlake.adapter;
 
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
 import org.hyland.nuxeo.contentlake.model.NuxeoDocument;
@@ -6,6 +6,7 @@ import org.hyland.contentlake.spi.SourceNode;
 
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -50,6 +51,13 @@ public final class NuxeoSourceNodeAdapter {
         props.put(ContentLakeIngestProperties.NUXEO_DOCUMENT_TYPE, document.getType());
         props.put(ContentLakeIngestProperties.NUXEO_LIFECYCLE_STATE, document.getState());
         props.put(ContentLakeIngestProperties.NUXEO_BLOB_XPATH, blobXpath);
+        if (document.getFacets() != null && !document.getFacets().isEmpty()) {
+            props.put(ContentLakeIngestProperties.NUXEO_FACETS, List.copyOf(document.getFacets()));
+        }
+        Object excludeRaw = document.getProperties().get("cls:excludeFromScope");
+        if (Boolean.TRUE.equals(excludeRaw) || "true".equalsIgnoreCase(String.valueOf(excludeRaw))) {
+            props.put(ContentLakeIngestProperties.NUXEO_EXCLUDE_FROM_SCOPE, true);
+        }
         props.values().removeIf(Objects::isNull);
 
         return new SourceNode(

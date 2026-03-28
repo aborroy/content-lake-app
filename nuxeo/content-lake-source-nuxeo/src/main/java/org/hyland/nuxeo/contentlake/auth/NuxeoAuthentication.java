@@ -1,4 +1,4 @@
-package org.hyland.contentlake.auth;
+package org.hyland.nuxeo.contentlake.auth;
 
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.client.ClientHttpRequestInterceptor;

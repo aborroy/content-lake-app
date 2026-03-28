@@ -11,6 +11,7 @@ public class NuxeoLiveProperties {
 
     private Audit audit = new Audit();
     private Embedding embedding = new Embedding();
+    private SubtreeReeval subtreeReeval = new SubtreeReeval();
 
     @Data
     public static class Audit {
@@ -36,5 +37,12 @@ public class NuxeoLiveProperties {
     public static class NoiseReduction {
         private boolean enabled = true;
         private boolean aggressive = false;
+    }
+
+    @Data
+    public static class SubtreeReeval {
+        private boolean enabled = true;
+        private int maxDepth = 10;
+        private int maxNodes = 5000;
     }
 }

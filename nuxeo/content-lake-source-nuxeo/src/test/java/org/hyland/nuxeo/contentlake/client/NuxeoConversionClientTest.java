@@ -1,4 +1,4 @@
-package org.hyland.contentlake.client;
+package org.hyland.nuxeo.contentlake.client;
 
 import com.sun.net.httpserver.HttpServer;
 import org.hyland.nuxeo.contentlake.auth.BasicNuxeoAuthentication;

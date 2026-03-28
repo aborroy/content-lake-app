@@ -1,4 +1,4 @@
-package org.hyland.contentlake.service;
+package org.hyland.alfresco.contentlake.service;
 
 import lombok.RequiredArgsConstructor;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;

@@ -1,4 +1,4 @@
-package org.hyland.contentlake.security;
+package org.hyland.alfresco.contentlake.security;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.*;

@@ -1,4 +1,4 @@
-package org.hyland.contentlake.client;
+package org.hyland.nuxeo.contentlake.client;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;

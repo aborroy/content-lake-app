@@ -17,6 +17,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import org.hyland.contentlake.model.ContentLakeIngestProperties;
+
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -312,6 +314,44 @@ class NuxeoAuditListenerTest {
         return counter != null ? counter.count() : 0.0;
     }
 
+    @Test
+    void listen_invalidatesFolderScopeOnDocumentModifiedForFolder() {
+        AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
+        OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
+        NuxeoAuditEntry modified = entry(48, "documentModified", "folder-48",
+                "2026-03-26T16:48:45.902Z", "2026-03-26T16:48:45.939Z");
+        SourceNode folder = folderNode("folder-48", List.of("ContentLakeIndexed"));
+
+        when(cursorStore.load("nuxeo:local")).thenReturn(Optional.of(initialCursor));
+        when(auditClient.fetchPage(initialCursor, windowEnd, 2)).thenReturn(pageOf(false, modified));
+        when(nuxeoClient.getNode("folder-48")).thenReturn(folder);
+        when(nuxeoClient.getChildren(eq("folder-48"), eq(0), any(Integer.class))).thenReturn(List.of());
+
+        listener.listen();
+
+        verify(scopeResolver).invalidateFolderScope("/default-domain/workspaces/folder-48");
+        verify(nodeSyncService, never()).syncNode(any());
+    }
+
+    @Test
+    void listen_doesNotInvalidateScopeOnDocumentModifiedForFile() {
+        AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
+        OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
+        NuxeoAuditEntry modified = entry(48, "documentModified", "doc-48",
+                "2026-03-26T16:48:45.902Z", "2026-03-26T16:48:45.939Z");
+        SourceNode fileNode = sourceNode("doc-48");
+
+        when(cursorStore.load("nuxeo:local")).thenReturn(Optional.of(initialCursor));
+        when(auditClient.fetchPage(initialCursor, windowEnd, 2)).thenReturn(pageOf(false, modified));
+        when(nuxeoClient.getNode("doc-48")).thenReturn(fileNode);
+        when(scopeResolver.isInScope(fileNode)).thenReturn(true);
+
+        listener.listen();
+
+        verify(scopeResolver, never()).invalidateFolderScope(any());
+        verify(nodeSyncService).syncNode(fileNode);
+    }
+
     private static SourceNode sourceNode(String nodeId) {
         return new SourceNode(
                 nodeId,
@@ -325,6 +365,27 @@ class NuxeoAuditListenerTest {
                 Set.of("GROUP_EVERYONE"),
                 Set.of(),
                 Map.of("nuxeo_documentType", "Note", "nuxeo_path", "/default-domain/workspaces/" + nodeId)
+        );
+    }
+
+    private static SourceNode folderNode(String nodeId, List<String> facets) {
+        String fullPath = "/default-domain/workspaces/" + nodeId;
+        return new SourceNode(
+                nodeId,
+                "local",
+                "nuxeo",
+                nodeId,
+                fullPath,
+                null,
+                OffsetDateTime.parse("2026-03-26T16:48:00Z"),
+                true,
+                Set.of("GROUP_EVERYONE"),
+                Set.of(),
+                Map.of(
+                        "nuxeo_documentType", "Workspace",
+                        "nuxeo_path", fullPath,
+                        ContentLakeIngestProperties.NUXEO_FACETS, facets
+                )
         );
     }
 }

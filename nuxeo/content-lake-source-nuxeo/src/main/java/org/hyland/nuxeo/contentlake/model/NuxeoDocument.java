@@ -1,4 +1,4 @@
-package org.hyland.contentlake.model;
+package org.hyland.nuxeo.contentlake.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -28,6 +28,9 @@ public class NuxeoDocument {
     private String title;
     private String state;
     private Map<String, Object> properties = Collections.emptyMap();
+
+    @JsonProperty("facets")
+    private List<String> facets = Collections.emptyList();
 
     @JsonProperty("contextParameters")
     private ContextParameters contextParameters;

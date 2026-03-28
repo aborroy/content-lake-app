@@ -1,4 +1,4 @@
-package org.hyland.contentlake.service;
+package org.hyland.alfresco.contentlake.service;
 
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
 import org.hyland.contentlake.client.HxprService;

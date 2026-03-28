@@ -152,7 +152,8 @@ class NuxeoAuditListenerIntegrationTest {
         NuxeoScopeResolver scopeResolver = new NuxeoScopeResolver(
                 List.of(includedRoot),
                 Set.of("Note"),
-                Set.of("deleted")
+                Set.of("deleted"),
+                nuxeoClient
         );
 
         RestClient hxprRestClient = RestClient.builder()

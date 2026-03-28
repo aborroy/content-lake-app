@@ -1,4 +1,4 @@
-package org.hyland.contentlake.security;
+package org.hyland.alfresco.contentlake.security;
 
 /**
  * Holds authentication credentials for Alfresco API calls.

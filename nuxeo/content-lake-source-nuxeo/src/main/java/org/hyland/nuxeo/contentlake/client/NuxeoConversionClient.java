@@ -1,4 +1,4 @@
-package org.hyland.contentlake.client;
+package org.hyland.nuxeo.contentlake.client;
 
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.nuxeo.contentlake.auth.BasicNuxeoAuthentication;

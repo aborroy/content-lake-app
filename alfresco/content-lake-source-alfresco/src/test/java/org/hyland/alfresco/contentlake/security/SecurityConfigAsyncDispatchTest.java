@@ -1,4 +1,4 @@
-package org.hyland.contentlake.security;
+package org.hyland.alfresco.contentlake.security;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;

@@ -1,4 +1,4 @@
-package org.hyland.contentlake.config;
+package org.hyland.nuxeo.contentlake.config;
 
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;

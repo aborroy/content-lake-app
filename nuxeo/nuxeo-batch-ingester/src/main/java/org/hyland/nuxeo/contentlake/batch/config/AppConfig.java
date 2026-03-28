@@ -85,11 +85,12 @@ public class AppConfig {
     }
 
     @Bean
-    public NuxeoScopeResolver nuxeoScopeResolver(NuxeoProperties props) {
+    public NuxeoScopeResolver nuxeoScopeResolver(NuxeoProperties props, NuxeoClient nuxeoClient) {
         return new NuxeoScopeResolver(
                 props.getScope().getIncludedRoots(),
                 props.getScope().getIncludedTypes(),
-                props.getScope().getExcludedLifecycleStates()
+                props.getScope().getExcludedLifecycleStates(),
+                nuxeoClient
         );
     }
 

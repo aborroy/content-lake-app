@@ -1,4 +1,4 @@
-package org.hyland.contentlake.adapter;
+package org.hyland.alfresco.contentlake.adapter;
 
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
 import org.hyland.contentlake.spi.SourceNode;
