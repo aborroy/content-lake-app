@@ -19,6 +19,7 @@ import org.hyland.contentlake.service.chunking.NoiseReductionService;
 import org.hyland.contentlake.service.chunking.SimpleChunkingService;
 import org.hyland.contentlake.service.chunking.strategy.ChunkingStrategy.ChunkingConfig;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,8 +34,7 @@ import java.time.Clock;
 @Configuration
 @EnableConfigurationProperties({
         HxprProperties.class,
-        NuxeoProperties.class,
-        NuxeoLiveProperties.class
+        NuxeoProperties.class
 })
 public class AppConfig {
 
@@ -105,6 +105,18 @@ public class AppConfig {
     @Bean
     public Clock clock() {
         return Clock.systemUTC();
+    }
+
+    /**
+     * Registers {@link NuxeoLiveProperties} as a named bean so that
+     * {@code NuxeoAuditListener}'s {@code @Scheduled} SpEL expressions
+     * ({@code #{@nuxeoLiveRuntime.audit.initialDelay.toMillis()}}) resolve correctly.
+     * Not included in {@code @EnableConfigurationProperties} to avoid a duplicate bean.
+     */
+    @Bean(name = "nuxeoLiveRuntime")
+    @ConfigurationProperties(prefix = "nuxeo.live")
+    public NuxeoLiveProperties nuxeoLiveRuntime() {
+        return new NuxeoLiveProperties();
     }
 
     @Bean
