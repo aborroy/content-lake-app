@@ -350,6 +350,7 @@ Current mixed-source filtering keeps Alfresco and Nuxeo principals source-native
 - Ingested ACLs are written to hxpr with the source instance suffix `_#_<sourceId>`.
 - Alfresco and Nuxeo principals are not normalized to a shared identity yet.
 - `rag-service` expands Alfresco groups from Alfresco and Nuxeo groups from Nuxeo, then applies them only to matching source IDs.
+- Alfresco repository admins keep repository-admin discoverability for Alfresco sources without storing synthetic `admin` ACEs in `sys_acl`.
 - This mode assumes the authenticated username is the same login string in each source you want to query.
 - Nuxeo group expansion in `rag-service` uses the configured `NUXEO_USERNAME` and `NUXEO_PASSWORD` service credentials to read `/api/v1/user/{username}`.
 
@@ -804,6 +805,11 @@ It reuses the same shared ingestion pipeline as the batch ingester:
 - Extract text with Transform Service
 - Chunk and embed with Spring AI
 - Update permissions or delete when nodes move out of scope
+
+Permission-only events are handled separately from content updates:
+
+- Direct file permission changes update only the stored hxpr ACL for that file.
+- Folder permission changes reconcile descendant file ACLs across the subtree without re-transforming or re-embedding content.
 
 The live path is guarded by the same `alfresco_modifiedAt` staleness check used by batch ingestion, so batch and live runs can coexist safely.
 

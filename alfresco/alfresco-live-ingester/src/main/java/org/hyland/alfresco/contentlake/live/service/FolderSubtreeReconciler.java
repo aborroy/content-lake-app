@@ -27,24 +27,37 @@ public class FolderSubtreeReconciler {
     private final NodeSyncService nodeSyncService;
 
     public ReconciliationResult reconcile(Node folder, OffsetDateTime eventTimestamp) {
+        return reconcile(folder, eventTimestamp, ReconciliationMode.SCOPE);
+    }
+
+    public ReconciliationResult reconcilePermissions(Node folder, OffsetDateTime eventTimestamp) {
+        return reconcile(folder, eventTimestamp, ReconciliationMode.PERMISSIONS);
+    }
+
+    private ReconciliationResult reconcile(Node folder,
+                                           OffsetDateTime eventTimestamp,
+                                           ReconciliationMode mode) {
         ReconciliationResult result = new ReconciliationResult();
 
         if (folder == null || !Boolean.TRUE.equals(folder.isIsFolder())) {
             return result;
         }
 
-        reconcileChildren(folder.getId(), eventTimestamp, result);
+        reconcileChildren(folder.getId(), eventTimestamp, result, mode);
         return result;
     }
 
-    private void reconcileChildren(String folderId, OffsetDateTime eventTimestamp, ReconciliationResult result) {
+    private void reconcileChildren(String folderId,
+                                   OffsetDateTime eventTimestamp,
+                                   ReconciliationResult result,
+                                   ReconciliationMode mode) {
         for (Node child : alfrescoClient.getAllChildren(folderId)) {
             if (Boolean.TRUE.equals(child.isIsFolder())) {
                 if (!scopeResolver.shouldTraverse(child)) {
                     result.skipped++;
                     continue;
                 }
-                reconcileChildren(child.getId(), eventTimestamp, result);
+                reconcileChildren(child.getId(), eventTimestamp, result, mode);
                 continue;
             }
 
@@ -55,10 +68,12 @@ public class FolderSubtreeReconciler {
 
             try {
                 if (scopeResolver.isInScope(child)) {
-                    Set<String> readers = alfrescoClient.extractReadAuthorities(child);
-                    SourceNode sourceNode = AlfrescoSourceNodeAdapter.toSourceNode(
-                            child, alfrescoClient.getSourceId(), readers);
-                    nodeSyncService.syncNode(sourceNode);
+                    SourceNode sourceNode = toSourceNode(child);
+                    if (mode == ReconciliationMode.PERMISSIONS) {
+                        nodeSyncService.updatePermissions(sourceNode);
+                    } else {
+                        nodeSyncService.syncNode(sourceNode);
+                    }
                     result.synced++;
                 } else {
                     nodeSyncService.deleteNode(child.getId(), resolveDeleteTimestamp(eventTimestamp, child));
@@ -69,6 +84,11 @@ public class FolderSubtreeReconciler {
                 log.error("Failed to reconcile node {} during folder subtree reconciliation", child.getId(), e);
             }
         }
+    }
+
+    private SourceNode toSourceNode(Node child) {
+        Set<String> readers = alfrescoClient.extractReadAuthorities(child);
+        return AlfrescoSourceNodeAdapter.toSourceNode(child, alfrescoClient.getSourceId(), readers);
     }
 
     private OffsetDateTime resolveDeleteTimestamp(OffsetDateTime eventTimestamp, Node child) {
@@ -88,5 +108,10 @@ public class FolderSubtreeReconciler {
         public int deleted()  { return deleted; }
         public int skipped()  { return skipped; }
         public int failed()   { return failed; }
+    }
+
+    private enum ReconciliationMode {
+        SCOPE,
+        PERMISSIONS
     }
 }

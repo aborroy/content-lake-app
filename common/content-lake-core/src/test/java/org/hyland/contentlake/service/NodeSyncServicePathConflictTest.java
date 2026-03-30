@@ -238,4 +238,76 @@ class NodeSyncServicePathConflictTest {
         assertThat(update.getSysFulltextBinary()).isNull();
         assertThat(update.getSysembedEmbeddings()).isNull();
     }
+
+    @Test
+    void updatePermissions_whenDocumentMissing_createsMetadataOnlyDocumentForFile() {
+        SourceNode node = new SourceNode(
+                "node-new",
+                SOURCE_ID,
+                "alfresco",
+                "restricted.txt",
+                "/restricted",
+                "text/plain",
+                OffsetDateTime.parse("2026-03-30T09:30:00Z"),
+                false,
+                Set.of("user-a"),
+                Set.of(),
+                Map.of(
+                        "source_nodeId", "node-new",
+                        "source_type", "alfresco",
+                        "source_path", "/restricted",
+                        "source_name", "restricted.txt",
+                        "source_mimeType", "text/plain",
+                        "source_modifiedAt", "2026-03-30T09:30:00Z"
+                )
+        );
+
+        HxprDocument created = new HxprDocument();
+        created.setSysId("hxpr-new");
+
+        when(hxprService.findByNodeId("node-new", FORMATTED_SOURCE_ID)).thenReturn(null);
+        when(hxprService.findByPath("/alfresco-sync/default/restricted/restricted.txt")).thenReturn(null);
+        when(hxprService.createDocument(eq("/alfresco-sync/default/restricted"), any(HxprDocument.class)))
+                .thenReturn(created);
+
+        service.updatePermissions(node);
+
+        ArgumentCaptor<HxprDocument> captor = ArgumentCaptor.forClass(HxprDocument.class);
+        verify(hxprService).ensureFolder("/alfresco-sync/default/restricted");
+        verify(hxprService).createDocument(eq("/alfresco-sync/default/restricted"), captor.capture());
+        verify(documentApi, never()).updateById(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any());
+
+        HxprDocument payload = captor.getValue();
+        assertThat(payload.getCinId()).isEqualTo("node-new");
+        assertThat(payload.getCinSourceId()).isEqualTo(FORMATTED_SOURCE_ID);
+        assertThat(payload.getCinRead()).containsExactly("user-a");
+        assertThat(payload.getSysAcl()).hasSize(1);
+        assertThat(payload.getSysFulltextBinary()).isNull();
+    }
+
+    @Test
+    void updatePermissions_whenDocumentMissingForFolder_skipsFallbackCreation() {
+        SourceNode folder = new SourceNode(
+                "folder-acl",
+                SOURCE_ID,
+                "alfresco",
+                "Restricted Folder",
+                "/restricted",
+                null,
+                OffsetDateTime.parse("2026-03-30T09:31:00Z"),
+                true,
+                Set.of("user-a"),
+                Set.of(),
+                Map.of("source_nodeId", "folder-acl")
+        );
+
+        when(hxprService.findByNodeId("folder-acl", FORMATTED_SOURCE_ID)).thenReturn(null);
+
+        service.updatePermissions(folder);
+
+        verify(hxprService, never()).createDocument(any(), any());
+        verify(documentApi, never()).updateById(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any());
+    }
 }

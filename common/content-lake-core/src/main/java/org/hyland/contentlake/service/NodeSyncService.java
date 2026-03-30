@@ -255,7 +255,15 @@ public class NodeSyncService {
     public void updatePermissions(SourceNode node) {
         HxprDocument existing = hxprService.findByNodeId(node.nodeId(), formatSourceId(node));
         if (existing == null) {
-            log.debug("No Content Lake document found for permission update on node {}", node.nodeId());
+            if (node.folder()) {
+                log.debug("Skipping permission-only fallback for folder node {} with no Content Lake document",
+                        node.nodeId());
+                return;
+            }
+
+            HxprDocument created = createDocument(node);
+            log.info("Created metadata-only Content Lake document {} during permission update for node {}",
+                    created.getSysId(), node.nodeId());
             return;
         }
 

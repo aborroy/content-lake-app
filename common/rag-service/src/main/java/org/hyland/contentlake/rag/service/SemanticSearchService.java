@@ -47,6 +47,7 @@ public class SemanticSearchService {
     private static final String RACL_FIELD = "sys_racl";
     private static final String EVERYONE_PRINCIPAL = "__Everyone__";
     private static final String GROUP_PREFIX = "GROUP_";
+    private static final String ALFRESCO_ADMINISTRATORS = "GROUP_ALFRESCO_ADMINISTRATORS";
     private static final String GROUP_RACL_PREFIX = "g:";
     private static final String SOURCE_ID_SEPARATOR = "_#_";
     private static final Pattern SOURCE_ID_EQUALS_PATTERN = Pattern.compile("cin_sourceId\\s*=\\s*'([^']+)'");
@@ -184,22 +185,15 @@ public class SemanticSearchService {
         List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
         Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
 
-        List<String> raclClauses = new ArrayList<>();
-        raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");
-
+        List<String> sourceClauses = new ArrayList<>();
         for (String sourceId : sourceIds) {
             List<String> authorities = authoritiesBySource.getOrDefault(sourceId, defaultAuthorities(username));
-            for (String authority : authorities) {
-                if ("GROUP_EVERYONE".equals(authority)) {
-                    continue;
-                }
-                raclClauses.add(buildAuthorityClause(authority, sourceId));
-            }
+            sourceClauses.add(buildSourcePermissionClause(sourceId, authorities));
         }
 
         log.debug("Permission filter with source-scoped authorities for user {} (sourceIds={})", username, sourceIds);
 
-        conditions.add("(" + String.join(" OR ", raclClauses) + ")");
+        conditions.add("(" + String.join(" OR ", sourceClauses) + ")");
 
         if (additionalFilter != null && !additionalFilter.isBlank()) {
             conditions.add("(" + additionalFilter.trim() + ")");
@@ -460,6 +454,42 @@ public class SemanticSearchService {
                 ? GROUP_RACL_PREFIX + namespaced
                 : namespaced;
         return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
+    }
+
+    private String buildSourcePermissionClause(String sourceId, List<String> authorities) {
+        if (hasFullSourceAccess(sourceId, authorities)) {
+            return buildSourceIdClause(sourceId);
+        }
+
+        List<String> raclClauses = new ArrayList<>();
+        raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");
+
+        for (String authority : authorities) {
+            if ("GROUP_EVERYONE".equals(authority)) {
+                continue;
+            }
+            raclClauses.add(buildAuthorityClause(authority, sourceId));
+        }
+
+        return "(" + String.join(" OR ", raclClauses) + ")";
+    }
+
+    private boolean hasFullSourceAccess(String sourceId, List<String> authorities) {
+        return isAlfrescoSource(sourceId) && authorities != null && authorities.contains(ALFRESCO_ADMINISTRATORS);
+    }
+
+    private String buildSourceIdClause(String sourceId) {
+        return "cin_sourceId = '" + escapeHxql(formatSourceId(sourceId)) + "'";
+    }
+
+    private String formatSourceId(String sourceId) {
+        if (isAlfrescoSource(sourceId)) {
+            return "alfresco:" + sourceId;
+        }
+        if (isNuxeoSource(sourceId)) {
+            return "nuxeo:" + sourceId;
+        }
+        return sourceId;
     }
 
     private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {

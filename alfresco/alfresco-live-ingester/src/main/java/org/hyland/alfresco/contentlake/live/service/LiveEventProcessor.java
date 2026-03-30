@@ -126,6 +126,30 @@ public class LiveEventProcessor {
                 return;
             }
 
+            if (Boolean.TRUE.equals(node.isIsFolder())) {
+                if (!scopeResolver.shouldTraverse(node)) {
+                    metrics.recordFiltered();
+                    log.debug("Folder {} is excluded from permission subtree reconciliation for event {}",
+                            node.getId(), event.getId());
+                    return;
+                }
+
+                FolderSubtreeReconciler.ReconciliationResult result =
+                        folderSubtreeReconciler.reconcilePermissions(node, resolveEventTimestamp(event, node));
+
+                metrics.recordProcessed();
+                log.info(
+                        "Reconciled permissions for subtree {} after {}: updated={}, deleted={}, skipped={}, failed={}",
+                        node.getId(),
+                        event.getType(),
+                        result.synced(),
+                        result.deleted(),
+                        result.skipped(),
+                        result.failed()
+                );
+                return;
+            }
+
             if (!scopeResolver.isInScope(node)) {
                 nodeSyncService.deleteNode(node.getId(), resolveEventTimestamp(event, node));
                 metrics.recordFiltered();

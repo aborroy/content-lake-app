@@ -406,6 +406,37 @@ class HybridSearchServiceTest {
             assertThat(filter).contains("sys_racl = 'user_#_nuxeo-demo'");
             assertThat(filter).doesNotContain("user_#_test-repo");
         }
+
+        @Test
+        void buildPermissionFilter_alfrescoAdminDoesNotRestrictToAdminAuthorities() {
+            HybridSearchService svc = spy(service);
+            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
+                    .when(svc).getUserAuthorities("admin", "test-repo");
+
+            String filter = svc.buildPermissionFilter("admin", "alfresco", null);
+
+            assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
+            assertThat(filter).doesNotContain("sys_racl = 'admin_#_test-repo'");
+            assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
+        }
+
+        @Test
+        void buildPermissionFilter_mixedSources_keepsAlfrescoAdminBypassScopedToAlfresco() {
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
+            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
+            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
+                    .when(svc).getUserAuthorities("admin", "test-repo");
+            doReturn(List.of("admin", "GROUP_MEMBERS"))
+                    .when(svc).getUserAuthorities("admin", "nuxeo-demo");
+
+            String filter = svc.buildPermissionFilter("admin", null);
+
+            assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
+            assertThat(filter).contains("sys_racl = 'g:GROUP_MEMBERS_#_nuxeo-demo'");
+            assertThat(filter).doesNotContain("sys_racl = 'admin_#_test-repo'");
+            assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
+        }
     }
 
     // -----------------------------------------------------------------------
