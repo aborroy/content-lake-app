@@ -105,7 +105,8 @@ public class NodeSyncService {
 
         HxprDocument existing = hxprService.findByNodeId(nodeId, sourceId);
         if (existing != null && isStale(existing, node)) {
-            log.debug("Skipping node {} — Content Lake version is already current", nodeId);
+            refreshPermissions(existing.getSysId(), node);
+            log.debug("Skipping content for node {} — Content Lake version is already current; permissions refreshed", nodeId);
             return existing.getSysId();
         }
 
@@ -140,7 +141,8 @@ public class NodeSyncService {
 
         HxprDocument existing = hxprService.findByNodeId(nodeId, sourceId);
         if (existing != null && isStale(existing, node)) {
-            log.debug("Skipping metadata for node {} — already current", nodeId);
+            refreshPermissions(existing.getSysId(), node);
+            log.debug("Skipping metadata for node {} — already current; permissions refreshed", nodeId);
             return new SyncResult(existing.getSysId(), nodeId,
                     node.mimeType(), node.name(), node.path(), true, null);
         }
@@ -267,6 +269,10 @@ public class NodeSyncService {
             return;
         }
 
+        refreshPermissions(existing.getSysId(), node);
+    }
+
+    private void refreshPermissions(String hxprDocId, SourceNode node) {
         String sourceId = node.sourceId();
         List<String> readerList = toSortedPrincipals(node.readPrincipals());
         List<String> denyList = toSortedPrincipals(node.denyPrincipals());
@@ -276,9 +282,9 @@ public class NodeSyncService {
         update.setSysAcl(sysAcl);
         update.setCinRead(readerList);
         update.setCinDeny(denyList);
-        documentApi.updateById(existing.getSysId(), update);
+        documentApi.updateById(hxprDocId, update);
 
-        log.info("Updated ACL for Content Lake document {} (node {})", existing.getSysId(), node.nodeId());
+        log.info("Updated ACL for Content Lake document {} (node {})", hxprDocId, node.nodeId());
     }
 
     // ──────────────────────────────────────────────────────────────────────

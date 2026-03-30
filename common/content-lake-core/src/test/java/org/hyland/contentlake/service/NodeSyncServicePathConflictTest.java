@@ -14,6 +14,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.client.HttpClientErrorException;
@@ -26,6 +27,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -308,6 +310,80 @@ class NodeSyncServicePathConflictTest {
 
         verify(hxprService, never()).createDocument(any(), any());
         verify(documentApi, never()).updateById(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any());
+    }
+
+    @Test
+    void ingestMetadata_whenStale_refreshesPermissionsWithoutReprocessingContent() {
+        SourceNode node = new SourceNode(
+                "node-stale",
+                SOURCE_ID,
+                "alfresco",
+                "restricted.txt",
+                "/restricted",
+                "text/plain",
+                OffsetDateTime.parse("2026-03-30T09:30:00Z"),
+                false,
+                Set.of("user-a"),
+                Set.of("GROUP_secret"),
+                Map.of(
+                        "source_nodeId", "node-stale",
+                        "source_modifiedAt", "2026-03-30T09:30:00Z"
+                )
+        );
+
+        HxprDocument existing = new HxprDocument();
+        existing.setSysId("hxpr-stale");
+        existing.setCinIngestProperties(Map.of("source_modifiedAt", "2026-03-30T09:30:00Z"));
+        when(hxprService.findByNodeId("node-stale", FORMATTED_SOURCE_ID)).thenReturn(existing);
+
+        NodeSyncService.SyncResult result = service.ingestMetadata(node);
+
+        assertThat(result.hxprDocId()).isEqualTo("hxpr-stale");
+        assertThat(result.skipped()).isTrue();
+
+        ArgumentCaptor<HxprDocument> captor = ArgumentCaptor.forClass(HxprDocument.class);
+        verify(documentApi).updateById(eq("hxpr-stale"), captor.capture());
+        verify(hxprService, never()).createDocument(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any());
+
+        HxprDocument update = captor.getValue();
+        assertThat(update.getCinRead()).containsExactly("user-a");
+        assertThat(update.getCinDeny()).containsExactly("GROUP_secret");
+        assertThat(update.getSysAcl()).hasSize(1);
+    }
+
+    @Test
+    void syncNode_whenStale_refreshesPermissionsWithoutReprocessingContent() {
+        SourceNode node = new SourceNode(
+                "node-stale-sync",
+                SOURCE_ID,
+                "alfresco",
+                "restricted.txt",
+                "/restricted",
+                "text/plain",
+                OffsetDateTime.parse("2026-03-30T09:30:00Z"),
+                false,
+                Set.of("user-a"),
+                Set.of(),
+                Map.of(
+                        "source_nodeId", "node-stale-sync",
+                        "source_modifiedAt", "2026-03-30T09:30:00Z"
+                )
+        );
+
+        HxprDocument existing = new HxprDocument();
+        existing.setSysId("hxpr-stale-sync");
+        existing.setCinIngestProperties(Map.of("source_modifiedAt", "2026-03-30T09:30:00Z"));
+        when(hxprService.findByNodeId("node-stale-sync", FORMATTED_SOURCE_ID)).thenReturn(existing);
+
+        String sysId = service.syncNode(node);
+
+        assertThat(sysId).isEqualTo("hxpr-stale-sync");
+        verify(documentApi).updateById(eq("hxpr-stale-sync"), any(HxprDocument.class));
+        verify(textExtractor, never()).extractText(anyString(), anyString());
+        verify(textExtractor, never()).extractText(any(Resource.class), anyString());
+        verify(embeddingService, never()).embedChunks(any());
         verify(hxprService, never()).updateEmbeddings(any(), any());
     }
 }
