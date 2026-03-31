@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
-class AclChangeCollector implements InitializingBean,
+public class AclChangeCollector implements InitializingBean,
         PermissionServicePolicies.OnGrantLocalPermission,
         PermissionServicePolicies.OnRevokeLocalPermission,
         PermissionServicePolicies.OnInheritPermissionsEnabled,

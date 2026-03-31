@@ -12,6 +12,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.lang.reflect.Modifier;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -33,6 +35,11 @@ class AclChangeCollectorTest {
     @BeforeEach
     void setUp() {
         collector = new AclChangeCollector(true, null, nodeService, dictionaryService, txnBuffer);
+    }
+
+    @Test
+    void collectorClass_isPublicForAlfrescoPolicyReflection() {
+        assertThat(Modifier.isPublic(AclChangeCollector.class.getModifiers())).isTrue();
     }
 
     @Test
