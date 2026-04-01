@@ -159,14 +159,14 @@ public class NuxeoAuditListener {
 
     private void handleFolderModified(String repositoryKey, SourceNode folder, NuxeoAuditEntry entry) {
         String folderPath = getFolderPath(folder);
-        scopeResolver.invalidateFolderScope(folderPath);
+        boolean hadCachedEntry = scopeResolver.invalidateFolderScope(folderPath);
 
         Object facetsObj = folder.sourceProperties().get(ContentLakeIngestProperties.NUXEO_FACETS);
         boolean hasScopeFacet = facetsObj instanceof List<?> facets
                 && (facets.contains("ContentLakeIndexed") || facets.contains("ContentLakeScope"));
 
-        if (hasScopeFacet && liveProperties.getSubtreeReeval().isEnabled()) {
-            log.info("Folder {} has scope facets; invalidated cache and triggering subtree re-evaluation", folderPath);
+        if ((hasScopeFacet || hadCachedEntry) && liveProperties.getSubtreeReeval().isEnabled()) {
+            log.info("Folder {} scope changed; invalidated cache and triggering subtree re-evaluation", folderPath);
             reevaluateSubtree(folder, entry, 0, new int[]{0});
         } else {
             log.debug("Folder {} modified; scope cache invalidated", folderPath);
@@ -201,9 +201,7 @@ public class NuxeoAuditListener {
                     return;
                 }
                 if (child.folder()) {
-                    if (scopeResolver.shouldTraverse(child)) {
-                        reevaluateSubtree(child, triggerEntry, currentDepth + 1, nodeCount);
-                    }
+                    reevaluateSubtree(child, triggerEntry, currentDepth + 1, nodeCount);
                 } else {
                     if (scopeResolver.isInScope(child)) {
                         nodeSyncService.syncNode(child);

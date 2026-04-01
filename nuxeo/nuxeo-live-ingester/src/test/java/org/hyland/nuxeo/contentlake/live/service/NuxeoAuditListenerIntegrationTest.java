@@ -139,9 +139,111 @@ class NuxeoAuditListenerIntegrationTest {
         }
     }
 
+    @Test
+    void listen_disablingContentLakeRemovesIndexedSubtreeFromHxpr() throws Exception {
+        assumeTrue(waitForNuxeo(Duration.ofSeconds(90)),
+                "Start nuxeo-deployment/compose.yaml before running this integration test");
+
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        String namespace = "codex-disable-it-" + UUID.randomUUID().toString().substring(0, 8);
+        Path cursorFile = tempDir.resolve("audit-cursor-disable.json");
+        NuxeoDocument workspace = null;
+        NuxeoDocument subfolder = null;
+        NuxeoDocument noteInWorkspace = null;
+        NuxeoDocument noteInSubfolder = null;
+
+        try (FakeHxprServer hxpr = new FakeHxprServer(objectMapper)) {
+            workspace = createWorkspace(namespace);
+            subfolder = createFolder(workspace.getPath(), namespace);
+            noteInWorkspace = createNote(workspace.getPath(), namespace + "-w");
+            noteInSubfolder = createNote(subfolder.getPath(), namespace + "-s");
+
+            ListenerHarness harness = createHarness(hxpr.baseUrl(), cursorFile, workspace.getPath(), objectMapper);
+            OffsetDateTime cursorStart = OffsetDateTime.now(ZoneOffset.UTC);
+            harness.cursorStore().save(REPOSITORY_KEY, AuditCursor.initial(cursorStart));
+
+            waitForAuditEvent(noteInSubfolder.getUid(), "documentCreated", Duration.ofSeconds(30));
+            harness.listener().listen();
+
+            assertThat(hxpr.findFileByNodeId(noteInWorkspace.getUid())).isNotNull();
+            assertThat(hxpr.findFileByNodeId(noteInSubfolder.getUid())).isNotNull();
+            assertThat(hxpr.fileDocumentCount()).isEqualTo(2);
+
+            // Exclude the subfolder — note in subfolder must be removed, note in workspace kept
+            addFacet(subfolder.getUid(), "ContentLakeScope");
+            setProperty(subfolder.getUid(), "cls:excludeFromScope", "true");
+            waitForAuditEvent(subfolder.getUid(), "documentModified", Duration.ofSeconds(30));
+
+            harness.listener().listen();
+
+            assertThat(hxpr.findFileByNodeId(noteInSubfolder.getUid())).isNull();
+            assertThat(hxpr.findFileByNodeId(noteInWorkspace.getUid())).isNotNull();
+            assertThat(hxpr.fileDocumentCount()).isEqualTo(1);
+            assertThat(hxpr.fileDeleteCount()).isEqualTo(1);
+        } finally {
+            if (noteInSubfolder != null) trashDocumentQuietly(noteInSubfolder.getUid());
+            if (noteInWorkspace != null) trashDocumentQuietly(noteInWorkspace.getUid());
+            if (subfolder != null) trashDocumentQuietly(subfolder.getUid());
+            if (workspace != null) trashDocumentQuietly(workspace.getUid());
+        }
+    }
+
+    @Test
+    void listen_removingContentLakeIndexedFacetRemovesIndexedSubtreeFromHxpr() throws Exception {
+        assumeTrue(waitForNuxeo(Duration.ofSeconds(90)),
+                "Start nuxeo-deployment/compose.yaml before running this integration test");
+
+        ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        String namespace = "codex-remove-facet-it-" + UUID.randomUUID().toString().substring(0, 8);
+        Path cursorFile = tempDir.resolve("audit-cursor-remove-facet.json");
+        NuxeoDocument workspace = null;
+        NuxeoDocument subfolder = null;
+        NuxeoDocument note = null;
+
+        try (FakeHxprServer hxpr = new FakeHxprServer(objectMapper)) {
+            // Use workspace NOT in includedRoots; rely solely on ContentLakeIndexed facet for scope
+            workspace = createWorkspace(namespace);
+            addFacet(workspace.getUid(), "ContentLakeIndexed");
+            subfolder = createFolder(workspace.getPath(), namespace);
+            note = createNote(subfolder.getPath(), namespace + "-note");
+
+            // Use empty includedRoots so only ContentLakeIndexed drives scope
+            ListenerHarness harness = createHarness(hxpr.baseUrl(), cursorFile, List.of(), objectMapper);
+            OffsetDateTime cursorStart = OffsetDateTime.now(ZoneOffset.UTC);
+            harness.cursorStore().save(REPOSITORY_KEY, AuditCursor.initial(cursorStart));
+
+            waitForAuditEvent(note.getUid(), "documentCreated", Duration.ofSeconds(30));
+            harness.listener().listen();
+
+            assertThat(hxpr.findFileByNodeId(note.getUid())).isNotNull();
+            assertThat(hxpr.fileDocumentCount()).isEqualTo(1);
+
+            // Remove ContentLakeIndexed — note must be removed from hxpr
+            removeFacet(workspace.getUid(), "ContentLakeIndexed");
+            waitForAuditEvent(workspace.getUid(), "documentModified", Duration.ofSeconds(30));
+
+            harness.listener().listen();
+
+            assertThat(hxpr.findFileByNodeId(note.getUid())).isNull();
+            assertThat(hxpr.fileDocumentCount()).isZero();
+            assertThat(hxpr.fileDeleteCount()).isEqualTo(1);
+        } finally {
+            if (note != null) trashDocumentQuietly(note.getUid());
+            if (subfolder != null) trashDocumentQuietly(subfolder.getUid());
+            if (workspace != null) trashDocumentQuietly(workspace.getUid());
+        }
+    }
+
     private static ListenerHarness createHarness(String hxprBaseUrl,
                                                  Path cursorFile,
                                                  String includedRoot,
+                                                 ObjectMapper objectMapper) {
+        return createHarness(hxprBaseUrl, cursorFile, List.of(includedRoot), objectMapper);
+    }
+
+    private static ListenerHarness createHarness(String hxprBaseUrl,
+                                                 Path cursorFile,
+                                                 List<String> includedRoots,
                                                  ObjectMapper objectMapper) {
         BasicNuxeoAuthentication authentication = new BasicNuxeoAuthentication(NUXEO_USERNAME, NUXEO_PASSWORD);
         Clock clock = Clock.systemUTC();
@@ -150,7 +252,7 @@ class NuxeoAuditListenerIntegrationTest {
         FileAuditCursorStore cursorStore = new FileAuditCursorStore(cursorFile, objectMapper);
         NuxeoClient nuxeoClient = new NuxeoClient(NUXEO_BASE_URL, SOURCE_ID, "file:content", authentication);
         NuxeoScopeResolver scopeResolver = new NuxeoScopeResolver(
-                List.of(includedRoot),
+                includedRoots,
                 Set.of("Note"),
                 Set.of("deleted"),
                 nuxeoClient
@@ -248,6 +350,54 @@ class NuxeoAuditListenerIntegrationTest {
                 ))
                 .retrieve()
                 .body(NuxeoDocument.class);
+    }
+
+    private static NuxeoDocument createFolder(String parentPath, String namespace) {
+        return nuxeoSiteClient().post()
+                .uri("/site/automation/Document.Create")
+                .body(Map.of(
+                        "params", Map.of(
+                                "type", "Folder",
+                                "name", namespace + "-folder",
+                                "properties", "dc:title=" + namespace + "-folder"
+                        ),
+                        "input", "doc:" + parentPath
+                ))
+                .retrieve()
+                .body(NuxeoDocument.class);
+    }
+
+    private static void addFacet(String uid, String facetName) {
+        nuxeoSiteClient().post()
+                .uri("/site/automation/Document.AddFacet")
+                .body(Map.of(
+                        "params", Map.of("facet", facetName),
+                        "input", "doc:" + uid
+                ))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    private static void removeFacet(String uid, String facetName) {
+        nuxeoSiteClient().post()
+                .uri("/site/automation/Document.RemoveFacet")
+                .body(Map.of(
+                        "params", Map.of("facet", facetName),
+                        "input", "doc:" + uid
+                ))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    private static void setProperty(String uid, String xpath, String value) {
+        nuxeoSiteClient().post()
+                .uri("/site/automation/Document.SetProperty")
+                .body(Map.of(
+                        "params", Map.of("xpath", xpath, "value", value),
+                        "input", "doc:" + uid
+                ))
+                .retrieve()
+                .toBodilessEntity();
     }
 
     private static void trashDocument(String uid) {

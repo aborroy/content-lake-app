@@ -149,9 +149,10 @@ public class NuxeoScopeResolver implements ScopeResolver {
      * is added to or removed from a folder so that subsequent {@link #isInScope} calls
      * reflect the updated facet state.</p>
      */
-    public void invalidateFolderScope(String folderPath) {
-        indexedCache.remove(folderPath);
-        excludedCache.remove(folderPath);
+    public boolean invalidateFolderScope(String folderPath) {
+        boolean removedIndexed = indexedCache.remove(folderPath) != null;
+        boolean removedExcluded = excludedCache.remove(folderPath) != null;
+        return removedIndexed || removedExcluded;
     }
 
     // ──────────────────────────────────────────────────────────────────────
