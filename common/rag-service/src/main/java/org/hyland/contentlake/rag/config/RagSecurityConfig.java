@@ -1,6 +1,7 @@
 package org.hyland.contentlake.rag.config;
 
 import jakarta.servlet.DispatcherType;
+import org.hyland.contentlake.rag.security.AlfrescoTicketAuthenticationFilter;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
 import org.hyland.contentlake.rag.security.NuxeoTokenAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
@@ -34,6 +35,8 @@ public class RagSecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(provider)
+                .addFilterBefore(new AlfrescoTicketAuthenticationFilter(authenticationManager),
+                        BasicAuthenticationFilter.class)
                 .addFilterBefore(new NuxeoTokenAuthenticationFilter(authenticationManager),
                         BasicAuthenticationFilter.class)
                 .httpBasic(Customizer.withDefaults())
