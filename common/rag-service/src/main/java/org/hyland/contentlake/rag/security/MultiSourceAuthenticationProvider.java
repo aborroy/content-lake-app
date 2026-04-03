@@ -29,6 +29,7 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
 
     private static final int CONNECT_TIMEOUT_MS = 3_000;
     private static final int READ_TIMEOUT_MS = 5_000;
+    static final String NUXEO_TOKEN_PRINCIPAL_PREFIX = "NUXEO_TOKEN::";
 
     @Value("${content.service.url}")
     private String alfrescoUrl;
@@ -38,27 +39,41 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
 
     @Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-        String username = authentication.getName();
-        String password = authentication.getCredentials().toString();
+        String principal = authentication.getName();
+        Object credentials = authentication.getCredentials();
+        String password = credentials == null ? "" : credentials.toString();
 
-        if (username.startsWith("TICKET_") && password.isEmpty()) {
-            if (tryAlfrescoTicketAuth(username)) {
-                log.debug("Authenticated ticket '{}' via Alfresco", username.substring(0, Math.min(username.length(), 20)));
-                return new UsernamePasswordAuthenticationToken(
-                        username, null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
+        if (principal.startsWith("TICKET_") && password.isEmpty()) {
+            String resolvedUsername = tryAlfrescoTicketAuth(principal);
+            if (resolvedUsername != null) {
+                log.debug("Authenticated Alfresco ticket '{}' as '{}'",
+                        principal.substring(0, Math.min(principal.length(), 20)),
+                        resolvedUsername);
+                return authenticatedUser(resolvedUsername);
             }
-            log.warn("Alfresco ticket validation failed for '{}'", username.substring(0, Math.min(username.length(), 20)));
+            log.warn("Alfresco ticket validation failed for '{}'",
+                    principal.substring(0, Math.min(principal.length(), 20)));
             throw new BadCredentialsException("Invalid or expired Alfresco ticket");
         }
 
-        if (tryAlfrescoAuth(username, password) || tryNuxeoAuth(username, password)) {
-            log.debug("Authenticated user '{}'", username);
-            return new UsernamePasswordAuthenticationToken(
-                    username, null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
+        if (principal.startsWith(NUXEO_TOKEN_PRINCIPAL_PREFIX) && password.isEmpty()) {
+            String token = principal.substring(NUXEO_TOKEN_PRINCIPAL_PREFIX.length());
+            String resolvedUsername = tryNuxeoTokenAuth(token);
+            if (resolvedUsername != null) {
+                log.debug("Authenticated Nuxeo token as '{}'", resolvedUsername);
+                return authenticatedUser(resolvedUsername);
+            }
+            log.warn("Nuxeo token validation failed");
+            throw new BadCredentialsException("Invalid or expired Nuxeo authentication token");
         }
 
-        log.warn("Authentication failed for user '{}'", username);
-        throw new BadCredentialsException("Invalid credentials for user: " + username);
+        if (tryAlfrescoAuth(principal, password) || tryNuxeoAuth(principal, password)) {
+            log.debug("Authenticated user '{}'", principal);
+            return authenticatedUser(principal);
+        }
+
+        log.warn("Authentication failed for user '{}'", principal);
+        throw new BadCredentialsException("Invalid credentials for user: " + principal);
     }
 
     @Override
@@ -66,9 +81,15 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
         return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);
     }
 
-    private boolean tryAlfrescoTicketAuth(String ticket) {
+    private Authentication authenticatedUser(String username) {
+        return new UsernamePasswordAuthenticationToken(
+                username, null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
+    }
+
+    @SuppressWarnings("unchecked")
+    private String tryAlfrescoTicketAuth(String ticket) {
         if (alfrescoUrl == null || alfrescoUrl.isBlank()) {
-            return false;
+            return null;
         }
         try {
             RestTemplate restTemplate = newRestTemplate();
@@ -78,13 +99,16 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
             String encoded = Base64.getEncoder().encodeToString((ticket + ":").getBytes());
             headers.set(HttpHeaders.AUTHORIZATION, "Basic " + encoded);
             headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-            ResponseEntity<Void> response = restTemplate.exchange(
-                    validateUrl, HttpMethod.GET, new HttpEntity<>(headers), Void.class);
-            return response.getStatusCode().is2xxSuccessful();
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    validateUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                return null;
+            }
+            return extractAlfrescoUsername(response.getBody());
         } catch (Exception e) {
             log.debug("Alfresco ticket validation unavailable: {}", e.getMessage());
         }
-        return false;
+        return null;
     }
 
     private boolean tryAlfrescoAuth(String username, String password) {
@@ -108,6 +132,29 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
             log.debug("Alfresco auth unavailable for '{}': {}", username, e.getMessage());
         }
         return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String tryNuxeoTokenAuth(String token) {
+        if (nuxeoUrl == null || nuxeoUrl.isBlank()) {
+            return null;
+        }
+        try {
+            RestTemplate restTemplate = newRestTemplate();
+            String meUrl = buildNuxeoApiUrl() + "/me";
+            HttpHeaders headers = new HttpHeaders();
+            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+            headers.set("X-Authentication-Token", token);
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    meUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+            if (!response.getStatusCode().is2xxSuccessful()) {
+                return null;
+            }
+            return extractNuxeoUsername(response.getBody());
+        } catch (Exception e) {
+            log.debug("Nuxeo token validation unavailable: {}", e.getMessage());
+        }
+        return null;
     }
 
     private boolean tryNuxeoAuth(String username, String password) {
@@ -142,5 +189,45 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
     private String buildNuxeoApiUrl() {
         String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
         return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
+    }
+
+    @SuppressWarnings("unchecked")
+    private String extractAlfrescoUsername(Map body) {
+        if (body == null) {
+            return null;
+        }
+        Object entry = body.get("entry");
+        if (entry instanceof Map entryMap) {
+            String username = firstString(entryMap.get("id"), entryMap.get("userName"), entryMap.get("userId"));
+            if (username != null) {
+                return username;
+            }
+        }
+        return firstString(body.get("id"), body.get("userName"), body.get("userId"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private String extractNuxeoUsername(Map body) {
+        if (body == null) {
+            return null;
+        }
+        String username = firstString(body.get("id"), body.get("username"), body.get("userName"));
+        if (username != null) {
+            return username;
+        }
+        Object properties = body.get("properties");
+        if (properties instanceof Map propertyMap) {
+            return firstString(propertyMap.get("username"), propertyMap.get("userName"));
+        }
+        return null;
+    }
+
+    private String firstString(Object... values) {
+        for (Object value : values) {
+            if (value instanceof String text && !text.isBlank()) {
+                return text;
+            }
+        }
+        return null;
     }
 }

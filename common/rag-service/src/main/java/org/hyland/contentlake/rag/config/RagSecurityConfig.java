@@ -2,6 +2,7 @@ package org.hyland.contentlake.rag.config;
 
 import jakarta.servlet.DispatcherType;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
+import org.hyland.contentlake.rag.security.NuxeoTokenAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -11,6 +12,7 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 
 /**
  * Security configuration for the RAG service.
@@ -25,12 +27,15 @@ public class RagSecurityConfig {
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http,
-                                             MultiSourceAuthenticationProvider provider) throws Exception {
+                                            AuthenticationManager authenticationManager,
+                                            MultiSourceAuthenticationProvider provider) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(provider)
+                .addFilterBefore(new NuxeoTokenAuthenticationFilter(authenticationManager),
+                        BasicAuthenticationFilter.class)
                 .httpBasic(Customizer.withDefaults())
                 .authorizeHttpRequests(auth -> auth
                         .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
