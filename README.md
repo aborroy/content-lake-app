@@ -14,6 +14,7 @@
 ## Related Projects
 
 - [alfresco-content-lake-ui](https://github.com/aborroy/alfresco-content-lake-ui) - ACA-based frontend for semantic search and RAG over Content Lake.
+- [content-lake-app-ui)[https://github.com/aborroy/content-lake-app-ui] - Demo UI for the Content Lake App that provides dual authentication (Alfresco + Nuxeo)
 - [content-lake-app-deployment](https://github.com/aborroy/content-lake-app-deployment) - Docker Compose deployment for Alfresco, Nuxeo, hxpr, Content Lake services, and the UI.
 - [nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) - Companion project that builds and runs the local Nuxeo server. Required when using `compose.nuxeo.yaml` in this repo.
 
