@@ -10,6 +10,7 @@ import org.hyland.contentlake.model.HxprDocument;
 import org.hyland.contentlake.model.HxprEmbedding;
 import org.hyland.contentlake.rag.config.HybridSearchProperties;
 import org.hyland.contentlake.rag.model.HybridSearchRequest;
+import org.hyland.contentlake.rag.security.DualSourceAuthentication;
 import org.hyland.contentlake.rag.model.HybridSearchResponse;
 import org.hyland.contentlake.rag.model.HybridSearchResponse.HybridHit;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
@@ -18,6 +19,8 @@ import org.hyland.contentlake.security.SecurityContextService;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -107,12 +110,20 @@ public class HybridSearchService {
     public HybridSearchResponse search(HybridSearchRequest request) {
         long startTime = System.currentTimeMillis();
 
-        String username = securityContextService.getCurrentUsername();
         String sourceTypeFilter = buildSourceTypeFilter(request.getSourceType());
         String metadataFilter = buildMetadataFilter(request.getMetadata());
         String additionalFilter = combineFilters(request.getFilter(), metadataFilter);
         additionalFilter = combineFilters(additionalFilter, sourceTypeFilter);
-        String permissionFilter = buildPermissionFilter(username, request.getSourceType(), additionalFilter);
+        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String permissionFilter;
+        if (auth instanceof DualSourceAuthentication dual) {
+            permissionFilter = buildPermissionFilter(
+                    dual.getAlfrescoUsername(), dual.getNuxeoUsername(),
+                    request.getSourceType(), additionalFilter);
+        } else {
+            String username = securityContextService.getCurrentUsername();
+            permissionFilter = buildPermissionFilter(username, request.getSourceType(), additionalFilter);
+        }
 
         int candidateCount = resolveCandidateCount(request);
         int maxResults = resolveMaxResults(request);
@@ -521,6 +532,57 @@ public class HybridSearchService {
 
     String buildPermissionFilter(String username, String additionalFilter) {
         return buildPermissionFilter(username, null, additionalFilter);
+    }
+
+    /** Dual-auth variant — see {@link SemanticSearchService#buildPermissionFilter(String, String, String, String)}. */
+    String buildPermissionFilter(String alfrescoUser, String nuxeoUser,
+                                 String sourceType, String additionalFilter) {
+        StringBuilder hxql = new StringBuilder(BASE_QUERY);
+        List<String> conditions = new ArrayList<>();
+
+        List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
+        Map<String, List<String>> authoritiesBySource =
+                resolveAuthoritiesByDualSource(alfrescoUser, nuxeoUser, sourceIds);
+
+        List<String> sourceClauses = new ArrayList<>();
+        for (String sourceId : sourceIds) {
+            String username = isNuxeoSource(sourceId) ? nuxeoUser : alfrescoUser;
+            if (username == null) {
+                continue;
+            }
+            List<String> authorities = authoritiesBySource.getOrDefault(sourceId, defaultAuthorities(username));
+            sourceClauses.add(buildSourcePermissionClause(sourceId, authorities));
+        }
+
+        log.debug("Dual-auth permission filter (hybrid): alfrescoUser={}, nuxeoUser={}, sourceIds={}",
+                alfrescoUser, nuxeoUser, sourceIds);
+
+        if (sourceClauses.isEmpty()) {
+            log.warn("No permission clauses resolved (alfrescoUser={}, nuxeoUser={}, sourceType={}, filter={})",
+                    alfrescoUser, nuxeoUser, sourceType, additionalFilter);
+            conditions.add("cin_sourceId = '" + UNRESOLVED_SOURCE_ID + "'");
+        } else {
+            conditions.add("(" + String.join(" OR ", sourceClauses) + ")");
+        }
+
+        if (additionalFilter != null && !additionalFilter.isBlank()) {
+            conditions.add("(" + additionalFilter.trim() + ")");
+        }
+
+        hxql.append(" WHERE ").append(String.join(" AND ", conditions));
+        return hxql.toString();
+    }
+
+    Map<String, List<String>> resolveAuthoritiesByDualSource(String alfrescoUser, String nuxeoUser,
+                                                             List<String> sourceIds) {
+        Map<String, List<String>> authoritiesBySource = new LinkedHashMap<>();
+        for (String sourceId : sourceIds) {
+            String username = isNuxeoSource(sourceId) ? nuxeoUser : alfrescoUser;
+            if (username != null) {
+                authoritiesBySource.put(sourceId, getUserAuthorities(username, sourceId));
+            }
+        }
+        return authoritiesBySource;
     }
 
     String buildPermissionFilter(String username, String sourceType, String additionalFilter) {

@@ -2,6 +2,7 @@ package org.hyland.contentlake.rag.config;
 
 import jakarta.servlet.DispatcherType;
 import org.hyland.contentlake.rag.security.AlfrescoTicketAuthenticationFilter;
+import org.hyland.contentlake.rag.security.DualSourceAuthenticationFilter;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
 import org.hyland.contentlake.rag.security.NuxeoTokenAuthenticationFilter;
 import org.hyland.contentlake.rag.security.RagAuthenticationEntryPoint;
@@ -36,6 +37,8 @@ public class RagSecurityConfig {
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(provider)
+                .addFilterBefore(new DualSourceAuthenticationFilter(provider),
+                        BasicAuthenticationFilter.class)
                 .addFilterBefore(new AlfrescoTicketAuthenticationFilter(authenticationManager),
                         BasicAuthenticationFilter.class)
                 .addFilterBefore(new NuxeoTokenAuthenticationFilter(authenticationManager),

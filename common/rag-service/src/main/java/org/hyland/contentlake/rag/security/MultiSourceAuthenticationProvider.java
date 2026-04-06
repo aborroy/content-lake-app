@@ -181,6 +181,24 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
         return false;
     }
 
+    // ---------------------------------------------------------------
+    // Package-private validation helpers for DualSourceAuthenticationFilter
+    // ---------------------------------------------------------------
+
+    /**
+     * Validates an Alfresco ticket and returns the resolved username, or {@code null} on failure.
+     */
+    String validateAlfrescoTicket(String ticket) {
+        return tryAlfrescoTicketAuth(ticket);
+    }
+
+    /**
+     * Validates Nuxeo Basic credentials and returns the username on success, or {@code null} on failure.
+     */
+    String validateNuxeoCredentials(String username, String password) {
+        return tryNuxeoAuth(username, password) ? username : null;
+    }
+
     private RestTemplate newRestTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(CONNECT_TIMEOUT_MS);
