@@ -115,6 +115,7 @@ public class HybridSearchService {
         String additionalFilter = combineFilters(request.getFilter(), metadataFilter);
         additionalFilter = combineFilters(additionalFilter, sourceTypeFilter);
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+        String logUser = auth != null ? auth.getName() : "anonymous";
         String permissionFilter;
         if (auth instanceof DualSourceAuthentication dual) {
             permissionFilter = buildPermissionFilter(
@@ -132,7 +133,8 @@ public class HybridSearchService {
         double minScore = request.getMinScore() > 0 ? request.getMinScore() : properties.getDefaultMinScore();
 
         // --- Vector (semantic) leg ---
-        log.info("Hybrid search vector leg: query=\"{}\", candidates={}, user={}", request.getQuery(), candidateCount, username);
+        log.info("Hybrid search vector leg: query=\"{}\", candidates={}, user={}",
+                request.getQuery(), candidateCount, logUser);
         List<Double> queryVector = embeddingService.embedQuery(request.getQuery());
         List<ScoredChunk> vectorChunks = List.of();
 
