@@ -3,6 +3,7 @@ package org.hyland.contentlake.rag.security;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -10,7 +11,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.List;
 
 /**
  * Authenticates requests carrying credentials for BOTH Alfresco and Nuxeo simultaneously.
@@ -94,7 +99,7 @@ public class DualSourceAuthenticationFilter extends OncePerRequestFilter {
         SecurityContextHolder.getContext()
                 .setAuthentication(new DualSourceAuthentication(alfrescoUsername, nuxeoUsername));
 
-        chain.doFilter(request, response);
+        chain.doFilter(new DualAuthorizationHeaderStrippingRequest(request), response);
     }
 
     private String extractAlfrescoTicket(String authHeader) {
@@ -132,6 +137,45 @@ public class DualSourceAuthenticationFilter extends OncePerRequestFilter {
         } catch (IllegalArgumentException e) {
             log.debug("Could not decode X-Nuxeo-Authorization as Basic credentials: {}", e.getMessage());
             return null;
+        }
+    }
+
+    private static class DualAuthorizationHeaderStrippingRequest extends HttpServletRequestWrapper {
+
+        DualAuthorizationHeaderStrippingRequest(HttpServletRequest request) {
+            super(request);
+        }
+
+        @Override
+        public String getHeader(String name) {
+            if (AUTHORIZATION_HEADER.equalsIgnoreCase(name)
+                    || NUXEO_AUTHORIZATION_HEADER.equalsIgnoreCase(name)) {
+                return null;
+            }
+            return super.getHeader(name);
+        }
+
+        @Override
+        public Enumeration<String> getHeaders(String name) {
+            if (AUTHORIZATION_HEADER.equalsIgnoreCase(name)
+                    || NUXEO_AUTHORIZATION_HEADER.equalsIgnoreCase(name)) {
+                return Collections.emptyEnumeration();
+            }
+            return super.getHeaders(name);
+        }
+
+        @Override
+        public Enumeration<String> getHeaderNames() {
+            List<String> names = new ArrayList<>();
+            Enumeration<String> original = super.getHeaderNames();
+            while (original.hasMoreElements()) {
+                String name = original.nextElement();
+                if (!AUTHORIZATION_HEADER.equalsIgnoreCase(name)
+                        && !NUXEO_AUTHORIZATION_HEADER.equalsIgnoreCase(name)) {
+                    names.add(name);
+                }
+            }
+            return Collections.enumeration(names);
         }
     }
 }

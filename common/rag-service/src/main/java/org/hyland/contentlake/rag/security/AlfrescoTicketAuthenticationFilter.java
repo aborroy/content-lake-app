@@ -34,6 +34,7 @@ public class AlfrescoTicketAuthenticationFilter extends OncePerRequestFilter {
 
     private static final String ALFRESCO_TICKET_PARAM = "alf_ticket";
     private static final String AUTHORIZATION = "authorization";
+    private static final String NUXEO_AUTHORIZATION_HEADER = "X-Nuxeo-Authorization";
 
     private final AuthenticationManager authenticationManager;
 
@@ -49,6 +50,13 @@ public class AlfrescoTicketAuthenticationFilter extends OncePerRequestFilter {
         boolean ticketFromAuthorizationHeader = false;
 
         if (SecurityContextHolder.getContext().getAuthentication() == null) {
+            // Dual-auth requests carry a dedicated Nuxeo header and should be handled
+            // by DualSourceAuthenticationFilter instead of short-circuiting here.
+            if (request.getHeader(NUXEO_AUTHORIZATION_HEADER) != null) {
+                filterChain.doFilter(request, response);
+                return;
+            }
+
             ticket = request.getParameter(ALFRESCO_TICKET_PARAM);
             if (ticket == null || ticket.isBlank()) {
                 ticket = extractTicketFromAuthorizationHeader(request);
