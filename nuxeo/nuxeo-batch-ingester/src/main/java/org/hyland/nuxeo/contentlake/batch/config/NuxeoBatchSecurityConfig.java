@@ -1,15 +1,21 @@
 package org.hyland.nuxeo.contentlake.batch.config;
 
 import jakarta.servlet.DispatcherType;
+import org.hyland.nuxeo.contentlake.batch.security.NuxeoBatchAuthenticationEntryPoint;
+import org.hyland.nuxeo.contentlake.batch.security.NuxeoTokenAuthenticationFilter;
+import org.hyland.nuxeo.contentlake.batch.security.NuxeoTokenAuthenticationProvider;
 import org.hyland.nuxeo.contentlake.config.NuxeoProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.config.annotation.authentication.builders.AuthenticationManagerBuilder;
+import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.security.web.SecurityFilterChain;
 
 /**
@@ -23,8 +29,18 @@ import org.springframework.security.web.SecurityFilterChain;
 public class NuxeoBatchSecurityConfig {
 
     @Bean
-    SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                            UserDetailsService userDetailsService,
+                                            NuxeoTokenAuthenticationProvider nuxeoTokenAuthenticationProvider)
+            throws Exception {
+        AuthenticationManagerBuilder authenticationBuilder = http.getSharedObject(AuthenticationManagerBuilder.class);
+        authenticationBuilder.userDetailsService(userDetailsService);
+        authenticationBuilder.authenticationProvider(nuxeoTokenAuthenticationProvider);
+        AuthenticationManager authenticationManager = authenticationBuilder.build();
+        NuxeoBatchAuthenticationEntryPoint authenticationEntryPoint = new NuxeoBatchAuthenticationEntryPoint();
+
         return http
+                .authenticationManager(authenticationManager)
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
@@ -33,7 +49,9 @@ public class NuxeoBatchSecurityConfig {
                         .requestMatchers("/api/**").authenticated()
                         .anyRequest().permitAll()
                 )
-                .httpBasic(httpBasic -> {})
+                .exceptionHandling(ex -> ex.authenticationEntryPoint(authenticationEntryPoint))
+                .httpBasic(httpBasic -> httpBasic.authenticationEntryPoint(authenticationEntryPoint))
+                .addFilterBefore(new NuxeoTokenAuthenticationFilter(authenticationManager), BasicAuthenticationFilter.class)
                 .build();
     }
 
@@ -45,5 +63,10 @@ public class NuxeoBatchSecurityConfig {
                         .roles("SYNC_ADMIN")
                         .build()
         );
+    }
+
+    @Bean
+    NuxeoTokenAuthenticationProvider nuxeoTokenAuthenticationProvider(NuxeoProperties props) {
+        return new NuxeoTokenAuthenticationProvider(props);
     }
 }
