@@ -95,22 +95,38 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
             RestTemplate restTemplate = newRestTemplate();
             String validateUrl = alfrescoUrl
                     + "/alfresco/api/-default-/public/authentication/versions/1/tickets/-me-";
-            HttpHeaders headers = new HttpHeaders();
-            // Alfresco validates UI tickets on /tickets/-me- using Basic base64(ticket)
-            // rather than the usual user:password form.
-            String encoded = Base64.getEncoder().encodeToString(ticket.getBytes());
-            headers.set(HttpHeaders.AUTHORIZATION, "Basic " + encoded);
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+            HttpHeaders headers = alfrescoTicketHeaders(ticket);
             ResponseEntity<Map> response = restTemplate.exchange(
                     validateUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
             if (!response.getStatusCode().is2xxSuccessful()) {
                 return null;
             }
-            return extractAlfrescoUsername(response.getBody());
+            String resolvedUsername = extractAlfrescoUsername(response.getBody());
+            if (resolvedUsername != null && !resolvedUsername.startsWith("TICKET_")) {
+                return resolvedUsername;
+            }
+
+            String meUrl = alfrescoUrl
+                    + "/alfresco/api/-default-/public/alfresco/versions/1/people/-me-";
+            ResponseEntity<Map> meResponse = restTemplate.exchange(
+                    meUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
+            if (!meResponse.getStatusCode().is2xxSuccessful()) {
+                return null;
+            }
+            return extractAlfrescoUsername(meResponse.getBody());
         } catch (Exception e) {
             log.debug("Alfresco ticket validation unavailable: {}", e.getMessage());
         }
         return null;
+    }
+
+    private HttpHeaders alfrescoTicketHeaders(String ticket) {
+        HttpHeaders headers = new HttpHeaders();
+        // Alfresco validates UI tickets with Basic base64(ticket) rather than user:password.
+        String encoded = Base64.getEncoder().encodeToString(ticket.getBytes());
+        headers.set(HttpHeaders.AUTHORIZATION, "Basic " + encoded);
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
+        return headers;
     }
 
     private boolean tryAlfrescoAuth(String username, String password) {

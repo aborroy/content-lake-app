@@ -41,8 +41,8 @@ services:
 
   live-ingester:
     build:
-      context: ./alfresco/alfresco-live-ingester
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: alfresco/alfresco-live-ingester/Dockerfile
     ports:
       - "9092:9092"
     extra_hosts:

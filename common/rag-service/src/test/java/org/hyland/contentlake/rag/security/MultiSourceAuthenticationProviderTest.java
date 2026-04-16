@@ -29,9 +29,7 @@ class MultiSourceAuthenticationProviderTest {
     void authenticatesAlfrescoTicketAndResolvesUsername() throws Exception {
         String ticket = "TICKET_demo-ticket";
         server = startServer(exchange -> {
-            if (!"GET".equals(exchange.getRequestMethod())
-                    || !"/alfresco/api/-default-/public/authentication/versions/1/tickets/-me-"
-                    .equals(exchange.getRequestURI().getPath())) {
+            if (!"GET".equals(exchange.getRequestMethod())) {
                 sendResponse(exchange, 404, "");
                 return;
             }
@@ -43,7 +41,19 @@ class MultiSourceAuthenticationProviderTest {
                 return;
             }
 
-            sendResponse(exchange, 200, "{\"entry\":{\"id\":\"rag-user\"}}");
+            if ("/alfresco/api/-default-/public/authentication/versions/1/tickets/-me-"
+                    .equals(exchange.getRequestURI().getPath())) {
+                sendResponse(exchange, 200, "{\"entry\":{\"id\":\"" + ticket + "\"}}");
+                return;
+            }
+
+            if ("/alfresco/api/-default-/public/alfresco/versions/1/people/-me-"
+                    .equals(exchange.getRequestURI().getPath())) {
+                sendResponse(exchange, 200, "{\"entry\":{\"id\":\"rag-user\"}}");
+                return;
+            }
+
+            sendResponse(exchange, 404, "");
         });
 
         MultiSourceAuthenticationProvider provider = new MultiSourceAuthenticationProvider();
