@@ -440,8 +440,27 @@ public class SemanticSearchService {
         List<SearchHit> hits = new ArrayList<>();
         int rank = 1;
 
+        if (log.isDebugEnabled()) {
+            long wouldFilter = embeddings.stream()
+                    .filter(e -> (e.getSysembedScore() != null ? e.getSysembedScore() : 0.0) < minScore)
+                    .count();
+            log.debug("Score filter: minScore={} candidates={} filtered={} passing={}",
+                    minScore, embeddings.size(), wouldFilter, embeddings.size() - wouldFilter);
+        }
+
+        int candidateIndex = 0;
         for (Embedding embedding : embeddings) {
             double score = embedding.getSysembedScore() != null ? embedding.getSysembedScore() : 0.0;
+            candidateIndex++;
+
+            if (log.isDebugEnabled()) {
+                String preview = embedding.getSysembedText() != null
+                        ? embedding.getSysembedText().substring(0, Math.min(60, embedding.getSysembedText().length()))
+                        : "";
+                log.debug("  Candidate [{}] docId={} score={} {}\"{}...\"",
+                        candidateIndex, embedding.getSysembedDocId(), String.format("%.3f", score),
+                        score < minScore ? "[FILTERED] " : "", preview);
+            }
 
             if (score < minScore) {
                 continue;

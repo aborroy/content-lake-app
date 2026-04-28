@@ -30,6 +30,7 @@ import static org.mockito.Mockito.*;
 class RagServiceConversationTest {
 
     @Mock SemanticSearchService semanticSearchService;
+    @Mock HybridSearchService hybridSearchService;
     @Mock ChatModel chatModel;
     @Mock ConversationMemoryService conversationMemoryService;
     @Mock QueryReformulationService queryReformulationService;
@@ -46,6 +47,8 @@ class RagServiceConversationTest {
         properties.setDefaultMinScore(0.5);
         properties.setMaxContextLength(12000);
         properties.setDefaultSystemPrompt("system prompt");
+        // Use semantic-only path so existing assertions against semanticSearchService still apply.
+        properties.setUseHybridSearch(false);
 
         RagProperties.ConversationProperties conversation = new RagProperties.ConversationProperties();
         conversation.setEnabled(true);
@@ -56,6 +59,7 @@ class RagServiceConversationTest {
 
         ragService = new RagService(
                 semanticSearchService,
+                hybridSearchService,
                 chatModel,
                 properties,
                 conversationMemoryService,

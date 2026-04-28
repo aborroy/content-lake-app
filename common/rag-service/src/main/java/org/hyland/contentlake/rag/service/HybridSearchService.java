@@ -50,7 +50,7 @@ public class HybridSearchService {
     static final String NORMALIZATION_MAX = "max";
     static final String NORMALIZATION_MINMAX = "minmax";
 
-    private static final int MAX_CANDIDATE_COUNT = 50;
+    private static final int MAX_CANDIDATE_COUNT = 100;
     private static final String BASE_QUERY = "SELECT * FROM SysContent";
     private static final String RACL_FIELD = "sys_racl";
     private static final String EVERYONE_PRINCIPAL = "__Everyone__";
@@ -161,6 +161,21 @@ public class HybridSearchService {
         }
 
         // --- Filter and limit ---
+        if (log.isDebugEnabled()) {
+            long wouldFilter = fused.stream().filter(r -> r.score < minScore).count();
+            log.debug("Fusion filter: minScore={} total={} filtered={} passing={}",
+                    minScore, fused.size(), wouldFilter, fused.size() - wouldFilter);
+            for (int i = 0; i < Math.min(10, fused.size()); i++) {
+                FusedResult r = fused.get(i);
+                String preview = r.chunk.text() != null
+                        ? r.chunk.text().substring(0, Math.min(60, r.chunk.text().length())) : "";
+                log.debug("  [{}] score={} v={} k={} \"{}...\"", i + 1,
+                        String.format("%.4f", r.score),
+                        r.vectorScore != null ? String.format("%.3f", r.vectorScore) : "-",
+                        r.keywordScore != null ? String.format("%.3f", r.keywordScore) : "-",
+                        preview);
+            }
+        }
         List<FusedResult> filtered = fused.stream()
                 .filter(r -> r.score >= minScore)
                 .limit(maxResults)

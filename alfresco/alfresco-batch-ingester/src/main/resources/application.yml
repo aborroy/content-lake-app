@@ -89,8 +89,8 @@ ingestion:
       await-termination-seconds: ${BATCH_INGESTION_AWAIT_TERMINATION_SECONDS:30}
   embedding:
     min-chunk-size: ${EMBEDDING_MIN_CHUNK_SIZE:200}
-    chunk-size: ${EMBEDDING_CHUNK_SIZE:512}
-    chunk-overlap: ${EMBEDDING_CHUNK_OVERLAP:150}
+    chunk-size: ${EMBEDDING_CHUNK_SIZE:1024}
+    chunk-overlap: ${EMBEDDING_CHUNK_OVERLAP:256}
     similarity-threshold: ${EMBEDDING_SIMILARITY_THRESHOLD:0.75}
     noise-reduction:
       enabled: ${NOISE_REDUCTION_ENABLED:true}

@@ -10,6 +10,8 @@ import org.hyland.contentlake.rag.model.RagPromptRequest;
 import org.hyland.contentlake.rag.model.RagPromptResponse;
 import org.hyland.contentlake.rag.model.RagPromptResponse.ContextChunk;
 import org.hyland.contentlake.rag.model.RagPromptResponse.Source;
+import org.hyland.contentlake.rag.model.HybridSearchRequest;
+import org.hyland.contentlake.rag.model.HybridSearchResponse;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SearchHit;
@@ -34,10 +36,13 @@ import java.util.regex.Pattern;
  *
  * <p>Orchestrates the three-phase pipeline:
  * <ol>
- *   <li><strong>Retrieve</strong> — Permission-filtered semantic search via {@link SemanticSearchService}</li>
+ *   <li><strong>Retrieve</strong> — Permission-filtered hybrid or semantic search</li>
  *   <li><strong>Augment</strong> — Assembles a grounded prompt with retrieved chunks as context</li>
  *   <li><strong>Generate</strong> — Calls the LLM via Spring AI {@link ChatModel}</li>
  * </ol>
+ *
+ * <p>Retrieval uses {@link HybridSearchService} when {@code rag.use-hybrid-search=true} (default),
+ * falling back to {@link SemanticSearchService} for pure vector search.</p>
  *
  * <p>The context sent to the LLM is capped at {@code rag.max-context-length} characters
  * to stay within reasonable token limits for the model.</p>
@@ -53,6 +58,7 @@ public class RagService {
     private String configuredModel;
 
     private final SemanticSearchService semanticSearchService;
+    private final HybridSearchService hybridSearchService;
     private final ChatModel chatModel;
     private final RagProperties ragProperties;
     private final ConversationMemoryService conversationMemoryService;
@@ -204,24 +210,41 @@ public class RagService {
 
     private RetrievalState retrieveContext(RagPromptRequest request, List<ConversationTurn> history) {
         String retrievalQuery = resolveRetrievalQuery(request.getQuestion(), history);
-
         int topK = request.getTopK() > 0 ? request.getTopK() : ragProperties.getDefaultTopK();
         double minScore = request.getMinScore() > 0 ? request.getMinScore() : ragProperties.getDefaultMinScore();
+        boolean useHybrid = ragProperties.isUseHybridSearch();
 
-        SemanticSearchRequest searchRequest = SemanticSearchRequest.builder()
-                .query(retrievalQuery)
-                .topK(topK)
-                .minScore(minScore)
-                .filter(request.getFilter())
-                .sourceType(request.getSourceType())
-                .embeddingType(request.getEmbeddingType())
-                .build();
+        log.info("RAG retrieve phase: query=\"{}\", topK={}, minScore={}, hybrid={}",
+                retrievalQuery, topK, minScore, useHybrid);
 
-        log.info("RAG retrieve phase: query=\"{}\", topK={}, minScore={}", retrievalQuery, topK, minScore);
-        SemanticSearchResponse searchResponse = semanticSearchService.search(searchRequest);
-        long searchTimeMs = searchResponse.getSearchTimeMs();
+        List<SearchHit> hits;
+        long searchTimeMs;
 
-        List<SearchHit> hits = searchResponse.getResults() != null ? searchResponse.getResults() : List.of();
+        if (useHybrid) {
+            HybridSearchRequest hybridRequest = HybridSearchRequest.builder()
+                    .query(retrievalQuery)
+                    .maxResults(topK)
+                    .filter(request.getFilter())
+                    .sourceType(request.getSourceType())
+                    .embeddingType(request.getEmbeddingType())
+                    .build();
+            HybridSearchResponse hybridResponse = hybridSearchService.search(hybridRequest);
+            searchTimeMs = hybridResponse.getSearchTimeMs();
+            hits = mapHybridHits(hybridResponse.getResults());
+        } else {
+            SemanticSearchRequest searchRequest = SemanticSearchRequest.builder()
+                    .query(retrievalQuery)
+                    .topK(topK)
+                    .minScore(minScore)
+                    .filter(request.getFilter())
+                    .sourceType(request.getSourceType())
+                    .embeddingType(request.getEmbeddingType())
+                    .build();
+            SemanticSearchResponse searchResponse = semanticSearchService.search(searchRequest);
+            searchTimeMs = searchResponse.getSearchTimeMs();
+            hits = searchResponse.getResults() != null ? searchResponse.getResults() : List.of();
+        }
+
         List<SearchHit> reranked = rerankService.rerank(retrievalQuery, hits);
         List<SearchHit> rerankedHits = reranked != null ? reranked : List.of();
 
@@ -229,6 +252,21 @@ public class RagService {
                 hits.size(), searchTimeMs, rerankedHits.size());
 
         return new RetrievalState(retrievalQuery, searchTimeMs, rerankedHits);
+    }
+
+    private List<SearchHit> mapHybridHits(List<HybridSearchResponse.HybridHit> hits) {
+        if (hits == null) {
+            return List.of();
+        }
+        return hits.stream()
+                .map(h -> SearchHit.builder()
+                        .rank(h.getRank())
+                        .score(h.getScore())
+                        .chunkText(h.getChunkText())
+                        .sourceDocument(h.getSourceDocument())
+                        .chunkMetadata(h.getChunkMetadata())
+                        .build())
+                .toList();
     }
 
     private PromptState preparePromptState(RagPromptRequest request,

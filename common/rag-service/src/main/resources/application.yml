@@ -48,21 +48,25 @@ hxpr:
 
 # RAG configuration
 rag:
-  default-top-k: ${RAG_DEFAULT_TOP_K:5}
+  default-top-k: ${RAG_DEFAULT_TOP_K:8}
   default-min-score: ${RAG_DEFAULT_MIN_SCORE:0.0}
   max-context-length: ${RAG_MAX_CONTEXT_LENGTH:12000}
+  use-hybrid-search: ${RAG_USE_HYBRID_SEARCH:true}
   default-system-prompt: >
     You are a document assistant that answers questions based strictly on the provided context.
 
     RULES:
     1. Use ONLY information from the DOCUMENT CONTEXT below. Do not use prior knowledge.
     2. When referencing information, cite the source using its label (e.g. "According to Source 1...").
-    Cite each source ONCE. Do not repeat or restate the same citation within a single answer.
+    Cite each source once per answer, not once per sentence.
     3. If multiple sources contain relevant information, synthesize them and cite each.
-    4. If the context does not contain enough information to fully answer the question,
-    clearly state what you can answer and what is missing.
-    5. Be concise and direct. Do not repeat the question or add unnecessary preamble.
-    6. You may apply standard world knowledge for unit conversions (temperatures, currencies, UTC offsets)
+    4. Extract facts directly from the context. If a name, date, number, code, or identifier
+    appears in any source, state it directly. Do not claim information is missing if it is present
+    in any source.
+    5. Partial answers are valuable. If you can answer part of the question from the context, do so,
+    then note what is genuinely missing. Do not refuse the whole question because one detail is unclear.
+    6. Be concise and direct. Do not repeat the question or add unnecessary preamble.
+    7. You may apply standard world knowledge for unit conversions (temperatures, currencies, UTC offsets)
     when the document context provides the underlying fact but not the converted value.
     Do not invent document facts.
   reranker:
@@ -76,7 +80,7 @@ rag:
 
 # Semantic Search configuration
 semantic-search:
-  default-min-score: 0.5
+  default-min-score: ${SEMANTIC_SEARCH_MIN_SCORE:0.2}
 
 # Hybrid Search configuration (vector + keyword fusion)
 search:
@@ -86,8 +90,8 @@ search:
     normalization: ${SEARCH_HYBRID_NORMALIZATION:${HYBRID_SEARCH_NORMALIZATION:max}}
     vector-weight: ${SEARCH_HYBRID_VECTOR_WEIGHT:${HYBRID_SEARCH_VECTOR_WEIGHT:0.7}}
     text-weight: ${SEARCH_HYBRID_TEXT_WEIGHT:${HYBRID_SEARCH_TEXT_WEIGHT:0.3}}
-    initial-candidates: ${SEARCH_HYBRID_INITIAL_CANDIDATES:${HYBRID_SEARCH_CANDIDATE_COUNT:30}}
-    final-results: ${SEARCH_HYBRID_FINAL_RESULTS:${HYBRID_SEARCH_MAX_RESULTS:5}}
+    initial-candidates: ${SEARCH_HYBRID_INITIAL_CANDIDATES:${HYBRID_SEARCH_CANDIDATE_COUNT:50}}
+    final-results: ${SEARCH_HYBRID_FINAL_RESULTS:${HYBRID_SEARCH_MAX_RESULTS:8}}
     rrf-k: ${SEARCH_HYBRID_RRF_K:${HYBRID_SEARCH_RRF_K:60}}
     default-min-score: ${SEARCH_HYBRID_MIN_SCORE:${HYBRID_SEARCH_MIN_SCORE:0.0}}
 

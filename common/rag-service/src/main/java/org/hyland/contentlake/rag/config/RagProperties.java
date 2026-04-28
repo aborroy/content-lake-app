@@ -20,6 +20,9 @@ public class RagProperties {
     /** Default minimum similarity score threshold. 0.0 = no filtering (lets SemanticSearchService apply its own threshold). */
     private double defaultMinScore = 0.0;
 
+    /** When true, uses hybrid (vector + keyword) search for RAG retrieval; false uses vector-only. */
+    private boolean useHybridSearch = true;
+
     /**
      * Maximum character length of the assembled context sent to the LLM.
      *
@@ -43,12 +46,15 @@ public class RagProperties {
             RULES:
             1. Use ONLY information from the DOCUMENT CONTEXT below. Do not use prior knowledge.
             2. When referencing information, cite the source using its label (e.g. "According to Source 1..."). \
-            Cite each source ONCE. Do not repeat or restate the same citation within a single answer.
+            Cite each source once per answer, not once per sentence.
             3. If multiple sources contain relevant information, synthesize them and cite each.
-            4. If the context does not contain enough information to fully answer the question, clearly \
-            state what you can answer and what is missing.
-            5. Be concise and direct. Do not repeat the question or add unnecessary preamble.
-            6. You may apply standard world knowledge for unit conversions (temperatures, currencies, UTC offsets) \
+            4. Extract facts directly from the context. If a name, date, number, code, or identifier \
+            appears in any source, state it directly. Do not claim information is missing if it is present \
+            in any source.
+            5. Partial answers are valuable. If you can answer part of the question from the context, do so, \
+            then note what is genuinely missing. Do not refuse the whole question because one detail is unclear.
+            6. Be concise and direct. Do not repeat the question or add unnecessary preamble.
+            7. You may apply standard world knowledge for unit conversions (temperatures, currencies, UTC offsets) \
             when the document context provides the underlying fact but not the converted value. \
             Do not invent document facts.""";
 
