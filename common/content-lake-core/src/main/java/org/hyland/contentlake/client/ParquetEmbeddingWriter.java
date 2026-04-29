@@ -91,11 +91,18 @@ public class ParquetEmbeddingWriter {
             throw new IllegalArgumentException("Embeddings list cannot be null or empty");
         }
 
-        // Create temporary file for Parquet generation
-        File tempFile = Files.createTempFile("embeddings-" + embeddingType, ".parquet").toFile();
+        // Create temporary file for Parquet generation with unique name
+        File tempFile = Files.createTempFile("embeddings-" + embeddingType + "-" + System.currentTimeMillis(), ".parquet").toFile();
+
+        // Ensure cleanup even if JVM doesn't exit normally
         tempFile.deleteOnExit();
 
         try {
+            // Delete if somehow already exists (from previous failed attempt)
+            if (tempFile.exists()) {
+                tempFile.delete();
+            }
+
             // Write embeddings to Parquet file
             try (ParquetWriter<GenericRecord> writer = AvroParquetWriter
                     .<GenericRecord>builder(new Path(tempFile.toURI()))
@@ -159,9 +166,18 @@ public class ParquetEmbeddingWriter {
             }
 
         } finally {
-            // Clean up temp file
-            if (tempFile.exists() && !tempFile.delete()) {
-                log.warn("Failed to delete temporary Parquet file: {}", tempFile.getAbsolutePath());
+            // Clean up temp file - try multiple times if needed
+            if (tempFile.exists()) {
+                boolean deleted = tempFile.delete();
+                if (!deleted) {
+                    // Force deletion attempt
+                    try {
+                        Files.deleteIfExists(tempFile.toPath());
+                    } catch (IOException e) {
+                        log.warn("Failed to delete temporary Parquet file: {} - {}",
+                                tempFile.getAbsolutePath(), e.getMessage());
+                    }
+                }
             }
         }
     }
