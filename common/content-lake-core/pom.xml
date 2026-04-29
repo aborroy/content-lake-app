@@ -57,18 +57,18 @@
             <artifactId>jakarta.annotation-api</artifactId>
         </dependency>
 
-        <!-- Apache Parquet for embedding storage -->
+        <!-- Apache Parquet for embedding storage (match HXPR version 1.17.0) -->
         <dependency>
             <groupId>org.apache.parquet</groupId>
             <artifactId>parquet-avro</artifactId>
-            <version>1.13.1</version>
+            <version>1.17.0</version>
         </dependency>
 
-        <!-- Apache Hadoop client for Parquet file operations -->
+        <!-- Apache Hadoop client for Parquet file operations (match HXPR version 3.5.0) -->
         <dependency>
             <groupId>org.apache.hadoop</groupId>
             <artifactId>hadoop-client</artifactId>
-            <version>3.3.6</version>
+            <version>3.5.0</version>
             <exclusions>
                 <!-- Exclude logging conflicts -->
                 <exclusion>
