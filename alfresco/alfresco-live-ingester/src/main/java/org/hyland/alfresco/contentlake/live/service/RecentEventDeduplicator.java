@@ -58,16 +58,6 @@ public class RecentEventDeduplicator {
         }
 
         String type = event.getType() != null ? event.getType() : "unknown";
-        Resource resource = event.getData() != null ? event.getData().getResource() : null;
-        if (resource instanceof NodeResource nodeResource && nodeResource.getModifiedAt() != null) {
-            return type + "|" + nodeId + "|" + nodeResource.getModifiedAt().toInstant();
-        }
-        if (event.getId() != null && !event.getId().isBlank()) {
-            return type + "|" + nodeId + "|" + event.getId();
-        }
-        if (event.getTime() != null) {
-            return type + "|" + nodeId + "|" + event.getTime().toInstant();
-        }
         return type + "|" + nodeId;
     }
 
