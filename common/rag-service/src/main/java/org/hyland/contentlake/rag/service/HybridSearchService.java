@@ -252,7 +252,8 @@ public class HybridSearchService {
 
     String buildFulltextQuery(String queryText, String permissionFilter) {
         String escaped = escapeHxql(queryText);
-        String fulltextClause = "sys_fulltextBinary = '" + escaped + "'";
+        // Search in extracted text stored by Content Lake instead of sys_fulltextBinary
+        String fulltextClause = "cin_ingestProperties.contentLake_extractedText = '" + escaped + "'";
 
         if (permissionFilter != null && permissionFilter.startsWith(BASE_QUERY + " WHERE ")) {
             String whereClause = permissionFilter.substring((BASE_QUERY + " WHERE ").length());
