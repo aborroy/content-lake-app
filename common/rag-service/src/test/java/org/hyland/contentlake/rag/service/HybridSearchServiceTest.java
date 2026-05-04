@@ -293,20 +293,26 @@ class HybridSearchServiceTest {
             String permFilter = "SELECT * FROM SysContent WHERE (sys_racl = '__Everyone__')";
             String hxql = service.buildFulltextQuery("search terms", permFilter);
 
-            assertThat(hxql).startsWith("SELECT * FROM SysContent WHERE sys_fulltextBinary = 'search terms'");
+            assertThat(hxql).startsWith("SELECT * FROM SysContent WHERE cin_ingestProperties.contentLake_extractedText = 'search terms'");
             assertThat(hxql).contains("AND (sys_racl = '__Everyone__')");
         }
 
         @Test
         void buildFulltextQuery_nullPermissionFilter_fulltextOnly() {
             String hxql = service.buildFulltextQuery("test query", null);
-            assertThat(hxql).isEqualTo("SELECT * FROM SysContent WHERE sys_fulltextBinary = 'test query'");
+            assertThat(hxql).isEqualTo("SELECT * FROM SysContent WHERE cin_ingestProperties.contentLake_extractedText = 'test query'");
         }
 
         @Test
         void buildFulltextQuery_escapesQuotes() {
             String hxql = service.buildFulltextQuery("it's a test", null);
-            assertThat(hxql).contains("it''s a test");
+            assertThat(hxql).contains("it s a test");
+        }
+
+        @Test
+        void buildFulltextQuery_sanitizesBackslashes() {
+            String hxql = service.buildFulltextQuery("path\\to\\file", null);
+            assertThat(hxql).contains("path to file");
         }
     }
 
@@ -348,6 +354,19 @@ class HybridSearchServiceTest {
             assertThat(filter).contains("cin_ingestProperties.source_modifiedAt >= '2026-01-01T00:00:00Z'");
             assertThat(filter).contains("cin_ingestProperties.source_modifiedAt <= '2026-12-31T23:59:59Z'");
             assertThat(filter).contains("cin_ingestProperties.cm:title = 'Budget 2026'");
+        }
+
+        @Test
+        void buildMetadataFilter_escapesNxqlLiterals() {
+            HybridSearchRequest.MetadataFilter metadata = HybridSearchRequest.MetadataFilter.builder()
+                    .pathPrefix("C:\\Docs\\Owner's Manual")
+                    .properties(Map.of("cm:title", "Owner's Manual"))
+                    .build();
+
+            String filter = service.buildMetadataFilter(metadata);
+
+            assertThat(filter).contains("C:\\\\Docs\\\\Owner\\'s Manual");
+            assertThat(filter).contains("cin_ingestProperties.cm:title = 'Owner\\'s Manual'");
         }
 
         @Test
@@ -821,6 +840,22 @@ class HybridSearchServiceTest {
             // doc-1 (rank 1 from hxpr) must outrank doc-2 (rank 2)
             assertThat(chunks.get(0).docId()).isEqualTo("doc-1");
             assertThat(chunks.get(0).score()).isGreaterThan(chunks.get(1).score());
+        }
+
+        @Test
+        void executeKeywordSearch_queryWithApostrophe_sanitizesAndSucceeds() {
+            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
+            result.setDocuments(List.of());
+            when(hxprService.query(any(), anyInt(), anyInt())).thenReturn(result);
+
+            // Must not throw; apostrophe must not appear inside the NXQL string literal
+            List<ScoredChunk> chunks = service.executeKeywordSearch(
+                    "king arthur's legend", "SELECT * FROM SysContent WHERE (sys_racl = '__Everyone__')", 20);
+
+            assertThat(chunks).isEmpty();
+            verify(hxprService).query(argThat(q ->
+                    q.contains("king arthur s legend") && !q.contains("arthur's")
+            ), anyInt(), anyInt());
         }
 
         @Test

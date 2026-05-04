@@ -251,7 +251,7 @@ public class HybridSearchService {
     }
 
     String buildFulltextQuery(String queryText, String permissionFilter) {
-        String escaped = escapeHxql(queryText);
+        String escaped = sanitizeHxqlFulltext(queryText);
         // Search in extracted text stored by Content Lake instead of sys_fulltextBinary
         String fulltextClause = "cin_ingestProperties.contentLake_extractedText = '" + escaped + "'";
 
@@ -457,7 +457,7 @@ public class HybridSearchService {
         for (String docId : docIds) {
             try {
                 HxprDocument.QueryResult result = hxprService.query(
-                        "SELECT * FROM SysContent WHERE sys_id = '" + escapeHxql(docId) + "'",
+                        "SELECT * FROM SysContent WHERE sys_id = '" + escapeHxqlLiteral(docId) + "'",
                         1, 0);
 
                 if (result != null && result.getDocuments() != null) {
@@ -542,21 +542,21 @@ public class HybridSearchService {
         List<String> clauses = new ArrayList<>();
 
         if (metadata.getMimeType() != null && !metadata.getMimeType().isBlank()) {
-            clauses.add(SOURCE_MIME_PROP + " = '" + escapeHxql(metadata.getMimeType().trim()) + "'");
+            clauses.add(SOURCE_MIME_PROP + " = '" + escapeHxqlLiteral(metadata.getMimeType().trim()) + "'");
         }
 
         if (metadata.getPathPrefix() != null && !metadata.getPathPrefix().isBlank()) {
-            String escapedPrefix = escapeHxql(metadata.getPathPrefix().trim());
+            String escapedPrefix = escapeHxqlLiteral(metadata.getPathPrefix().trim());
             clauses.add("(" + SOURCE_PATH_PROP + " >= '" + escapedPrefix + "' AND "
                     + SOURCE_PATH_PROP + " < '" + escapedPrefix + "\uFFFF')");
         }
 
         if (metadata.getModifiedAfter() != null && !metadata.getModifiedAfter().isBlank()) {
-            clauses.add(SOURCE_MODIFIED_PROP + " >= '" + escapeHxql(metadata.getModifiedAfter().trim()) + "'");
+            clauses.add(SOURCE_MODIFIED_PROP + " >= '" + escapeHxqlLiteral(metadata.getModifiedAfter().trim()) + "'");
         }
 
         if (metadata.getModifiedBefore() != null && !metadata.getModifiedBefore().isBlank()) {
-            clauses.add(SOURCE_MODIFIED_PROP + " <= '" + escapeHxql(metadata.getModifiedBefore().trim()) + "'");
+            clauses.add(SOURCE_MODIFIED_PROP + " <= '" + escapeHxqlLiteral(metadata.getModifiedBefore().trim()) + "'");
         }
 
         if (metadata.getProperties() != null && !metadata.getProperties().isEmpty()) {
@@ -566,7 +566,7 @@ public class HybridSearchService {
                 if (key == null || value == null || value.isBlank()) {
                     continue;
                 }
-                clauses.add(INGEST_PROP_PREFIX + key + " = '" + escapeHxql(value.trim()) + "'");
+                clauses.add(INGEST_PROP_PREFIX + key + " = '" + escapeHxqlLiteral(value.trim()) + "'");
             }
         }
 
@@ -746,8 +746,14 @@ public class HybridSearchService {
         return (docId != null ? docId : "?") + "::" + (embeddingId != null ? embeddingId : UUID.randomUUID().toString());
     }
 
-    private static String escapeHxql(String value) {
-        return value == null ? "" : value.replace("'", "''");
+    private static String sanitizeHxqlFulltext(String value) {
+        // hxpr NXQL parser does not support '' as an escaped quote inside string literals;
+        // replace quote and escape characters with spaces so surrounding terms still match.
+        return value == null ? "" : value.replace("\\", " ").replace("'", " ");
+    }
+
+    private static String escapeHxqlLiteral(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("'", "\\'");
     }
 
     private String buildSourceTypeFilter(String sourceType) {
@@ -756,7 +762,7 @@ public class HybridSearchService {
             return null;
         }
         return "cin_ingestProperties." + ContentLakeIngestProperties.SOURCE_TYPE
-                + " = '" + escapeHxql(normalized) + "'";
+                + " = '" + escapeHxqlLiteral(normalized) + "'";
     }
 
     private String buildAuthorityClause(String authority, String sourceId) {
@@ -764,7 +770,7 @@ public class HybridSearchService {
         String principal = authority.startsWith(GROUP_PREFIX)
                 ? GROUP_RACL_PREFIX + namespaced
                 : USER_RACL_PREFIX + namespaced;
-        return RACL_FIELD + " = '" + escapeHxql(principal) + "'";
+        return RACL_FIELD + " = '" + escapeHxqlLiteral(principal) + "'";
     }
 
     private String buildSourcePermissionClause(String sourceId, List<String> authorities) {
@@ -773,7 +779,7 @@ public class HybridSearchService {
         }
 
         List<String> raclClauses = new ArrayList<>();
-        raclClauses.add(RACL_FIELD + " = '" + escapeHxql(EVERYONE_PRINCIPAL) + "'");
+        raclClauses.add(RACL_FIELD + " = '" + escapeHxqlLiteral(EVERYONE_PRINCIPAL) + "'");
 
         for (String authority : authorities) {
             if ("GROUP_EVERYONE".equals(authority)) {
@@ -790,7 +796,7 @@ public class HybridSearchService {
     }
 
     private String buildSourceIdClause(String sourceId) {
-        return "cin_sourceId = '" + escapeHxql(formatSourceId(sourceId)) + "'";
+        return "cin_sourceId = '" + escapeHxqlLiteral(formatSourceId(sourceId)) + "'";
     }
 
     private String formatSourceId(String sourceId) {
@@ -870,7 +876,7 @@ public class HybridSearchService {
         try {
             String hxql = "SELECT * FROM SysContent WHERE cin_ingestProperties."
                     + ContentLakeIngestProperties.SOURCE_TYPE
-                    + " = '" + escapeHxql(sourceType) + "'";
+                    + " = '" + escapeHxqlLiteral(sourceType) + "'";
             HxprDocument.QueryResult result = hxprService.query(hxql, SOURCE_DISCOVERY_LIMIT, 0);
             if (result == null || result.getDocuments() == null) {
                 return List.of();
