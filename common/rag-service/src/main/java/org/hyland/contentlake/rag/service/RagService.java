@@ -275,7 +275,7 @@ public class RagService {
         String contextBlock = assembleContext(retrieval.rerankedHits());
         String historyBlock = assembleConversationHistory(history);
         String systemPrompt = resolveSystemPrompt(request);
-        String userPrompt = buildUserPrompt(request.getQuestion(), retrieval.retrievalQuery(), historyBlock, contextBlock);
+        String userPrompt = buildUserPrompt(request.getQuestion(), historyBlock, contextBlock);
 
         log.debug("RAG augment phase: context length={} chars, {} sources, history turns={}",
                 contextBlock.length(), retrieval.rerankedHits().size(), history.size());
@@ -569,11 +569,7 @@ public class RagService {
         return ragProperties.getDefaultSystemPrompt();
     }
 
-    private String buildUserPrompt(String question, String context) {
-        return buildUserPrompt(question, question, "", context);
-    }
-
-    private String buildUserPrompt(String question, String retrievalQuery, String history, String context) {
+    private String buildUserPrompt(String question, String history, String context) {
         String conversationSection = history == null || history.isBlank() ? "(none)" : history;
         return String.format("""
                 Based on the conversation history and document context, answer the current question.
@@ -586,11 +582,10 @@ public class RagService {
                 %s
                 --- END CONTEXT ---
 
-                Current question: %s
-                Retrieval query: %s
+                Question: %s
 
                 Answer:""",
-                conversationSection, context, question, retrievalQuery);
+                conversationSection, context, question);
     }
 
     private String assembleConversationHistory(List<ConversationTurn> turns) {
