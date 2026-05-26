@@ -11,12 +11,17 @@
 
 [Features](#features) • [Quick Start](#quick-start) • [Architecture](#architecture) • [Authentication](#authentication) • [API Usage](#api-usage) • [Configuration](#configuration)
 
-## Related Projects
+## Content Lake Ecosystem
 
-- [alfresco-content-lake-ui](https://github.com/aborroy/alfresco-content-lake-ui) - ACA-based frontend for semantic search and RAG over Content Lake.
-- [content-lake-app-ui](https://github.com/aborroy/content-lake-app-ui) - Demo UI for the Content Lake App that provides dual authentication (Alfresco + Nuxeo)
-- [content-lake-app-deployment](https://github.com/aborroy/content-lake-app-deployment) - Docker Compose deployment for Alfresco, Nuxeo, hxpr, Content Lake services, and the UI.
-- [nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) - Companion project that builds and runs the local Nuxeo server. Required when using `compose.nuxeo.yaml` in this repo.
+Part of the **Content Lake** ecosystem -- a PoC for ingesting Alfresco and Nuxeo content into [hxpr](https://github.com/HylandSoftware/hxpr) for hybrid semantic search and RAG.
+
+| Repo | Role |
+|---|---|
+| **[content-lake-app](https://github.com/aborroy/content-lake-app)** | Java ingestion pipeline and RAG service (this repo) |
+| [content-lake-app-deployment](https://github.com/aborroy/content-lake-app-deployment) | Docker Compose stack that wires everything together -- **start here to run the full stack** |
+| [alfresco-content-lake-ui](https://github.com/aborroy/alfresco-content-lake-ui) | ACA/ADW extension: semantic search + RAG chat sidebar |
+| [content-lake-app-ui](https://github.com/aborroy/content-lake-app-ui) | Standalone demo UI (Alfresco + Nuxeo dual auth) |
+| [nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) | Local Nuxeo + PostgreSQL stack (required for Nuxeo profiles) |
 
 ## Documentation
 
