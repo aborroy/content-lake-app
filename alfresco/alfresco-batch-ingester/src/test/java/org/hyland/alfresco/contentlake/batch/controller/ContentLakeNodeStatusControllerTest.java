@@ -72,7 +72,7 @@ class ContentLakeNodeStatusControllerTest {
         private Map<String, ContentLakeNodeStatus> bulkStatusResponse = new LinkedHashMap<>();
 
         private CapturingNodeStatusService() {
-            super(null, null, null);
+            super(null, null, null, null, Runnable::run);
         }
 
         @Override

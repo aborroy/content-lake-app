@@ -47,6 +47,35 @@
             </properties>
         </aspect>
 
+        <!--
+          Applied to FILES after the Content Lake pipeline processes them.
+          Stores the last known sync status so the status API can read it
+          directly from the Alfresco node without a secondary hxpr query.
+        -->
+        <aspect name="cl:syncStatus">
+            <title>Content Lake Sync Status</title>
+            <description>Records the ingestion status of a node in the Content Lake pipeline.</description>
+            <properties>
+                <property name="cl:syncStatusValue">
+                    <title>Sync Status</title>
+                    <description>Last known Content Lake sync status: PENDING, INDEXED, or FAILED.</description>
+                    <type>d:text</type>
+                    <mandatory>false</mandatory>
+                    <index enabled="true">
+                        <atomic>true</atomic>
+                        <stored>false</stored>
+                        <tokenised>FALSE</tokenised>
+                    </index>
+                </property>
+                <property name="cl:syncError">
+                    <title>Sync Error</title>
+                    <description>Error message from the last failed Content Lake ingestion attempt.</description>
+                    <type>d:text</type>
+                    <mandatory>false</mandatory>
+                </property>
+            </properties>
+        </aspect>
+
     </aspects>
 
 </model>

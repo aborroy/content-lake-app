@@ -172,19 +172,15 @@ public class NodeSyncService {
             String text = extractText(nodeId, mimeType, documentName);
             if (text == null || text.isBlank()) {
                 log.warn("Empty text for node {} ({})", nodeId, mimeType);
-                patchSyncState(
-                        hxprDocId,
-                        baseIngestProps,
-                        ContentLakeNodeStatus.Status.FAILED,
-                        String.format(ERR_NO_EXTRACTABLE_TEXT, safeMimeType(mimeType))
-                );
+                String noTextError = String.format(ERR_NO_EXTRACTABLE_TEXT, safeMimeType(mimeType));
+                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, noTextError, nodeId);
                 return;
             }
 
             List<Chunk> chunks = chunkingService.chunk(text, nodeId, mimeType);
             if (chunks.isEmpty()) {
                 log.warn("No chunks for node {}", nodeId);
-                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, ERR_NO_CHUNKS);
+                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, ERR_NO_CHUNKS, nodeId);
                 return;
             }
 
@@ -200,12 +196,12 @@ public class NodeSyncService {
             log.info("Successfully updated embeddings for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
 
             log.info("About to update fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
-            updateFulltextWithStatus(hxprDocId, text, baseIngestProps);
+            updateFulltextWithStatus(hxprDocId, text, baseIngestProps, nodeId);
             log.info("Successfully updated fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
 
             log.info("Completed sync for node {}: {} embeddings", nodeId, hxprEmbeddings.size());
         } catch (Exception e) {
-            patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, e.getMessage());
+            patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, e.getMessage(), nodeId);
             log.error("Content processing failed for node {}", nodeId, e);
             throw new RuntimeException("Content processing failed", e);
         }
@@ -499,7 +495,8 @@ public class NodeSyncService {
         }
     }
 
-    private void updateFulltextWithStatus(String hxprDocId, String text, Map<String, Object> baseIngestProps) {
+    private void updateFulltextWithStatus(String hxprDocId, String text, Map<String, Object> baseIngestProps,
+                                          String nodeId) {
         log.info("updateFulltextWithStatus called for hxprDocId: {}, textLength: {}, baseIngestProps: {}",
                 hxprDocId, text != null ? text.length() : 0, baseIngestProps);
         Map<String, Object> props = buildStatusedProps(baseIngestProps, ContentLakeNodeStatus.Status.INDEXED, null);
@@ -513,10 +510,11 @@ public class NodeSyncService {
         log.info("About to call documentApi.updateById for hxprDocId: {}", hxprDocId);
         documentApi.updateById(hxprDocId, update);
         log.info("Successfully called documentApi.updateById for hxprDocId: {}", hxprDocId);
+        sourceClient.writeSyncStatus(nodeId, ContentLakeNodeStatus.Status.INDEXED.name(), null);
     }
 
     private void patchSyncState(String hxprDocId, Map<String, Object> baseIngestProps,
-                                ContentLakeNodeStatus.Status status, String error) {
+                                ContentLakeNodeStatus.Status status, String error, String nodeId) {
         try {
             Map<String, Object> props = buildStatusedProps(baseIngestProps, status, error);
             HxprDocument update = new HxprDocument();
@@ -528,6 +526,7 @@ public class NodeSyncService {
         } catch (Exception e) {
             log.warn("Failed to update sync status {} for document {}: {}", status, hxprDocId, e.getMessage());
         }
+        sourceClient.writeSyncStatus(nodeId, status.name(), error);
     }
 
     private Map<String, Object> buildStatusedProps(Map<String, Object> baseProps,

@@ -1,16 +1,18 @@
 package org.hyland.alfresco.contentlake.service;
 
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.contentlake.spi.ScopeResolver;
 import org.hyland.contentlake.spi.SourceNode;
 import org.alfresco.core.model.Node;
+
 import org.alfresco.core.model.PathElement;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
  * Shared scope rules used by both ingesters to decide whether a node belongs in
@@ -33,25 +35,24 @@ public class ContentLakeScopeResolver implements ScopeResolver {
     public static final String INDEXED_ASPECT = "cl:indexed";
     public static final String EXCLUDE_FROM_LAKE_PROPERTY = "cl:excludeFromLake";
 
-    private static final int CACHE_MAX_SIZE = 2000;
-
     private final List<String> excludedPathPatterns;
     private final Set<String> excludedAspects;
     private final AlfrescoClient alfrescoClient;
-
-    /**
-     * Cache: folderId → the folder's Content Lake scope state.
-     * Bounded to {@value CACHE_MAX_SIZE} entries; invalidated explicitly on scope
-     * changes via {@link #invalidateFolderScope(String)}.
-     */
-    private final ConcurrentHashMap<String, FolderScopeState> folderScopeCache = new ConcurrentHashMap<>(256);
+    private final AlfrescoSearchService searchService;
 
     public ContentLakeScopeResolver(Collection<String> excludedPathPatterns,
                                     Collection<String> excludedAspects,
-                                    AlfrescoClient alfrescoClient) {
+                                    AlfrescoClient alfrescoClient,
+                                    AlfrescoSearchService searchService) {
         this.excludedPathPatterns = List.copyOf(excludedPathPatterns);
         this.excludedAspects = Set.copyOf(excludedAspects);
         this.alfrescoClient = alfrescoClient;
+        this.searchService = searchService;
+    }
+
+    /** Returns the configured excluded aspects (used by AFTS query builders). */
+    public Set<String> getExcludedAspects() {
+        return excludedAspects;
     }
 
     /**
@@ -150,80 +151,25 @@ public class ContentLakeScopeResolver implements ScopeResolver {
         return matchesAny(path, excludedPathPatterns);
     }
 
-    /**
-     * Removes the given folder from the ancestor-scope cache.
-     *
-     * <p>Must be called after {@code cl:indexed} is added to or removed from a folder
-     * so that subsequent {@link #isInScope} calls reflect the updated aspect state.</p>
-     */
-    public void invalidateFolderScope(String folderId) {
-        folderScopeCache.remove(folderId);
-    }
+    /** No-op: cache was removed; kept for call-site compatibility. */
+    public void invalidateFolderScope(String folderId) {}
 
-    /**
-     * Walks the node's path elements and returns {@code true} if any ancestor folder
-     * has the {@code cl:indexed} aspect.
-     *
-     * <p>The Alfresco REST API does not populate aspect names inside path elements, so
-     * each unique folder ID is resolved with a {@code GET /nodes/{id}} call. The result
-     * is cached to avoid redundant calls when processing many nodes under the same path.</p>
-     */
     private boolean hasIndexedAncestor(Node node) {
-        if (node.getPath() == null || node.getPath().getElements() == null) {
-            return false;
-        }
-
-        for (PathElement element : node.getPath().getElements()) {
-            if (element.getId() == null) {
-                continue;
-            }
-            if (getFolderScopeState(element.getId()).indexed()) {
-                return true;
-            }
-        }
-
-        return false;
+        return searchService.hasIndexedAncestor(pathElementIds(node));
     }
 
     private boolean hasExcludedAncestor(Node node) {
-        if (node.getPath() == null || node.getPath().getElements() == null) {
-            return false;
-        }
-
-        for (PathElement element : node.getPath().getElements()) {
-            if (element.getId() == null) {
-                continue;
-            }
-            if (getFolderScopeState(element.getId()).excluded()) {
-                return true;
-            }
-        }
-
-        return false;
+        return searchService.hasExcludedAncestor(pathElementIds(node));
     }
 
-    /**
-     * Checks whether the folder with the given ID has {@code cl:indexed}, using the
-     * local cache to avoid repeated REST calls.
-     */
-    private FolderScopeState getFolderScopeState(String folderId) {
-        FolderScopeState cached = folderScopeCache.get(folderId);
-        if (cached != null) {
-            return cached;
+    private static List<String> pathElementIds(Node node) {
+        if (node.getPath() == null || node.getPath().getElements() == null) {
+            return List.of();
         }
-
-        Node folder = alfrescoClient.getAlfrescoNode(folderId);
-        FolderScopeState state = new FolderScopeState(
-                folder != null && hasIndexedAspect(folder.getAspectNames()),
-                folder != null && isExcludedFromLake(folder)
-        );
-
-        // Store only if the cache has not yet reached its capacity limit.
-        if (folderScopeCache.size() < CACHE_MAX_SIZE) {
-            folderScopeCache.putIfAbsent(folderId, state);
-        }
-
-        return state;
+        return node.getPath().getElements().stream()
+                .map(PathElement::getId)
+                .filter(id -> id != null && !id.isBlank())
+                .collect(Collectors.toList());
     }
 
     private boolean hasIndexedAspect(Collection<String> aspects) {
@@ -270,6 +216,4 @@ public class ContentLakeScopeResolver implements ScopeResolver {
 
         return false;
     }
-
-    private record FolderScopeState(boolean indexed, boolean excluded) {}
 }

@@ -2,6 +2,7 @@ package org.hyland.alfresco.contentlake.live.config;
 
 import lombok.Data;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
@@ -24,6 +25,9 @@ import org.springframework.http.client.ClientHttpRequestInterceptor;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
+
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 /**
  * Central Spring configuration for the live-ingester module.
@@ -118,13 +122,20 @@ public class LiveIngesterConfig {
         return new SimpleChunkingService(nr, cfg);
     }
 
+    @Bean(name = "statusLookupExecutor")
+    public Executor statusLookupExecutor() {
+        return Executors.newVirtualThreadPerTaskExecutor();
+    }
+
     @Bean
     public ContentLakeScopeResolver contentLakeScopeResolver(LiveIngesterProperties props,
-                                                              AlfrescoClient alfrescoClient) {
+                                                              AlfrescoClient alfrescoClient,
+                                                              AlfrescoSearchService searchService) {
         return new ContentLakeScopeResolver(
                 props.getFilter().getExcludePaths(),
                 props.getFilter().getExcludeAspects(),
-                alfrescoClient
+                alfrescoClient,
+                searchService
         );
     }
 

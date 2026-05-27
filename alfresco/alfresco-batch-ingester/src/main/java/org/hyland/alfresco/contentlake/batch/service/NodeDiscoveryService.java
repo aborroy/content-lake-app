@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.hyland.alfresco.contentlake.batch.config.IngestionProperties;
 import org.hyland.alfresco.contentlake.batch.model.BatchSyncRequest;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.alfresco.contentlake.service.ContentLakeScopeResolver;
 import org.alfresco.core.model.Node;
 import org.springframework.stereotype.Service;
@@ -26,6 +27,7 @@ import java.util.stream.Stream;
 public class NodeDiscoveryService {
 
     private final AlfrescoClient alfrescoClient;
+    private final AlfrescoSearchService searchService;
     private final IngestionProperties props;
     private final ContentLakeScopeResolver scopeResolver;
 
@@ -41,8 +43,9 @@ public class NodeDiscoveryService {
         List<String> types = request.getTypes();
 
         return folders.stream()
-                .peek(this::ensureIndexed)
-                .flatMap(folderId -> discoverFromFolder(folderId, recursive, types));
+                .map(this::ensureIndexedAndResolve)
+                .filter(folder -> folder != null)
+                .flatMap(folder -> discoverFromFolder(folder.getId(), recursive, types));
     }
 
     /**
@@ -52,69 +55,65 @@ public class NodeDiscoveryService {
      */
     public Stream<Node> discoverFromConfig() {
         return props.getSources().stream()
-                .peek(source -> ensureIndexed(source.getFolder()))
-                .flatMap(source -> discoverFromFolder(
-                        source.getFolder(),
-                        source.isRecursive(),
-                        source.getTypes()
-                ));
+                .flatMap(source -> {
+                    Node folder = ensureIndexedAndResolve(source.getFolder());
+                    if (folder == null) {
+                        return Stream.empty();
+                    }
+                    return discoverFromFolder(folder.getId(), source.isRecursive(), source.getTypes());
+                });
     }
 
     /**
-     * Ensures the given folder has the {@code cl:indexed} aspect, adding it if absent.
-     * This is idempotent — calling it on an already-indexed folder is a no-op.
+     * Fetches the folder, ensures it has {@code cl:indexed}, and returns the resolved
+     * {@link Node} with its canonical UUID. Accepts Alfresco aliases such as {@code -root-}.
      */
-    private void ensureIndexed(String folderId) {
+    private Node ensureIndexedAndResolve(String folderId) {
         Node folder = alfrescoClient.getAlfrescoNode(folderId);
         if (folder == null) {
-            log.warn("Folder not found, skipping scope check: {}", folderId);
-            return;
+            log.warn("Folder not found, skipping: {}", folderId);
+            return null;
         }
         if (!Boolean.TRUE.equals(folder.isIsFolder())) {
-            log.warn("Node {} is not a folder, skipping scope check", folderId);
-            return;
+            log.warn("Node {} is not a folder, skipping", folderId);
+            return null;
         }
 
         List<String> aspects = folder.getAspectNames() != null
                 ? new ArrayList<>(folder.getAspectNames())
                 : new ArrayList<>();
 
-        if (aspects.contains(ContentLakeScopeResolver.INDEXED_ASPECT)) {
-            return;
+        if (!aspects.contains(ContentLakeScopeResolver.INDEXED_ASPECT)) {
+            aspects.add(ContentLakeScopeResolver.INDEXED_ASPECT);
+            alfrescoClient.updateNode(folder.getId(), aspects, null);
+            scopeResolver.invalidateFolderScope(folder.getId());
+            log.info("Added cl:indexed to folder {}", folder.getId());
         }
 
-        aspects.add(ContentLakeScopeResolver.INDEXED_ASPECT);
-        alfrescoClient.updateNode(folderId, aspects, null);
-        scopeResolver.invalidateFolderScope(folderId);
-        log.info("Added cl:indexed to folder {}", folderId);
+        return folder;
     }
 
     private Stream<Node> discoverFromFolder(String folderId, boolean recursive, List<String> types) {
         log.info("Discovering nodes from folder: {}, recursive: {}", folderId, recursive);
 
+        if (recursive) {
+            List<Node> nodes = searchService.findDescendantFiles(
+                    folderId, scopeResolver.getExcludedAspects());
+            return nodes.stream()
+                    .filter(node -> matchesType(node, types))
+                    .filter(node -> !matchesExcludedPath(node));
+        }
+
+        // Non-recursive: single level only, no AFTS needed
         return alfrescoClient.getAllChildren(folderId).stream()
-                .flatMap(node -> toCandidateStream(node, recursive, types));
+                .filter(node -> Boolean.FALSE.equals(node.isIsFolder()))
+                .filter(node -> matchesType(node, types))
+                .filter(node -> scopeResolver.isInScope(node));
     }
 
-    private Stream<Node> toCandidateStream(Node node, boolean recursive, List<String> types) {
-        if (Boolean.TRUE.equals(node.isIsFolder()) && recursive) {
-            if (!scopeResolver.shouldTraverse(node)) {
-                return Stream.empty();
-            }
-            if (scopeResolver.isExcludedBySelfOrAncestor(node)) {
-                log.debug("Skipping excluded folder subtree {}", node.getId());
-                return Stream.empty();
-            }
-            return discoverFromFolder(node.getId(), true, types);
-        }
-
-        if (Boolean.FALSE.equals(node.isIsFolder())
-                && matchesType(node, types)
-                && scopeResolver.isInScope(node)) {
-            return Stream.of(node);
-        }
-
-        return Stream.empty();
+    private boolean matchesExcludedPath(Node node) {
+        String path = node.getPath() != null ? node.getPath().getName() : null;
+        return scopeResolver.matchesExcludedPath(path);
     }
 
     private boolean matchesType(Node node, List<String> types) {

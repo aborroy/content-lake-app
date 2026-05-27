@@ -55,4 +55,18 @@ public interface ContentSourceClient {
      * @return content bytes
      */
     byte[] getContent(String nodeId);
+
+    /**
+     * Writes the sync status back to the source node so the status API can read it
+     * without a secondary hxpr query. Default implementation is a no-op; Alfresco
+     * overrides this to persist {@code cl:syncStatusValue} and {@code cl:syncError}.
+     *
+     * <p>Implementations must be best-effort: any failure must be swallowed and logged
+     * rather than propagated, to avoid disrupting the ingestion pipeline.</p>
+     *
+     * @param nodeId source-system node identifier
+     * @param status status value ({@code PENDING}, {@code INDEXED}, or {@code FAILED})
+     * @param error  error message, or {@code null} to clear any previous error
+     */
+    default void writeSyncStatus(String nodeId, String status, String error) {}
 }

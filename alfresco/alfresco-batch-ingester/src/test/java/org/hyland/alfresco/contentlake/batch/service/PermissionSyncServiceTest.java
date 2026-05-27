@@ -6,6 +6,7 @@ import org.alfresco.core.model.PermissionsInfo;
 import org.hyland.alfresco.contentlake.batch.model.PermissionSyncRequest;
 import org.hyland.alfresco.contentlake.batch.model.PermissionSyncResult;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.alfresco.contentlake.service.ContentLakeScopeResolver;
 import org.hyland.contentlake.service.NodeSyncService;
 import org.hyland.contentlake.spi.SourceNode;
@@ -17,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.OffsetDateTime;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -38,12 +40,14 @@ class PermissionSyncServiceTest {
     private NodeSyncService nodeSyncService;
 
     private StubAlfrescoClient alfrescoClient;
+    private StubSearchService searchService;
     private PermissionSyncService permissionSyncService;
 
     @BeforeEach
     void setUp() {
         alfrescoClient = new StubAlfrescoClient();
-        permissionSyncService = new PermissionSyncService(alfrescoClient, scopeResolver, nodeSyncService);
+        searchService = new StubSearchService();
+        permissionSyncService = new PermissionSyncService(alfrescoClient, searchService, scopeResolver, nodeSyncService);
     }
 
     @Test
@@ -71,7 +75,6 @@ class PermissionSyncServiceTest {
     @Test
     void syncPermissions_reconcilesFolderDescendantsRecursively() {
         Node folder = folder("folder-1");
-        Node nestedFolder = folder("folder-2");
         Node childA = file("file-a")
                 .permissions(new PermissionsInfo()
                         .isInheritanceEnabled(false)
@@ -82,11 +85,10 @@ class PermissionSyncServiceTest {
                         .addLocallySetItem(allowed("user-b", "Consumer")));
 
         alfrescoClient.nodesById.put("folder-1", folder);
-        alfrescoClient.childrenByFolderId.put("folder-1", List.of(childA, nestedFolder));
-        alfrescoClient.childrenByFolderId.put("folder-2", List.of(childB));
+        // AFTS returns all descendants directly -- no recursive folder traversal needed
+        searchService.descendantsByFolderId.put("folder-1", List.of(childA, childB));
 
         when(scopeResolver.shouldTraverse(folder)).thenReturn(true);
-        when(scopeResolver.shouldTraverse(nestedFolder)).thenReturn(true);
         when(scopeResolver.isInScope(childA)).thenReturn(true);
         when(scopeResolver.isInScope(childB)).thenReturn(true);
 
@@ -107,7 +109,7 @@ class PermissionSyncServiceTest {
                 .modifiedAt(OffsetDateTime.parse("2026-03-30T09:12:00Z"));
 
         alfrescoClient.nodesById.put("folder-1", folder);
-        alfrescoClient.childrenByFolderId.put("folder-1", List.of(child));
+        searchService.descendantsByFolderId.put("folder-1", List.of(child));
 
         when(scopeResolver.shouldTraverse(folder)).thenReturn(true);
         when(scopeResolver.isInScope(child)).thenReturn(false);
@@ -141,9 +143,21 @@ class PermissionSyncServiceTest {
         return new Node().id(nodeId).isFolder(false).isFile(true);
     }
 
+    private static final class StubSearchService extends AlfrescoSearchService {
+        private final Map<String, List<Node>> descendantsByFolderId = new LinkedHashMap<>();
+
+        private StubSearchService() {
+            super(null, null, null);
+        }
+
+        @Override
+        public List<Node> findDescendantFiles(String folderId, Collection<String> excludedAspects) {
+            return descendantsByFolderId.getOrDefault(folderId, List.of());
+        }
+    }
+
     private static final class StubAlfrescoClient extends AlfrescoClient {
         private final Map<String, Node> nodesById = new LinkedHashMap<>();
-        private final Map<String, List<Node>> childrenByFolderId = new LinkedHashMap<>();
 
         private StubAlfrescoClient() {
             super(null, null);
@@ -157,11 +171,6 @@ class PermissionSyncServiceTest {
         @Override
         public Node getAlfrescoNode(String nodeId) {
             return nodesById.get(nodeId);
-        }
-
-        @Override
-        public List<Node> getAllChildren(String folderId) {
-            return childrenByFolderId.getOrDefault(folderId, List.of());
         }
     }
 }

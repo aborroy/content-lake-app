@@ -1,31 +1,45 @@
 package org.hyland.alfresco.contentlake.service;
 
-import lombok.RequiredArgsConstructor;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
+import org.hyland.alfresco.contentlake.client.FolderStatusCounts;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
 import org.hyland.contentlake.model.ContentLakeNodeStatus;
 import org.hyland.contentlake.model.HxprDocument;
 import org.alfresco.core.model.Node;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.stream.Collectors;
 
 @Service
-@RequiredArgsConstructor
 public class ContentLakeNodeStatusService {
-
-    private static final int HXPR_LOOKUP_BATCH_SIZE = 500;
 
     private final AlfrescoClient alfrescoClient;
     private final HxprService hxprService;
     private final ContentLakeScopeResolver scopeResolver;
+    private final AlfrescoSearchService searchService;
+    private final Executor statusLookupExecutor;
+
+    public ContentLakeNodeStatusService(AlfrescoClient alfrescoClient,
+                                        HxprService hxprService,
+                                        ContentLakeScopeResolver scopeResolver,
+                                        AlfrescoSearchService searchService,
+                                        @Qualifier("statusLookupExecutor") Executor statusLookupExecutor) {
+        this.alfrescoClient = alfrescoClient;
+        this.hxprService = hxprService;
+        this.scopeResolver = scopeResolver;
+        this.searchService = searchService;
+        this.statusLookupExecutor = statusLookupExecutor;
+    }
 
     public ContentLakeNodeStatus getNodeStatus(String nodeId) {
         return getNodeStatus(nodeId, false);
@@ -48,14 +62,22 @@ public class ContentLakeNodeStatusService {
                 .toList();
 
         String sourceId = formatSourceId(alfrescoClient.getSourceType(), alfrescoClient.getSourceId());
-        Map<String, Node> nodesById = new LinkedHashMap<>();
-        List<String> fileNodeIds = sanitizedIds.stream()
-                .map(nodeId -> {
-                    Node node = alfrescoClient.getAlfrescoNode(nodeId);
-                    nodesById.put(nodeId, node);
-                    return node;
-                })
-                .filter(node -> node != null && !Boolean.TRUE.equals(node.isIsFolder()))
+
+        List<CompletableFuture<Entry<String, Node>>> futures = sanitizedIds.stream()
+                .map(nodeId -> CompletableFuture.supplyAsync(
+                        () -> Map.entry(nodeId, alfrescoClient.getAlfrescoNode(nodeId)),
+                        statusLookupExecutor))
+                .toList();
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+
+        Map<String, Node> nodesById = futures.stream()
+                .map(CompletableFuture::join)
+                .filter(e -> e.getValue() != null)
+                .collect(Collectors.toMap(Entry::getKey, Entry::getValue,
+                        (a, b) -> a, LinkedHashMap::new));
+
+        List<String> fileNodeIds = nodesById.values().stream()
+                .filter(node -> !Boolean.TRUE.equals(node.isIsFolder()))
                 .map(Node::getId)
                 .toList();
 
@@ -89,62 +111,48 @@ public class ContentLakeNodeStatusService {
             return new ContentLakeNodeStatus(folderNode.getId(), null, true, true, inScope, excluded, null);
         }
 
-        List<String> inScopeFileIds = collectInScopeFileIds(folderNode.getId());
-        if (inScopeFileIds.isEmpty()) {
+        FolderStatusCounts counts = searchService.getFolderStatusCounts(
+                folderNode.getId(), scopeResolver.getExcludedAspects());
+
+        if (counts.total() == 0) {
             return new ContentLakeNodeStatus(
                     folderNode.getId(),
                     ContentLakeNodeStatus.Status.INDEXED,
-                    true,
-                    true,
-                    true,
-                    false,
-                    null,
+                    true, true, true, false, null,
                     new ContentLakeNodeStatus.FolderStatusSummary(0, 0, 0, 0)
             );
         }
 
-        Map<String, HxprDocument> subtreeDocuments = findByNodeIdsInChunks(inScopeFileIds, repositoryId);
-        long indexedCount = 0;
-        long pendingCount = 0;
-        long failedCount = 0;
-
-        for (String fileId : inScopeFileIds) {
-            ContentLakeNodeStatus.Status fileStatus = readStoredStatus(subtreeDocuments.get(fileId));
-            if (fileStatus == null) {
-                fileStatus = ContentLakeNodeStatus.Status.PENDING;
-            }
-
-            switch (fileStatus) {
-                case INDEXED -> indexedCount++;
-                case FAILED -> failedCount++;
-                case PENDING -> pendingCount++;
-            }
-        }
-
-        ContentLakeNodeStatus.Status folderStatus = failedCount > 0
+        ContentLakeNodeStatus.Status folderStatus = counts.failed() > 0
                 ? ContentLakeNodeStatus.Status.FAILED
-                : (pendingCount > 0 ? ContentLakeNodeStatus.Status.PENDING : ContentLakeNodeStatus.Status.INDEXED);
+                : (counts.pending() > 0 ? ContentLakeNodeStatus.Status.PENDING : ContentLakeNodeStatus.Status.INDEXED);
 
-        String aggregateError = failedCount > 0 ? failedCount + " document(s) failed indexing" : null;
+        String aggregateError = counts.failed() > 0 ? counts.failed() + " document(s) failed indexing" : null;
 
         return new ContentLakeNodeStatus(
                 folderNode.getId(),
                 folderStatus,
-                true,
-                true,
-                true,
-                false,
+                true, true, true, false,
                 aggregateError,
                 new ContentLakeNodeStatus.FolderStatusSummary(
-                        inScopeFileIds.size(),
-                        indexedCount,
-                        pendingCount,
-                        failedCount
+                        counts.total(),
+                        counts.indexed(),
+                        counts.pending(),
+                        counts.failed()
                 )
         );
     }
 
     private ContentLakeNodeStatus resolveFileStatus(Node node, HxprDocument document) {
+        // Fast path: status is stored on the node itself -- no scope resolution or hxpr query needed.
+        String nodeStatus = readNodeProperty(node, "cl:syncStatusValue");
+        if (nodeStatus != null) {
+            ContentLakeNodeStatus.Status status = parseNodeStatus(nodeStatus);
+            String error = readNodeProperty(node, "cl:syncError");
+            return new ContentLakeNodeStatus(node.getId(), status, true, false, true, false, error, null);
+        }
+
+        // Legacy fallback: node pre-dates write-back; derive status from hxpr document.
         boolean excluded = scopeResolver.isExcludedBySelfOrAncestor(node);
         boolean inScope = scopeResolver.isInScope(node);
         if (!inScope) {
@@ -168,50 +176,20 @@ public class ContentLakeNodeStatusService {
         );
     }
 
-    private List<String> collectInScopeFileIds(String rootFolderId) {
-        Set<String> visitedFolders = new LinkedHashSet<>();
-        Set<String> fileIds = new LinkedHashSet<>();
-        collectInScopeFileIds(rootFolderId, visitedFolders, fileIds);
-        return new ArrayList<>(fileIds);
+    private String readNodeProperty(Node node, String propertyName) {
+        if (node.getProperties() instanceof Map<?, ?> props) {
+            Object value = props.get(propertyName);
+            return value != null ? value.toString() : null;
+        }
+        return null;
     }
 
-    private void collectInScopeFileIds(String folderId, Set<String> visitedFolders, Set<String> fileIds) {
-        if (folderId == null || folderId.isBlank() || !visitedFolders.add(folderId)) {
-            return;
+    private ContentLakeNodeStatus.Status parseNodeStatus(String raw) {
+        try {
+            return ContentLakeNodeStatus.Status.valueOf(raw);
+        } catch (IllegalArgumentException ignored) {
+            return ContentLakeNodeStatus.Status.INDEXED;
         }
-
-        List<Node> children = alfrescoClient.getAllChildren(folderId);
-        for (Node child : children) {
-            if (child == null || child.getId() == null || child.getId().isBlank()) {
-                continue;
-            }
-
-            if (Boolean.TRUE.equals(child.isIsFolder())) {
-                if (!scopeResolver.shouldTraverse(child) || scopeResolver.isExcludedBySelfOrAncestor(child)) {
-                    continue;
-                }
-                collectInScopeFileIds(child.getId(), visitedFolders, fileIds);
-                continue;
-            }
-
-            if (scopeResolver.isInScope(child)) {
-                fileIds.add(child.getId());
-            }
-        }
-    }
-
-    private Map<String, HxprDocument> findByNodeIdsInChunks(List<String> nodeIds, String repositoryId) {
-        if (nodeIds == null || nodeIds.isEmpty()) {
-            return Map.of();
-        }
-
-        Map<String, HxprDocument> documentsByNodeId = new LinkedHashMap<>();
-        for (int offset = 0; offset < nodeIds.size(); offset += HXPR_LOOKUP_BATCH_SIZE) {
-            int limit = Math.min(offset + HXPR_LOOKUP_BATCH_SIZE, nodeIds.size());
-            List<String> batch = nodeIds.subList(offset, limit);
-            documentsByNodeId.putAll(hxprService.findByNodeIds(batch, repositoryId));
-        }
-        return documentsByNodeId;
     }
 
     private String formatSourceId(String sourceType, String sourceId) {

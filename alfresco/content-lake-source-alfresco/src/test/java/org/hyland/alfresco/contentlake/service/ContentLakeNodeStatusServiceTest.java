@@ -1,6 +1,8 @@
 package org.hyland.alfresco.contentlake.service;
 
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
+import org.hyland.alfresco.contentlake.client.FolderStatusCounts;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
 import org.hyland.contentlake.model.ContentLakeNodeStatus;
@@ -16,6 +18,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.Executors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -24,6 +27,7 @@ class ContentLakeNodeStatusServiceTest {
     private StubAlfrescoClient alfrescoClient;
     private StubHxprService hxprService;
     private StubScopeResolver scopeResolver;
+    private StubSearchService searchService;
     private ContentLakeNodeStatusService service;
 
     @BeforeEach
@@ -31,7 +35,9 @@ class ContentLakeNodeStatusServiceTest {
         alfrescoClient = new StubAlfrescoClient();
         hxprService = new StubHxprService();
         scopeResolver = new StubScopeResolver(alfrescoClient);
-        service = new ContentLakeNodeStatusService(alfrescoClient, hxprService, scopeResolver);
+        searchService = new StubSearchService();
+        service = new ContentLakeNodeStatusService(alfrescoClient, hxprService, scopeResolver,
+                searchService, Executors.newVirtualThreadPerTaskExecutor());
     }
 
     @Test
@@ -55,21 +61,10 @@ class ContentLakeNodeStatusServiceTest {
     @Test
     void getNodeStatuses_folderWithAggregate_computesSummaryAndWorstStatus() {
         Node folder = folder("folder-1");
-        Node subFolder = folder("folder-2");
-        Node indexedFile = file("file-indexed");
-        Node failedFile = file("file-failed");
-        Node pendingFile = file("file-pending");
-
         alfrescoClient.nodesById.put("folder-1", folder);
         scopeResolver.folderInScopeIds.add("folder-1");
-        scopeResolver.traversableFolderIds.add("folder-2");
-        scopeResolver.fileInScopeIds.addAll(Set.of("file-indexed", "file-failed", "file-pending"));
-
-        alfrescoClient.childrenByFolderId.put("folder-1", List.of(indexedFile, failedFile, subFolder));
-        alfrescoClient.childrenByFolderId.put("folder-2", List.of(pendingFile));
-
-        hxprService.documentsByNodeId.put("file-indexed", statusDoc(ContentLakeNodeStatus.Status.INDEXED, null));
-        hxprService.documentsByNodeId.put("file-failed", statusDoc(ContentLakeNodeStatus.Status.FAILED, "transform failed"));
+        // AFTS returns counts directly: 3 total, 1 indexed, 1 failed -> 1 pending
+        searchService.countsByFolderId.put("folder-1", new FolderStatusCounts(3, 1, 1));
 
         Map<String, ContentLakeNodeStatus> results = service.getNodeStatuses(List.of("folder-1"), true);
         ContentLakeNodeStatus status = results.get("folder-1");
@@ -82,8 +77,9 @@ class ContentLakeNodeStatusServiceTest {
         assertThat(status.folderSummary().indexedDocuments()).isEqualTo(1);
         assertThat(status.folderSummary().pendingDocuments()).isEqualTo(1);
         assertThat(status.folderSummary().failedDocuments()).isEqualTo(1);
-        assertThat(alfrescoClient.getAllChildrenCalls).isEqualTo(2);
-        assertThat(hxprService.batchCalls).containsExactly(List.of("file-indexed", "file-failed", "file-pending"));
+        // No getAllChildren or hxpr batch calls needed -- AFTS handles it in one query
+        assertThat(alfrescoClient.getAllChildrenCalls).isZero();
+        assertThat(hxprService.batchCalls).isEmpty();
     }
 
     @Test
@@ -173,6 +169,19 @@ class ContentLakeNodeStatusServiceTest {
         }
     }
 
+    private static final class StubSearchService extends AlfrescoSearchService {
+        private final Map<String, FolderStatusCounts> countsByFolderId = new LinkedHashMap<>();
+
+        private StubSearchService() {
+            super(null, null, null);
+        }
+
+        @Override
+        public FolderStatusCounts getFolderStatusCounts(String folderId, Collection<String> excludedAspects) {
+            return countsByFolderId.getOrDefault(folderId, new FolderStatusCounts(0, 0, 0));
+        }
+    }
+
     private static final class StubScopeResolver extends ContentLakeScopeResolver {
         private final Set<String> folderInScopeIds = new LinkedHashSet<>();
         private final Set<String> fileInScopeIds = new LinkedHashSet<>();
@@ -180,7 +189,7 @@ class ContentLakeNodeStatusServiceTest {
         private final Set<String> traversableFolderIds = new LinkedHashSet<>();
 
         private StubScopeResolver(AlfrescoClient alfrescoClient) {
-            super(List.of(), List.of(), alfrescoClient);
+            super(List.of(), List.of(), alfrescoClient, null);
         }
 
         @Override

@@ -7,6 +7,7 @@ import org.hyland.alfresco.contentlake.adapter.AlfrescoSourceNodeAdapter;
 import org.hyland.alfresco.contentlake.batch.model.PermissionSyncRequest;
 import org.hyland.alfresco.contentlake.batch.model.PermissionSyncResult;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.alfresco.contentlake.service.ContentLakeScopeResolver;
 import org.hyland.contentlake.service.NodeSyncService;
 import org.hyland.contentlake.spi.SourceNode;
@@ -24,6 +25,7 @@ import java.util.Set;
 public class PermissionSyncService {
 
     private final AlfrescoClient alfrescoClient;
+    private final AlfrescoSearchService searchService;
     private final ContentLakeScopeResolver scopeResolver;
     private final NodeSyncService nodeSyncService;
 
@@ -77,17 +79,8 @@ public class PermissionSyncService {
             return;
         }
 
-        for (Node child : alfrescoClient.getAllChildren(folder.getId())) {
+        for (Node child : searchService.findDescendantFiles(folder.getId(), scopeResolver.getExcludedAspects())) {
             try {
-                if (Boolean.TRUE.equals(child.isIsFolder())) {
-                    reconcileFolder(child, true, result);
-                    continue;
-                }
-                if (!Boolean.TRUE.equals(child.isIsFile())) {
-                    result.skipped++;
-                    continue;
-                }
-
                 reconcileFile(child, result);
             } catch (Exception e) {
                 result.failed++;

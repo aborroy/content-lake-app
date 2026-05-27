@@ -23,6 +23,8 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
     private static final IgnoreSyncStatusOnlyUpdateFilter INSTANCE = new IgnoreSyncStatusOnlyUpdateFilter();
 
     private static final String CL_SYNC_STATUS = "cl:syncStatus";
+    private static final String CL_SYNC_STATUS_VALUE = "cl:syncStatusValue";
+    private static final String CL_SYNC_ERROR = "cl:syncError";
     private static final String CL_INDEXED_ASPECT = "cl:indexed";
 
     static EventFilter get() {
@@ -84,6 +86,8 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
 
         Map<String, java.io.Serializable> filtered = new HashMap<>(properties);
         filtered.remove(CL_SYNC_STATUS);
+        filtered.remove(CL_SYNC_STATUS_VALUE);
+        filtered.remove(CL_SYNC_ERROR);
         return filtered;
     }
 
@@ -102,6 +106,8 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
 
         currentFiltered.remove(CL_INDEXED_ASPECT);
         previousFiltered.remove(CL_INDEXED_ASPECT);
+        currentFiltered.remove(CL_SYNC_STATUS);
+        previousFiltered.remove(CL_SYNC_STATUS);
 
         return currentFiltered.equals(previousFiltered);
     }

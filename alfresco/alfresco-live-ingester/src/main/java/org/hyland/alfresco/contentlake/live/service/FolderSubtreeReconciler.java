@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.alfresco.contentlake.adapter.AlfrescoSourceNodeAdapter;
 import org.hyland.alfresco.contentlake.client.AlfrescoClient;
+import org.hyland.alfresco.contentlake.client.AlfrescoSearchService;
 import org.hyland.alfresco.contentlake.service.ContentLakeScopeResolver;
 import org.hyland.contentlake.service.NodeSyncService;
 import org.hyland.contentlake.spi.SourceNode;
@@ -15,7 +16,11 @@ import java.util.Set;
 
 /**
  * Reconciles all descendant files after a folder-level scope change such as
- * adding or removing {@code cl:indexed}.
+ * adding {@code cl:indexed}, or after a folder permission change.
+ *
+ * <p>Correct only for ADD-style scope events and folder-permissions changes.
+ * Removal of {@code cl:indexed} (subtree tear-down) needs a separate code path
+ * and is deferred to Part 2.</p>
  */
 @Slf4j
 @Service
@@ -23,6 +28,7 @@ import java.util.Set;
 public class FolderSubtreeReconciler {
 
     private final AlfrescoClient alfrescoClient;
+    private final AlfrescoSearchService searchService;
     private final ContentLakeScopeResolver scopeResolver;
     private final NodeSyncService nodeSyncService;
 
@@ -51,34 +57,29 @@ public class FolderSubtreeReconciler {
                                    OffsetDateTime eventTimestamp,
                                    ReconciliationResult result,
                                    ReconciliationMode mode) {
-        for (Node child : alfrescoClient.getAllChildren(folderId)) {
-            if (Boolean.TRUE.equals(child.isIsFolder())) {
-                if (!scopeResolver.shouldTraverse(child)) {
+        // The descendant AFTS query already excludes non-cm:content, files with
+        // cl:excludeFromLake=true, and configured excludedAspects (e.g. cm:workingcopy).
+        //
+        // Reaching this method means the root folder's cl:indexed aspect was just
+        // added (or its permissions changed). Every descendant returned is therefore
+        // in scope by construction. We deliberately skip scopeResolver.isInScope(child)
+        // here: that would issue a per-child AFTS query for cl:indexed on ancestors,
+        // which races with the Solr commit of the very aspect that triggered THIS
+        // reconciliation.
+        Set<String> excludedAspects = scopeResolver.getExcludedAspects();
+        for (Node child : searchService.findDescendantFiles(folderId, excludedAspects)) {
+            try {
+                if (matchesTechnicalPathExclusion(child)) {
                     result.skipped++;
                     continue;
                 }
-                reconcileChildren(child.getId(), eventTimestamp, result, mode);
-                continue;
-            }
-
-            if (!Boolean.TRUE.equals(child.isIsFile())) {
-                result.skipped++;
-                continue;
-            }
-
-            try {
-                if (scopeResolver.isInScope(child)) {
-                    SourceNode sourceNode = toSourceNode(child);
-                    if (mode == ReconciliationMode.PERMISSIONS) {
-                        nodeSyncService.updatePermissions(sourceNode);
-                    } else {
-                        nodeSyncService.syncNode(sourceNode);
-                    }
-                    result.synced++;
+                SourceNode sourceNode = toSourceNode(child);
+                if (mode == ReconciliationMode.PERMISSIONS) {
+                    nodeSyncService.updatePermissions(sourceNode);
                 } else {
-                    nodeSyncService.deleteNode(child.getId(), resolveDeleteTimestamp(eventTimestamp, child));
-                    result.deleted++;
+                    nodeSyncService.syncNode(sourceNode);
                 }
+                result.synced++;
             } catch (Exception e) {
                 result.failed++;
                 log.error("Failed to reconcile node {} during folder subtree reconciliation", child.getId(), e);
@@ -86,16 +87,14 @@ public class FolderSubtreeReconciler {
         }
     }
 
+    private boolean matchesTechnicalPathExclusion(Node child) {
+        String path = child.getPath() != null ? child.getPath().getName() : null;
+        return scopeResolver.matchesExcludedPath(path);
+    }
+
     private SourceNode toSourceNode(Node child) {
         Set<String> readers = alfrescoClient.extractReadAuthorities(child);
         return AlfrescoSourceNodeAdapter.toSourceNode(child, alfrescoClient.getSourceId(), readers);
-    }
-
-    private OffsetDateTime resolveDeleteTimestamp(OffsetDateTime eventTimestamp, Node child) {
-        if (eventTimestamp != null) {
-            return eventTimestamp;
-        }
-        return child.getModifiedAt();
     }
 
     public static final class ReconciliationResult {

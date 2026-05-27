@@ -218,6 +218,38 @@ public class AlfrescoClient implements ContentSourceClient {
     }
 
     /**
+     * Writes sync status back to the Alfresco node by applying the {@code cl:syncStatus}
+     * aspect and setting {@code cl:syncStatusValue} / {@code cl:syncError} properties.
+     *
+     * <p>Best-effort: any failure is logged and swallowed so the ingestion pipeline
+     * is never disrupted by a write-back error.</p>
+     */
+    @Override
+    public void writeSyncStatus(String nodeId, String status, String error) {
+        try {
+            Node current = getAlfrescoNode(nodeId);
+            if (current == null) {
+                return;
+            }
+
+            List<String> aspects = new ArrayList<>(
+                    current.getAspectNames() != null ? current.getAspectNames() : List.of()
+            );
+            if (!aspects.contains("cl:syncStatus")) {
+                aspects.add("cl:syncStatus");
+            }
+
+            Map<String, Object> props = new LinkedHashMap<>();
+            props.put("cl:syncStatusValue", status);
+            props.put("cl:syncError", (error != null && !error.isBlank()) ? error : null);
+
+            updateNode(nodeId, aspects, props);
+        } catch (Exception e) {
+            log.warn("Could not write sync status for node {}: {}", nodeId, e.getMessage());
+        }
+    }
+
+    /**
      * Updates node aspects and optional properties.
      *
      * @param nodeId      node identifier
