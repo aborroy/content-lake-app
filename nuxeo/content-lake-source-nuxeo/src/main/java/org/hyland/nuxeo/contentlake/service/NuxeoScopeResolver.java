@@ -263,7 +263,13 @@ public class NuxeoScopeResolver implements ScopeResolver {
         int pageSize = 50;
 
         while (true) {
-            NuxeoDocument.Page page = nuxeoClient.searchPageByNxql(nxql, pageIndex, pageSize);
+            NuxeoDocument.Page page;
+            try {
+                page = nuxeoClient.searchPageByNxql(nxql, pageIndex, pageSize);
+            } catch (UnsupportedOperationException e) {
+                // NXQL unavailable -- ancestor facet checks degrade to path-prefix matching
+                return Set.of();
+            }
             for (NuxeoDocument doc : page.getEntries()) {
                 if (doc.getPath() != null) {
                     result.add(doc.getPath());
