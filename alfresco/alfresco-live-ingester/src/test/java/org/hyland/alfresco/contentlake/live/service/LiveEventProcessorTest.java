@@ -17,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -121,5 +122,91 @@ class LiveEventProcessorTest {
         verify(folderSubtreeReconciler).reconcilePermissions(folder, modifiedAt);
         verify(nodeSyncService, never()).updatePermissions(any());
         verify(nodeSyncService, never()).syncNode(any());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // processFolderScopeChange — add vs tear-down dispatch (Part 2)
+    // ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    void processFolderScopeChange_addedClIndexed_dispatchesToReconcile() {
+        OffsetDateTime modifiedAt = OffsetDateTime.parse("2026-05-27T10:00:00Z");
+        Node folder = folder("folder-1", modifiedAt, List.of("cl:indexed"));
+
+        when(resource.getId()).thenReturn("folder-1");
+        when(deduplicator.shouldSkip(event, "folder-1")).thenReturn(false);
+        when(alfrescoClient.getAlfrescoNode("folder-1")).thenReturn(folder);
+        when(scopeResolver.isFolderInScopeViaRest(folder)).thenReturn(true);
+        when(scopeResolver.shouldTraverse(folder)).thenReturn(true);
+        when(folderSubtreeReconciler.reconcile(eq(folder), any()))
+                .thenReturn(new FolderSubtreeReconciler.ReconciliationResult());
+
+        processor.processFolderScopeChange(event);
+
+        verify(folderSubtreeReconciler).reconcile(eq(folder), any());
+        verify(folderSubtreeReconciler, never()).reconcileTearDown(any(), any());
+    }
+
+    @Test
+    void processFolderScopeChange_removedClIndexed_noAncestor_dispatchesToTearDown() {
+        OffsetDateTime modifiedAt = OffsetDateTime.parse("2026-05-27T10:01:00Z");
+        Node folder = folder("folder-1", modifiedAt, List.of()); // cl:indexed already removed
+
+        when(resource.getId()).thenReturn("folder-1");
+        when(deduplicator.shouldSkip(event, "folder-1")).thenReturn(false);
+        when(alfrescoClient.getAlfrescoNode("folder-1")).thenReturn(folder);
+        when(scopeResolver.isFolderInScopeViaRest(folder)).thenReturn(false);
+        when(folderSubtreeReconciler.reconcileTearDown(eq(folder), any()))
+                .thenReturn(new FolderSubtreeReconciler.ReconciliationResult());
+
+        processor.processFolderScopeChange(event);
+
+        verify(folderSubtreeReconciler).reconcileTearDown(eq(folder), any());
+        verify(folderSubtreeReconciler, never()).reconcile(any(), any());
+    }
+
+    @Test
+    void processFolderScopeChange_removedClIndexed_butAncestorStillIndexed_isNoOp() {
+        OffsetDateTime modifiedAt = OffsetDateTime.parse("2026-05-27T10:02:00Z");
+        Node folder = folder("folder-1", modifiedAt, List.of()); // cl:indexed removed locally
+
+        when(resource.getId()).thenReturn("folder-1");
+        when(deduplicator.shouldSkip(event, "folder-1")).thenReturn(false);
+        when(alfrescoClient.getAlfrescoNode("folder-1")).thenReturn(folder);
+        // Subtree still in scope via an ancestor, but folder itself has no cl:indexed.
+        when(scopeResolver.isFolderInScopeViaRest(folder)).thenReturn(true);
+
+        processor.processFolderScopeChange(event);
+
+        verify(folderSubtreeReconciler, never()).reconcile(any(), any());
+        verify(folderSubtreeReconciler, never()).reconcileTearDown(any(), any());
+    }
+
+    @Test
+    void processFolderScopeChange_excludeFromLakeAdded_dispatchesToTearDown() {
+        OffsetDateTime modifiedAt = OffsetDateTime.parse("2026-05-27T10:03:00Z");
+        // Folder still has cl:indexed self, but cl:excludeFromLake=true now overrides it.
+        Node folder = folder("folder-1", modifiedAt, List.of("cl:indexed", "cl:fileScope"));
+
+        when(resource.getId()).thenReturn("folder-1");
+        when(deduplicator.shouldSkip(event, "folder-1")).thenReturn(false);
+        when(alfrescoClient.getAlfrescoNode("folder-1")).thenReturn(folder);
+        when(scopeResolver.isFolderInScopeViaRest(folder)).thenReturn(false);
+        when(folderSubtreeReconciler.reconcileTearDown(eq(folder), any()))
+                .thenReturn(new FolderSubtreeReconciler.ReconciliationResult());
+
+        processor.processFolderScopeChange(event);
+
+        verify(folderSubtreeReconciler).reconcileTearDown(eq(folder), any());
+        verify(folderSubtreeReconciler, never()).reconcile(any(), any());
+    }
+
+    private static Node folder(String nodeId, OffsetDateTime modifiedAt, List<String> aspectNames) {
+        return new Node()
+                .id(nodeId)
+                .isFolder(true)
+                .isFile(false)
+                .modifiedAt(modifiedAt)
+                .aspectNames(aspectNames);
     }
 }

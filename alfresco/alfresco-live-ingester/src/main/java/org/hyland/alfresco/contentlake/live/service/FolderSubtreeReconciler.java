@@ -15,12 +15,17 @@ import java.time.OffsetDateTime;
 import java.util.Set;
 
 /**
- * Reconciles all descendant files after a folder-level scope change such as
- * adding {@code cl:indexed}, or after a folder permission change.
+ * Reconciles all descendant files after a folder-level scope change.
  *
- * <p>Correct only for ADD-style scope events and folder-permissions changes.
- * Removal of {@code cl:indexed} (subtree tear-down) needs a separate code path
- * and is deferred to Part 2.</p>
+ * <p>Three modes:</p>
+ * <ul>
+ *   <li>{@link #reconcile} — {@code cl:indexed} added: sync each descendant.</li>
+ *   <li>{@link #reconcilePermissions} — folder permissions changed: refresh ACLs only.</li>
+ *   <li>{@link #reconcileTearDown} — {@code cl:indexed} removed (or
+ *       {@code cl:excludeFromLake=true} added) and no ancestor keeps the subtree
+ *       in scope: delete each descendant from hxpr and clear its
+ *       {@code cl:syncStatus} aspect on the source.</li>
+ * </ul>
  */
 @Slf4j
 @Service
@@ -38,6 +43,36 @@ public class FolderSubtreeReconciler {
 
     public ReconciliationResult reconcilePermissions(Node folder, OffsetDateTime eventTimestamp) {
         return reconcile(folder, eventTimestamp, ReconciliationMode.PERMISSIONS);
+    }
+
+    /**
+     * Tears down a subtree that has just left Content Lake scope (e.g. its
+     * {@code cl:indexed} aspect was removed and no ancestor keeps it in scope).
+     *
+     * <p>For each descendant file: deletes the hxpr document and best-effort clears
+     * the {@code cl:syncStatus} aspect on the source node. The descendant query is the
+     * same AFTS one used for sync, so previously-indexed files (still aspect-tagged in
+     * Solr) are picked up reliably.</p>
+     */
+    public ReconciliationResult reconcileTearDown(Node folder, OffsetDateTime eventTimestamp) {
+        ReconciliationResult result = new ReconciliationResult();
+
+        if (folder == null || !Boolean.TRUE.equals(folder.isIsFolder())) {
+            return result;
+        }
+
+        Set<String> excludedAspects = scopeResolver.getExcludedAspects();
+        for (Node child : searchService.findDescendantFiles(folder.getId(), excludedAspects)) {
+            try {
+                nodeSyncService.deleteNode(child.getId(), eventTimestamp);
+                alfrescoClient.clearSyncStatus(child.getId());
+                result.deleted++;
+            } catch (Exception e) {
+                result.failed++;
+                log.error("Failed to tear down node {} during folder subtree reconciliation", child.getId(), e);
+            }
+        }
+        return result;
     }
 
     private ReconciliationResult reconcile(Node folder,

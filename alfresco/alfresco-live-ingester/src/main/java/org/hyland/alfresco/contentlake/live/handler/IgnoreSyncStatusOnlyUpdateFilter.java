@@ -27,6 +27,12 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
     private static final String CL_SYNC_ERROR = "cl:syncError";
     private static final String CL_INDEXED_ASPECT = "cl:indexed";
 
+    // Audit properties bumped by every node update; ignored when comparing
+    // before/after snapshots so a clear/write of CL state is recognised as
+    // CL-only even though Alfresco refreshes cm:modified at the same time.
+    private static final String CM_MODIFIED = "cm:modified";
+    private static final String CM_MODIFIER = "cm:modifier";
+
     static EventFilter get() {
         return INSTANCE;
     }
@@ -47,36 +53,60 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
             return true;
         }
 
-        if (previousResource == null) {
-            return true;
-        }
-
         if (!(previousResource instanceof NodeResource previous)) {
+            // No delta available: cannot decide CL-only — accept.
             return true;
         }
 
-        if (!Objects.equals(current.getId(), previous.getId())) {
+        // Alfresco event SDK semantics: resourceBefore carries ONLY the fields that
+        // changed in this event. Null fields on `previous` mean "unchanged from current".
+        // We must only treat fields as differing when the BEFORE side is non-null AND
+        // differs, otherwise we'd flag every update as a non-CL change.
+
+        if (changedAndDiffers(current.getName(), previous.getName())) {
+            return true;
+        }
+        if (changedAndDiffers(current.getNodeType(), previous.getNodeType())) {
+            return true;
+        }
+        if (changedAndDiffers(current.getContent(), previous.getContent())) {
+            return true;
+        }
+        if (changedAndDiffers(current.getPrimaryAssocQName(), previous.getPrimaryAssocQName())) {
+            return true;
+        }
+        if (changedAndDiffers(current.getPrimaryHierarchy(), previous.getPrimaryHierarchy())) {
             return true;
         }
 
-        if (!Objects.equals(current.getPrimaryHierarchy(), previous.getPrimaryHierarchy())
-                || !Objects.equals(current.getName(), previous.getName())
-                || !Objects.equals(current.getNodeType(), previous.getNodeType())
-                || !Objects.equals(current.isFile(), previous.isFile())
-                || !Objects.equals(current.isFolder(), previous.isFolder())
-                || !Objects.equals(current.getContent(), previous.getContent())
-                || !Objects.equals(current.getPrimaryAssocQName(), previous.getPrimaryAssocQName())) {
-            return true;
+        Map<String, java.io.Serializable> previousRawProps = previous.getProperties();
+        if (previousRawProps == null) {
+            // No property delta in the event; nothing more to compare.
+            return false;
         }
 
         Map<String, java.io.Serializable> currentProps = filterContentLakeProperties(current.getProperties());
-        Map<String, java.io.Serializable> previousProps = filterContentLakeProperties(previous.getProperties());
+        Map<String, java.io.Serializable> previousProps = filterContentLakeProperties(previousRawProps);
 
-        if (!Objects.equals(currentProps, previousProps)) {
-            return true;
+        // resourceBefore.getProperties only carries the changed properties' previous values.
+        // To check whether any non-CL property changed, intersect current with the keys
+        // present in previous and compare values.
+        for (Map.Entry<String, java.io.Serializable> entry : previousProps.entrySet()) {
+            if (!Objects.equals(entry.getValue(), currentProps.get(entry.getKey()))) {
+                return true;
+            }
         }
 
-        return !onlyContentLakeAspectsChanged(current.getAspectNames(), previous.getAspectNames());
+        java.util.Set<String> previousAspects = previous.getAspectNames();
+        if (previousAspects == null) {
+            // No aspect delta in this event; CL-only.
+            return false;
+        }
+        return !onlyContentLakeAspectsChanged(current.getAspectNames(), previousAspects);
+    }
+
+    private static boolean changedAndDiffers(Object cur, Object prev) {
+        return prev != null && !Objects.equals(cur, prev);
     }
 
     private Map<String, java.io.Serializable> filterContentLakeProperties(Map<String, java.io.Serializable> properties) {
@@ -88,13 +118,18 @@ final class IgnoreSyncStatusOnlyUpdateFilter implements EventFilter {
         filtered.remove(CL_SYNC_STATUS);
         filtered.remove(CL_SYNC_STATUS_VALUE);
         filtered.remove(CL_SYNC_ERROR);
+        filtered.remove(CM_MODIFIED);
+        filtered.remove(CM_MODIFIER);
         return filtered;
     }
 
     private boolean onlyContentLakeAspectsChanged(java.util.Set<String> currentAspects,
                                                    java.util.Set<String> previousAspects) {
         if (Objects.equals(currentAspects, previousAspects)) {
-            return false;
+            // Aspect sets identical: nothing aspect-side changed. Combined with the
+            // earlier property check, this means the only diffs are within stripped
+            // CL_* and audit fields — the event is a CL-only update.
+            return true;
         }
 
         if (currentAspects == null || previousAspects == null) {

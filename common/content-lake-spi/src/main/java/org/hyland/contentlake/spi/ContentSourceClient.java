@@ -69,4 +69,17 @@ public interface ContentSourceClient {
      * @param error  error message, or {@code null} to clear any previous error
      */
     default void writeSyncStatus(String nodeId, String status, String error) {}
+
+    /**
+     * Clears any sync-status state previously written by {@link #writeSyncStatus} from
+     * the source node. Used during subtree tear-down (e.g. {@code cl:indexed} removed
+     * from an ancestor folder) so the source no longer advertises a stale ingestion
+     * status.
+     *
+     * <p>Default implementation is a no-op. Implementations must be best-effort: any
+     * failure must be swallowed and logged rather than propagated.</p>
+     *
+     * @param nodeId source-system node identifier
+     */
+    default void clearSyncStatus(String nodeId) {}
 }

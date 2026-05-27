@@ -154,6 +154,64 @@ public class ContentLakeScopeResolver implements ScopeResolver {
     /** No-op: cache was removed; kept for call-site compatibility. */
     public void invalidateFolderScope(String folderId) {}
 
+    /**
+     * Walks the path elements via REST and returns {@code true} when any ancestor folder
+     * has the {@code cl:indexed} aspect.
+     *
+     * <p>Used by the tear-down path (cl:indexed removal) where the AFTS-based
+     * {@link AlfrescoSearchService#hasIndexedAncestor} would race with the Solr commit
+     * in the wrong direction (returning a stale {@code true} and skipping a valid
+     * tear-down). REST reads from the DB and is therefore consistent with the
+     * triggering event.</p>
+     */
+    public boolean hasIndexedAncestorViaRest(Node node) {
+        for (String ancestorId : pathElementIds(node)) {
+            Node ancestor = alfrescoClient.getAlfrescoNode(ancestorId);
+            if (ancestor != null && hasIndexedAspect(ancestor.getAspectNames())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * REST-based variant of {@link #isExcludedBySelfOrAncestor} that does not race
+     * with Solr commits.
+     */
+    public boolean isExcludedBySelfOrAncestorViaRest(Node node) {
+        if (node == null) {
+            return false;
+        }
+        if (isExcludedFromLake(node)) {
+            return true;
+        }
+        for (String ancestorId : pathElementIds(node)) {
+            Node ancestor = alfrescoClient.getAlfrescoNode(ancestorId);
+            if (ancestor != null && isExcludedFromLake(ancestor)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * REST-based variant of {@link #isFolderInScope}. Used by the tear-down dispatcher
+     * to decide whether a {@code cl:indexed}-removed folder still has scope via an
+     * ancestor — without racing the Solr commit of the just-removed aspect.
+     */
+    public boolean isFolderInScopeViaRest(Node folder) {
+        if (folder == null || !Boolean.TRUE.equals(folder.isIsFolder())) {
+            return false;
+        }
+        if (!shouldTraverse(folder)) {
+            return false;
+        }
+        if (isExcludedBySelfOrAncestorViaRest(folder)) {
+            return false;
+        }
+        return hasIndexedAspect(folder.getAspectNames()) || hasIndexedAncestorViaRest(folder);
+    }
+
     private boolean hasIndexedAncestor(Node node) {
         return searchService.hasIndexedAncestor(pathElementIds(node));
     }

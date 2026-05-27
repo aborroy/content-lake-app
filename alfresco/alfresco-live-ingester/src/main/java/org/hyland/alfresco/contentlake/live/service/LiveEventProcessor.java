@@ -192,22 +192,44 @@ public class LiveEventProcessor {
                 log.debug("Node {} is not a folder for scope change event {}", nodeId, event.getId());
                 return;
             }
-            if (!scopeResolver.shouldTraverse(folder)) {
-                metrics.recordFiltered();
-                log.debug("Folder {} is excluded from subtree reconciliation for event {}", nodeId, event.getId());
-                return;
-            }
 
             scopeResolver.invalidateFolderScope(nodeId);
 
-            FolderSubtreeReconciler.ReconciliationResult result =
-                    folderSubtreeReconciler.reconcile(folder, resolveEventTimestamp(event, folder));
+            // REST-based scope check: avoids the Solr-commit race that would otherwise
+            // misclassify the just-mutated cl:indexed / cl:excludeFromLake aspect/property.
+            boolean inScope = scopeResolver.isFolderInScopeViaRest(folder);
+            FolderSubtreeReconciler.ReconciliationResult result;
+            String operation;
+
+            if (!inScope) {
+                // Tear-down: cl:indexed removed without an ancestor index, OR
+                // cl:excludeFromLake=true added on this folder or an ancestor.
+                operation = "tearDown";
+                result = folderSubtreeReconciler.reconcileTearDown(folder, resolveEventTimestamp(event, folder));
+            } else if (hasIndexedSelfAspect(folder)) {
+                // Add path: cl:indexed is on this folder. Sync each descendant.
+                if (!scopeResolver.shouldTraverse(folder)) {
+                    metrics.recordFiltered();
+                    log.debug("Folder {} is excluded from subtree reconciliation for event {}", nodeId, event.getId());
+                    return;
+                }
+                operation = "syncSubtree";
+                result = folderSubtreeReconciler.reconcile(folder, resolveEventTimestamp(event, folder));
+            } else {
+                // cl:indexed removed but the subtree is still in scope via an ancestor.
+                // Descendants are unchanged in scope; nothing to do.
+                metrics.recordFiltered();
+                log.info("Folder {} is still in scope via an ancestor after event {} ({}); no-op",
+                        nodeId, event.getId(), event.getType());
+                return;
+            }
 
             metrics.recordProcessed();
             log.info(
-                    "Reconciled subtree for folder {} after {}: synced={}, deleted={}, skipped={}, failed={}",
+                    "Reconciled subtree for folder {} after {} ({}): synced={}, deleted={}, skipped={}, failed={}",
                     nodeId,
                     event.getType(),
+                    operation,
                     result.synced(),
                     result.deleted(),
                     result.skipped(),
@@ -217,6 +239,11 @@ public class LiveEventProcessor {
             metrics.recordError();
             log.error("Failed to process folder scope change {} for folder {}: {}", event.getType(), nodeId, e.getMessage(), e);
         }
+    }
+
+    private static boolean hasIndexedSelfAspect(Node folder) {
+        return folder.getAspectNames() != null
+                && folder.getAspectNames().contains(ContentLakeScopeResolver.INDEXED_ASPECT);
     }
 
     public String extractPrimaryNodeId(RepoEvent<DataAttributes<Resource>> event) {

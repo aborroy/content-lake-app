@@ -147,6 +147,53 @@ class FolderSubtreeReconcilerTest {
         verify(scopeResolver, never()).isInScope(any(Node.class));
     }
 
+    // ──────────────────────────────────────────────────────────────────────
+    // reconcileTearDown — Part 2
+    // ──────────────────────────────────────────────────────────────────────
+
+    @Test
+    void reconcileTearDown_deletesEachDescendantAndClearsItsSyncStatus() {
+        Node folder = folder("folder-1");
+        Node child1 = file("file-1").modifiedAt(OffsetDateTime.parse("2026-05-27T10:00:00Z"));
+        Node child2 = file("file-2").modifiedAt(OffsetDateTime.parse("2026-05-27T10:01:00Z"));
+
+        searchService.descendantsByFolderId.put("folder-1", List.of(child1, child2));
+        when(scopeResolver.getExcludedAspects()).thenReturn(Set.of());
+        OffsetDateTime ts = OffsetDateTime.parse("2026-05-27T10:05:00Z");
+
+        FolderSubtreeReconciler.ReconciliationResult result = reconciler.reconcileTearDown(folder, ts);
+
+        verify(nodeSyncService).deleteNode("file-1", ts);
+        verify(nodeSyncService).deleteNode("file-2", ts);
+        assertThat(alfrescoClient.clearSyncStatusCalls).containsExactly("file-1", "file-2");
+        assertThat(result.deleted()).isEqualTo(2);
+        assertThat(result.failed()).isZero();
+        verify(nodeSyncService, never()).syncNode(any());
+        verify(nodeSyncService, never()).updatePermissions(any());
+    }
+
+    @Test
+    void reconcileTearDown_continuesOnPerChildFailure() {
+        Node folder = folder("folder-1");
+        Node child1 = file("file-1");
+        Node child2 = file("file-2");
+
+        searchService.descendantsByFolderId.put("folder-1", List.of(child1, child2));
+        when(scopeResolver.getExcludedAspects()).thenReturn(Set.of());
+
+        when(nodeSyncService.deleteNode(eq("file-1"), any()))
+                .thenThrow(new RuntimeException("hxpr unavailable"));
+        when(nodeSyncService.deleteNode(eq("file-2"), any())).thenReturn(true);
+
+        FolderSubtreeReconciler.ReconciliationResult result =
+                reconciler.reconcileTearDown(folder, OffsetDateTime.parse("2026-05-27T10:00:00Z"));
+
+        assertThat(result.deleted()).isEqualTo(1);
+        assertThat(result.failed()).isEqualTo(1);
+        // file-1 failed before clearSyncStatus was called; file-2 ran the full sequence.
+        assertThat(alfrescoClient.clearSyncStatusCalls).containsExactly("file-2");
+    }
+
     private static PermissionElement allowed(String authorityId, String role) {
         return new PermissionElement()
                 .authorityId(authorityId)
@@ -184,6 +231,7 @@ class FolderSubtreeReconcilerTest {
     }
 
     private static final class StubAlfrescoClient extends AlfrescoClient {
+        private final List<String> clearSyncStatusCalls = new java.util.ArrayList<>();
 
         private StubAlfrescoClient() {
             super(null, null);
@@ -192,6 +240,11 @@ class FolderSubtreeReconcilerTest {
         @Override
         public String getSourceId() {
             return "repo-main";
+        }
+
+        @Override
+        public void clearSyncStatus(String nodeId) {
+            clearSyncStatusCalls.add(nodeId);
         }
     }
 }

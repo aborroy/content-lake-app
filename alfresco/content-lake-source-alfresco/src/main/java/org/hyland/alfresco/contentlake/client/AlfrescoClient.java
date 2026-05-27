@@ -250,6 +250,32 @@ public class AlfrescoClient implements ContentSourceClient {
     }
 
     /**
+     * Removes the {@code cl:syncStatus} aspect (and its properties) from a node.
+     * Best-effort: any failure is logged and swallowed.
+     */
+    @Override
+    public void clearSyncStatus(String nodeId) {
+        try {
+            Node current = getAlfrescoNode(nodeId);
+            if (current == null || current.getAspectNames() == null
+                    || !current.getAspectNames().contains("cl:syncStatus")) {
+                return;
+            }
+
+            List<String> aspects = new ArrayList<>(current.getAspectNames());
+            aspects.remove("cl:syncStatus");
+
+            Map<String, Object> props = new LinkedHashMap<>();
+            props.put("cl:syncStatusValue", null);
+            props.put("cl:syncError", null);
+
+            updateNode(nodeId, aspects, props);
+        } catch (Exception e) {
+            log.warn("Could not clear sync status for node {}: {}", nodeId, e.getMessage());
+        }
+    }
+
+    /**
      * Updates node aspects and optional properties.
      *
      * @param nodeId      node identifier
