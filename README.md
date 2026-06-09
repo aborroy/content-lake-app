@@ -9,7 +9,7 @@
 
 **AI-powered semantic search and RAG over Alfresco and Nuxeo content using hxpr**
 
-[Features](#features) • [Quick Start](#quick-start) • [Architecture](#architecture) • [Authentication](#authentication) • [API Usage](#api-usage) • [Configuration](#configuration)
+[Features](#features) | [Quick Start](#quick-start) | [Architecture](#architecture) | [Authentication](#authentication) | [API Usage](#api-usage) | [Configuration](#configuration)
 
 ## Content Lake Ecosystem
 
@@ -92,14 +92,14 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 
 | Module | Group | Port | Description |
 |--------|-------|------|-------------|
-| `content-lake-repo-model` | `common/` | — | Alfresco repository JAR that bootstraps the `cl:indexed` content model for scope control |
-| `content-lake-spi` | `common/` | — | Source Provider Interface: `SourceNode`, `ContentSourceClient`, `TextExtractor`, `ScopeResolver` |
-| `content-lake-core` | `common/` | — | Shared ingestion pipeline: metadata sync, transform, chunking, embedding, ACL updates, idempotency |
+| `content-lake-repo-model` | `common/` | -- | Alfresco repository JAR that bootstraps the `cl:indexed` content model for scope control |
+| `content-lake-spi` | `common/` | -- | Source Provider Interface: `SourceNode`, `ContentSourceClient`, `TextExtractor`, `ScopeResolver` |
+| `content-lake-core` | `common/` | -- | Shared ingestion pipeline: metadata sync, transform, chunking, embedding, ACL updates, idempotency |
 | `rag-service` | `common/` | 9091 | Semantic search, hybrid search, and RAG question answering |
-| `content-lake-source-alfresco` | `alfresco/` | — | Alfresco REST clients, scope resolver, and ACL expansion |
+| `content-lake-source-alfresco` | `alfresco/` | -- | Alfresco REST clients, scope resolver, and ACL expansion |
 | `alfresco-batch-ingester` | `alfresco/` | 9090 | Alfresco folder discovery, batch scheduling, and `/api/sync/*` controllers |
 | `alfresco-live-ingester` | `alfresco/` | 9092 | Alfresco Event2 listener over ActiveMQ using Alfresco Java SDK handlers |
-| `content-lake-source-nuxeo` | `nuxeo/` | — | Nuxeo REST clients, scope resolver, auth abstraction, and text extraction |
+| `content-lake-source-nuxeo` | `nuxeo/` | -- | Nuxeo REST clients, scope resolver, auth abstraction, and text extraction |
 | `nuxeo-batch-ingester` | `nuxeo/` | 9093 | Nuxeo full-batch discovery and one-shot sync using NXQL |
 | `nuxeo-live-ingester` | `nuxeo/` | 9094 | Nuxeo audit-stream listener using a persisted watermark |
 
@@ -262,7 +262,7 @@ export EMBEDDING_CHUNK_OVERLAP=120
 [nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) companion
 project, which must be running before you start this stack.
 
-**Step 1 — start Nuxeo** (in a separate terminal, from the sibling
+**Step 1 -- start Nuxeo** (in a separate terminal, from the sibling
 `nuxeo-deployment/` directory):
 
 ```bash
@@ -273,7 +273,7 @@ docker compose up --build
 
 Nuxeo will be available at `http://localhost:8081/nuxeo` once healthy.
 
-**Step 2 — start the Nuxeo ingesters** (from this directory):
+**Step 2 -- start the Nuxeo ingesters** (from this directory):
 
 ```bash
 docker compose -f compose.nuxeo.yaml up --build
@@ -528,9 +528,9 @@ Response:
 | `resetSession` | boolean | false | Clear conversation history for the target session before this prompt |
 | `topK` | int | 5 | Number of chunks to retrieve for context |
 | `minScore` | double | 0.5 | Minimum similarity threshold |
-| `filter` | String | — | Additional HXQL filter |
-| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
-| `systemPrompt` | String | — | Override the default LLM system prompt |
+| `filter` | String | -- | Additional HXQL filter |
+| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
+| `systemPrompt` | String | -- | Override the default LLM system prompt |
 | `includeContext` | boolean | false | Include retrieved chunks in response |
 
 | Response Field | Type | Description |
@@ -584,10 +584,10 @@ Query params for `GET`:
 | `resetSession` | boolean | false | Clear conversation history before this prompt |
 | `topK` | int | 5 | Number of chunks to retrieve for context |
 | `minScore` | double | 0.5 | Minimum similarity threshold |
-| `filter` | String | — | Additional HXQL filter |
-| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
+| `filter` | String | -- | Additional HXQL filter |
+| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
 | `embeddingType` | String | model default | Embedding type to match |
-| `systemPrompt` | String | — | Override the default LLM system prompt |
+| `systemPrompt` | String | -- | Override the default LLM system prompt |
 | `includeContext` | boolean | false | Include retrieved chunks in final metadata |
 
 SSE events:
@@ -749,13 +749,13 @@ Response example:
 | `maxResults` | int | `5` | Final fused result limit |
 | `vectorWeight` | double | `0.7` | Weight when `strategy=weighted` |
 | `textWeight` | double | `0.3` | Weight when `strategy=weighted` |
-| `filter` | String | — | Additional raw HXQL filter |
-| `sourceType` | String | — | Optional source filter: `alfresco` or `nuxeo` |
-| `metadata.mimeType` | String | — | MIME type filter (for example `application/pdf`) |
-| `metadata.pathPrefix` | String | — | Path prefix filter (starts-with match) |
-| `metadata.modifiedAfter` | String | — | Inclusive lower bound for `source_modifiedAt` |
-| `metadata.modifiedBefore` | String | — | Inclusive upper bound for `source_modifiedAt` |
-| `metadata.properties` | Map<String,String> | — | Exact-match filters on `cin_ingestProperties.<key>` |
+| `filter` | String | -- | Additional raw HXQL filter |
+| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
+| `metadata.mimeType` | String | -- | MIME type filter (for example `application/pdf`) |
+| `metadata.pathPrefix` | String | -- | Path prefix filter (starts-with match) |
+| `metadata.modifiedAfter` | String | -- | Inclusive lower bound for `source_modifiedAt` |
+| `metadata.modifiedBefore` | String | -- | Inclusive upper bound for `source_modifiedAt` |
+| `metadata.properties` | Map<String,String> | -- | Exact-match filters on `cin_ingestProperties.<key>` |
 
 | Response Field | Type | Description |
 |---------------|------|-------------|
@@ -840,12 +840,12 @@ Permission reconciliation is separate from content updates:
 
 When the live ingester does receive a permission-related event, it distinguishes between file and folder targets:
 
-- **File-level event**: the ACL is updated only for that file (`updatePermissions`) — no content re-extraction or embedding regeneration.
+- **File-level event**: the ACL is updated only for that file (`updatePermissions`) -- no content re-extraction or embedding regeneration.
 - **Folder-level event**: the live ingester walks the full descendant subtree and applies an ACL-only update to every indexed file beneath the folder. This covers three event types that can signal a folder ACL change: `PERMISSION_UPDATED`, `PEER_ASSOC_CREATED`, and `PEER_ASSOC_DELETED`. A fourth handler (`FolderPermissionFallbackHandler`) catches `NODE_UPDATED` events on folders where only the ACL changed (no structural diff), providing a safety net for sources that do not emit a dedicated permission event.
 
 Folder-level propagation behaviour:
 
-- Descendant files with `isInheritanceEnabled: false` keep their locally-set ACL unchanged — the folder's new permissions are not pushed down to them.
+- Descendant files with `isInheritanceEnabled: false` keep their locally-set ACL unchanged -- the folder's new permissions are not pushed down to them.
 - Descendant files with inheritance enabled receive a recomputed ACL derived from the folder's current Alfresco permissions snapshot.
 - Files that fall outside scope after the change are deleted from hxpr rather than updated.
 - The propagation never re-ingests content; it is strictly an ACL patch.

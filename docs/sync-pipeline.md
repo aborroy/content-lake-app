@@ -36,7 +36,7 @@ SourceNode (from ContentSourceClient)
 
 Used by the batch ingester's two-phase pipeline:
 
-1. `ingestMetadata()` — writes hxpr document with metadata, returns a `SyncResult`
+1. `ingestMetadata()` -- writes hxpr document with metadata, returns a `SyncResult`
 2. `TransformationQueue` enqueues the `SyncResult`
 3. `TransformationWorker` picks it up and calls `processContent()`
 
@@ -49,8 +49,8 @@ incremental progress even if the transformation pipeline is slow or interrupted.
 
 Documents land at: `/{hxprTargetPath}/{sourceId}/{sourcePath}/{nodeName}`
 
-- `hxprTargetPath` — Spring config value (e.g. `/alfresco` or `/nuxeo`)
-- `sourceId` — identifies the source system instance
+- `hxprTargetPath` -- Spring config value (e.g. `/alfresco` or `/nuxeo`)
+- `sourceId` -- identifies the source system instance
 - `HxprService.ensureFolder()` creates the parent path on demand
 
 ---
@@ -67,44 +67,41 @@ ingesters concurrently against the same node without producing duplicate writes.
 
 Before a node is synced, `ScopeResolver.isInScope(node)` determines whether it belongs in the lake:
 
-- **Alfresco** — `ContentLakeScopeResolver`: file is in scope when it (or an ancestor folder) has
+- **Alfresco** -- `ContentLakeScopeResolver`: file is in scope when it (or an ancestor folder) has
   the `cl:indexed` aspect AND neither the file nor any ancestor has `cl:excludeFromLake = true`.
   `shouldTraverse(node)` checks for excluded aspects and path patterns.
   Ancestor lookups hit `AlfrescoClient.getNode()` with an in-memory cache (max 2 000 entries).
   Call `invalidateFolderScope(folderId)` after `cl:indexed` changes.
 
-- **Nuxeo** — `NuxeoScopeResolver`: config-only scope for MVP. Driven by
+- **Nuxeo** -- `NuxeoScopeResolver`: config-only scope for MVP. Driven by
   `nuxeo.scope.includedRoots` and `nuxeo.scope.includedTypes` in `application.yml`.
 
 ---
 
-## `cin_sourceId` Migration
+## `cin_sourceId` Format
 
-**Current (Alfresco-only):** `cin_sourceId` stores the raw Alfresco repository UUID.
+`cin_sourceId` stores `"<sourceType>:<sourceId>"` -- e.g. `"alfresco:abc-uuid"`, `"nuxeo:prod"`.
+`NodeSyncService.formatSourceId(SourceNode)` produces this value on every write, so all documents
+ingested by current code carry the namespaced format.
 
-**Multi-source target:** `"<sourceType>:<sourceId>"` — e.g. `"alfresco:abc-uuid"`, `"nuxeo:prod"`.
+### Legacy compatibility (built in)
 
-### Migration risk
+Documents written by older Alfresco-only code stored the raw repository UUID with no
+`"<sourceType>:"` prefix. Lookups handle both transparently: `HxprService.findByNodeId(nodeId,
+sourceId)` builds its predicate through `buildSourceIdPredicate` / `sourceIdVariants`, which
+OR-queries the namespaced form and the legacy raw id. No migration pause or dual-write window is
+required -- a rolling deploy finds old and new documents alike.
 
-The live ingester writes continuously. Deploying new code that writes `"alfresco:<uuid>"` before
-existing documents are migrated causes `findByNodeId()` to miss them and produce duplicates.
+### `findByNodeId` overloads
 
-**Recommended transition options:**
-
-| Strategy | When to use |
-|---|---|
-| **Migration-first lockout** — run migration, then deploy new code | Safest; requires brief ingester pause |
-| **OR-query compatibility** — query both old `<uuid>` and new `"alfresco:<uuid>"` temporarily | Rolling deploy, no pause |
-| **Dual-write** — write both formats for a window, clean up after | Simplest for rolling deploy; doubles storage temporarily |
-
-### `HxprService.repositoryId` removal
-
-After migration, `HxprService.repositoryId` and the single-arg `findByNodeId(String nodeId)` overload
-must be removed. All callers must use `findByNodeId(String nodeId, String sourceId)`.
+`findByNodeId(String nodeId, String sourceId)` is the preferred entry point; all source-aware
+callers pass the formatted `sourceId`. The single-arg `findByNodeId(String nodeId)` overload remains
+as a convenience for callers without source context and delegates to the two-arg form with a `null`
+`sourceId` (matching on `cin_id` alone).
 
 ---
 
-## Live Ingestion — Alfresco
+## Live Ingestion -- Alfresco
 
 `alfresco-live-ingester` connects to Alfresco ActiveMQ and consumes `alfresco.repo.event2` topics.
 Each `RepoEvent` is dispatched to a typed handler:
@@ -132,7 +129,7 @@ reconciliation, so failed reconciliation attempts are redelivered by the broker.
 
 ---
 
-## Live Ingestion — Nuxeo
+## Live Ingestion -- Nuxeo
 
 `nuxeo-live-ingester` uses audit polling via `NuxeoAuditClient`. It queries the Nuxeo audit log
 periodically, tracking the last-seen cursor in `AuditCursorStore` (default implementation:
@@ -140,7 +137,7 @@ periodically, tracking the last-seen cursor in `AuditCursorStore` (default imple
 
 ---
 
-## Batch Ingestion — Alfresco
+## Batch Ingestion -- Alfresco
 
 `alfresco-batch-ingester` triggers a full sync:
 
@@ -162,7 +159,7 @@ The same service also exposes `POST /api/sync/permissions` for Alfresco ACL reco
 
 ---
 
-## Batch Ingestion — Nuxeo
+## Batch Ingestion -- Nuxeo
 
 `nuxeo-batch-ingester` uses NXQL discovery:
 

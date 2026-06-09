@@ -3,7 +3,7 @@
 ## Project Overview
 
 `content-lake-app` is a Java/Spring Boot pipeline that ingests documents from content repositories
-(Alfresco, Nuxeo) into **hxpr** — a Hyland platform that stores documents, embeddings, and ACLs
+(Alfresco, Nuxeo) into **hxpr** -- a Hyland platform that stores documents, embeddings, and ACLs
 for hybrid semantic search and RAG.
 
 The pipeline is designed around a **Source Provider Interface (SPI)**: a set of contracts each
@@ -25,7 +25,7 @@ content-lake-app/
 │   │       ├── ScopeResolver
 │   │       ├── SourceNode
 │   │       └── TextExtractor
-│   ├── content-lake-core/         Shared pipeline — no source-specific SDK imports
+│   ├── content-lake-core/         Shared pipeline -- no source-specific SDK imports
 │   │   └── org.hyland.contentlake
 │   │       ├── client/            HxprService, HxprDocumentApi, HxprQueryApi, HxprTokenProvider
 │   │       ├── config/            HxprProperties
@@ -107,7 +107,7 @@ alfresco-content-app/
 Four interfaces in `content-lake-spi` (`org.hyland.contentlake.spi`), carrying zero Alfresco/Nuxeo
 imports. Every content source adapter must implement them.
 
-### `SourceNode` — universal document representation
+### `SourceNode` -- universal document representation
 
 ```java
 public record SourceNode(
@@ -120,6 +120,7 @@ public record SourceNode(
     OffsetDateTime modifiedAt,
     boolean folder,
     Set<String> readPrincipals,
+    Set<String> denyPrincipals,            // identities explicitly denied read access by the source ACL
     Map<String, Object> sourceProperties  // merged into cin_ingestProperties
 ) {}
 ```
@@ -134,6 +135,8 @@ public interface ContentSourceClient {
     List<SourceNode> getChildren(String containerId, int skip, int maxItems);
     Resource downloadContent(String nodeId, String fileName);
     byte[] getContent(String nodeId);
+    default void writeSyncStatus(String nodeId, String status, String error) {}  // optional sync-status write-back
+    default void clearSyncStatus(String nodeId) {}                                // optional sync-status clear
 }
 ```
 
@@ -143,6 +146,8 @@ public interface ContentSourceClient {
 public interface TextExtractor {
     boolean supports(String mimeType);
     String extractText(Resource content, String mimeType);
+    default boolean supportsSourceReference(String mimeType) { return false; }  // can extract straight from a node ref
+    default String extractText(String nodeId, String mimeType) { ... }          // source-reference extraction
 }
 ```
 
@@ -159,7 +164,7 @@ public interface ScopeResolver {
 
 ## Core Data Model
 
-### `HxprDocument` — the unit stored in hxpr
+### `HxprDocument` -- the unit stored in hxpr
 
 | Java field | JSON key | Purpose |
 |---|---|---|
@@ -186,7 +191,7 @@ public interface ScopeResolver {
 |---|---|---|
 | `SOURCE_NODE_ID` | `source_nodeId` | node ID within the source system |
 | `SOURCE_SYSTEM_ID` | `source_systemId` | source system instance identifier |
-| `SOURCE_TYPE` | `source_type` | `"alfresco"`, `"nuxeo"`, … |
+| `SOURCE_TYPE` | `source_type` | `"alfresco"`, `"nuxeo"`, ... |
 | `SOURCE_PATH` | `source_path` | node path |
 | `SOURCE_NAME` | `source_name` | node name |
 | `SOURCE_MIME_TYPE` | `source_mimeType` | MIME type |
@@ -199,7 +204,7 @@ Source adapters add extra properties via `SourceNode.sourceProperties()` using t
 
 ### `cin_sourceId` format
 
-`"<sourceType>:<sourceId>"` — e.g. `"alfresco:abc-123-def"`, `"nuxeo:prod-instance"`.
+`"<sourceType>:<sourceId>"` -- e.g. `"alfresco:abc-123-def"`, `"nuxeo:prod-instance"`.
 
 `HxprService.findByNodeId(nodeId, sourceId)` filters by both `cin_id` and `cin_sourceId`.
 
@@ -213,12 +218,12 @@ Source adapters add extra properties via `SourceNode.sourceProperties()` using t
 
 ## Design Decisions
 
-- **Separate deployables per source** — no multi-source monolith JAR; simpler ops + independent scaling
-- **Separate hxpr root paths per source** — `/alfresco/...` vs `/nuxeo/...`; rag-service queries across both
-- **`cin_sourceId` format** — `"<sourceType>:<sourceId>"` enables per-source and per-instance filtering
-- **`nuxeo.sourceId` config** — must be set explicitly; do NOT use Nuxeo's built-in `repository` field (always `"default"`)
-- **Nuxeo text extraction** — use Nuxeo `ConversionService` via REST `@convert` for non-text blobs; do not use embedded Tika or deprecated `TransformService`
-- **Nuxeo scope** — config-only for MVP (`nuxeo.scope.includedRoots` + `includedTypes`); schema-based facet is a follow-up
-- **Nuxeo auth** — Basic auth for MVP, wrapped in an abstraction for future token/OAuth2
-- **Nuxeo discovery** — NXQL query preferred over `@children` tree walk for scalability
-- **`rag-service` security** — needs its own `SecurityConfig`; options are permit-all behind network policy or OAuth2/OIDC via hxpr IDP
+- **Separate deployables per source** -- no multi-source monolith JAR; simpler ops + independent scaling
+- **Separate hxpr root paths per source** -- `/alfresco/...` vs `/nuxeo/...`; rag-service queries across both
+- **`cin_sourceId` format** -- `"<sourceType>:<sourceId>"` enables per-source and per-instance filtering
+- **`nuxeo.sourceId` config** -- must be set explicitly; do NOT use Nuxeo's built-in `repository` field (always `"default"`)
+- **Nuxeo text extraction** -- use Nuxeo `ConversionService` via REST `@convert` for non-text blobs; do not use embedded Tika or deprecated `TransformService`
+- **Nuxeo scope** -- config-only for MVP (`nuxeo.scope.includedRoots` + `includedTypes`); schema-based facet is a follow-up
+- **Nuxeo auth** -- Basic auth for MVP, wrapped in an abstraction for future token/OAuth2
+- **Nuxeo discovery** -- NXQL query preferred over `@children` tree walk for scalability
+- **`rag-service` security** -- needs its own `SecurityConfig`; options are permit-all behind network policy or OAuth2/OIDC via hxpr IDP
