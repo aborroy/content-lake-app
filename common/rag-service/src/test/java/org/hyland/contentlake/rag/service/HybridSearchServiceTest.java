@@ -491,6 +491,46 @@ class HybridSearchServiceTest {
         }
 
         @Test
+        void logPermissionSourceIdConfiguration_unset_skipsIndexProbe() {
+            ReflectionTestUtils.setField(service, "permissionSourceIds", "");
+
+            service.logPermissionSourceIdConfiguration();
+
+            verify(hxprService, never()).query(anyString(), anyInt(), anyInt());
+        }
+
+        @Test
+        void logPermissionSourceIdConfiguration_pinnedAndCovers_doesNotMisreport() {
+            ReflectionTestUtils.setField(service, "permissionSourceIds", "covered-repo");
+
+            HxprDocument doc = new HxprDocument();
+            doc.setCinSourceId("alfresco:covered-repo");
+            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
+            result.setDocuments(List.of(doc));
+            when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+
+            service.logPermissionSourceIdConfiguration();
+
+            verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+        }
+
+        @Test
+        void logPermissionSourceIdConfiguration_pinnedMissesIndexedAlfrescoSource_probesIndex() {
+            // Mirrors the incident: pinned "default,local" misses the real Alfresco repo UUID.
+            ReflectionTestUtils.setField(service, "permissionSourceIds", "default,local");
+
+            HxprDocument doc = new HxprDocument();
+            doc.setCinSourceId("alfresco:de0b9044-4790-4006-8b90-44479030061f");
+            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
+            result.setDocuments(List.of(doc));
+            when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+
+            service.logPermissionSourceIdConfiguration();
+
+            verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+        }
+
+        @Test
         void buildPermissionFilter_mixedSources_keepsAlfrescoAdminBypassScopedToAlfresco() {
             HybridSearchService svc = spy(service);
             ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
