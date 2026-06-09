@@ -17,6 +17,7 @@ import org.hyland.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SourceDocument;
 import org.hyland.contentlake.security.SecurityContextService;
 import org.hyland.contentlake.service.EmbeddingService;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.security.core.Authentication;
@@ -807,6 +808,39 @@ public class HybridSearchService {
             return "nuxeo:" + sourceId;
         }
         return sourceId;
+    }
+
+    /**
+     * Logs the resolved permission-source-id configuration once at startup and, when
+     * {@code rag.permission.source-ids} is pinned, warns if it fails to cover the source ids
+     * actually present in the index. A pinned value that misses an indexed source id silently
+     * hides that source's group/user-restricted documents (public {@code __Everyone__} docs still
+     * pass), so this turns an invisible ACL failure into a visible diagnostic.
+     */
+    @PostConstruct
+    void logPermissionSourceIdConfiguration() {
+        if (permissionSourceIds == null || permissionSourceIds.isBlank()) {
+            log.info("rag.permission.source-ids is not set; permission filter uses auto-discovered "
+                    + "Alfresco source ids plus configured Nuxeo source id");
+            return;
+        }
+
+        LinkedHashSet<String> configured = new LinkedHashSet<>();
+        for (String candidate : permissionSourceIds.split(",")) {
+            addSourceId(configured, candidate);
+        }
+        log.info("rag.permission.source-ids is pinned to {}; auto-discovery disabled", configured);
+
+        List<String> indexedAlfresco = discoverSourceIdsByType("alfresco");
+        List<String> uncovered = indexedAlfresco.stream()
+                .filter(id -> !configured.contains(id))
+                .toList();
+        if (!uncovered.isEmpty()) {
+            log.warn("rag.permission.source-ids {} does not cover indexed Alfresco source ids {}; "
+                            + "group/user-restricted documents from the missing source(s) will be hidden "
+                            + "from search results (leave the property unset to auto-discover)",
+                    configured, uncovered);
+        }
     }
 
     private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {
