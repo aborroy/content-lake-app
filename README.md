@@ -94,8 +94,8 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 | Module | Group | Port | Description |
 |--------|-------|------|-------------|
 | `content-lake-repo-model` | `common/` | -- | Alfresco repository JAR that bootstraps the `cl:indexed` content model for scope control |
-| `content-lake-spi` | `common/` | -- | Source Provider Interface: `SourceNode`, `ContentSourceClient`, `TextExtractor`, `ScopeResolver`, and the OIS-aligned `SecurityConfig` / `PermissionRule` |
-| `content-lake-core` | `common/` | -- | Shared ingestion pipeline: metadata sync, transform, chunking, embedding, ACL updates, idempotency; includes a source-agnostic Apache Tika text extractor |
+| `content-lake-spi` | `common/` | -- | Source Provider Interface: `SourceNode`, `ContentSourceClient`, `TextExtractor` (with `ExtractedText` / `TextFormat`), `ScopeResolver`, and the OIS-aligned `SecurityConfig` / `PermissionRule` |
+| `content-lake-core` | `common/` | -- | Shared ingestion pipeline: metadata sync, transform, chunking, embedding, ACL updates, idempotency; includes source-agnostic extractors (Apache Tika, and a transform-engine client that speaks the `alfresco-transform-core` protocol for any source) composed with an ordered fallback chain |
 | `rag-service` | `common/` | 9091 | Semantic search, hybrid search, RAG question answering, operational status (`/api/status`), an MCP server, agentic tool-calling, structured output, prompt-injection defense, and rate limiting |
 | `content-lake-source-alfresco` | `alfresco/` | -- | Alfresco REST clients, scope resolver, and ACL expansion |
 | `alfresco-batch-ingester` | `alfresco/` | 9090 | Alfresco folder discovery, batch scheduling, and `/api/sync/*` controllers |

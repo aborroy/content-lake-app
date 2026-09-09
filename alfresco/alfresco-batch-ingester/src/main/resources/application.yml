@@ -108,7 +108,29 @@ transform:
   timeout-ms: ${TRANSFORM_TIMEOUT_MS:300000}
   enabled: ${TRANSFORM_ENABLED:true}
 
-# Ingestion configuration
+# Text extraction representation.
+#
+# plaintext (default) asks the transform engine for text/plain, exactly as before: chunk boundaries,
+# both fulltext mirrors and the resulting embeddings are unchanged. auto asks for text/markdown where
+# the engine advertises it, so headings and table rows survive into chunking and a table becomes a
+# ChunkType.TABLE chunk. markdown behaves like auto but logs each fall back to plaintext, which is the
+# only way to tell "the engine is not producing markdown" from "markdown is working".
+#
+# The official Transform Core AIO advertises no markdown target, so auto is a no-op against it. Point
+# transform.url at an engine that does (for example the transform-extras profile) to get markdown.
+# Markdown is never required: extraction always degrades to plaintext and then to in-process Tika.
+extraction:
+  # Extra extraction services tried before the repository's own transform service, most structural
+  # first. Comma separated, each optionally prefixed with a backend kind:
+  #
+  #   transform:http://transform-convert2md:8090,transform:http://transform-liteparse:8090
+  #
+  # An unprefixed entry means the alfresco-transform-core protocol. Other kinds (Document Filters, for
+  # example) register an ExtractionBackend bean and are selected by their own prefix. Each service
+  # claims only the MIME types it advertises, so a mixed list routes itself; order breaks ties.
+  engine-urls: ${EXTRACTION_ENGINE_URLS:}
+  format: ${EXTRACTION_FORMAT:plaintext}
+
 ingestion:
   sources:
     - folder: ${INGESTION_FOLDER_1:}

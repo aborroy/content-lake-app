@@ -4,6 +4,13 @@ import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.nuxeo.contentlake.client.NuxeoClient;
+import org.springframework.beans.factory.ObjectProvider;
+import org.hyland.contentlake.extractor.ExtractionBackend;
+import org.hyland.contentlake.extractor.ExtractionChain;
+import org.hyland.contentlake.extractor.ExtractionFormat;
+import org.hyland.contentlake.extractor.TikaTextExtractor;
+import org.hyland.contentlake.extractor.TransformEngineTextExtractor;
+import org.hyland.contentlake.spi.TextExtractor;
 import org.hyland.nuxeo.contentlake.client.NuxeoConversionClient;
 import org.hyland.contentlake.config.HxprProperties;
 import org.hyland.nuxeo.contentlake.config.NuxeoProperties;
@@ -26,6 +33,8 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executor;
 
 @Configuration
@@ -73,6 +82,35 @@ public class AppConfig {
     @Bean
     public NuxeoConversionClient nuxeoConversionClient(NuxeoProperties props) {
         return new NuxeoConversionClient(props);
+    }
+
+    /**
+     * Extraction chain, ordered most structural first.
+     *
+     * <p>A transform engine is included only when {@code extraction.engine-url} is set, so a
+     * deployment without one behaves exactly as it did before. Configure it to gain structure-aware
+     * extraction here: the engine speaks the transform protocol directly rather than through a
+     * repository, so it is not tied to Alfresco.</p>
+     *
+     * <p>{@code extraction.format} decides whether the engine is asked for markdown, and defaults to
+     * {@code plaintext}. Markdown is requested only where the engine advertises it, and extraction
+     * always degrades to the next entry rather than failing an ingest.</p>
+     */
+    @Bean
+    public TextExtractor textExtractor(
+            NuxeoConversionClient nuxeoConversionClient,
+            @org.springframework.beans.factory.annotation.Value("${extraction.engine-urls:}")
+            String engineUrls,
+            @org.springframework.beans.factory.annotation.Value("${extraction.engine-timeout-ms:300000}")
+            long engineTimeoutMs,
+            @org.springframework.beans.factory.annotation.Value("${extraction.format:plaintext}")
+            String extractionFormat,
+            ObjectProvider<ExtractionBackend> backendProvider
+    ) {
+        // Nuxeo's own ConversionService converts from the blob identity, with no temp download, so it
+        // sits after the engines but before Tika.
+        return ExtractionChain.of(engineUrls, engineTimeoutMs, ExtractionFormat.parse(extractionFormat),
+                backendProvider.orderedStream().toList(), nuxeoConversionClient, new TikaTextExtractor());
     }
 
     @Bean
@@ -124,7 +162,7 @@ public class AppConfig {
     public NodeSyncService nodeSyncService(NuxeoClient nuxeoClient,
                                            HxprDocumentApi documentApi,
                                            HxprService hxprService,
-                                           NuxeoConversionClient nuxeoConversionClient,
+                                           TextExtractor textExtractor,
                                            EmbeddingService embeddingService,
                                            SimpleChunkingService chunkingService,
                                            HxprProperties props,
@@ -135,7 +173,7 @@ public class AppConfig {
                 nuxeoClient,
                 documentApi,
                 hxprService,
-                nuxeoConversionClient,
+                textExtractor,
                 embeddingService,
                 chunkingService,
                 props.getTargetPath(),

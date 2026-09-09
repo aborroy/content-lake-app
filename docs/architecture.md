@@ -25,12 +25,18 @@ content-lake-app/
 │   │       ├── ScopeResolver
 │   │       ├── SourceNode
 │   │       ├── SecurityConfig / PermissionRule   (OIS-aligned structured ACL)
-│   │       └── TextExtractor
+│   │       ├── TextExtractor
+│   │       └── ExtractedText / TextFormat        (PLAIN | MARKDOWN)
 │   ├── content-lake-core/         Shared pipeline -- no source-specific SDK imports
 │   │   └── org.hyland.contentlake
 │   │       ├── client/            HxprService, HxprDocumentApi, HxprQueryApi
 │   │       ├── config/            HxprProperties
 │   │       ├── extractor/         TikaTextExtractor (source-agnostic, Tika-based)
+│   │       │                       TransformEngineTextExtractor (/transform protocol, any source)
+│   │       │                       ChainingTextExtractor (ordered fallback, degrades to Tika)
+│   │       │                       ExtractionChain (multi-service chain from config)
+│   │       │                       ExtractionBackend / TransformCoreBackend (pluggable protocols)
+│   │       │                       MarkdownToPlainText, ExtractionFormat
 │   │       ├── model/             HxprDocument, HxprEmbedding, Chunk, ContentLakeNodeStatus
 │   │       └── service/           ContentSyncService, EmbeddingService, Chunker, chunking strategies
 │   └── rag-service/               Semantic search + RAG Spring Boot app
@@ -159,8 +165,21 @@ public interface TextExtractor {
     String extractText(Resource content, String mimeType);
     default boolean supportsSourceReference(String mimeType) { return false; }  // can extract straight from a node ref
     default String extractText(String nodeId, String mimeType) { ... }          // source-reference extraction
+
+    default TextFormat preferredFormat(String mimeType) { return PLAIN; }       // PLAIN | MARKDOWN
+    default ExtractedText extract(Resource content, String mimeType) { ... }    // text + its representation
+    default ExtractedText extract(String nodeId, String mimeType) { ... }
 }
 ```
+
+`ExtractedText(text, format)` lets an extractor that can produce structure say so. It matters because
+table detection recognises a table only from a markdown separator row or rows carrying at least two
+`|` characters, so flattening a document to plaintext removes the signal chunking needs. The defaults
+wrap `extractText` as `PLAIN`, so an extractor that only produces flattened text implements nothing
+extra. A `null` return still means "no text", not an error.
+
+Note for tests: Mockito does not execute interface default methods, so a mocked `TextExtractor` must
+stub `extract(...)` rather than `extractText(...)`.
 
 ### `ScopeResolver`
 

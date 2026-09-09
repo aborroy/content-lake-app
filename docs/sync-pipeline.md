@@ -21,13 +21,15 @@ SourceNode (from ContentSourceClient)
   │    hxprService.createDocument(parentPath, doc)
   │
   └─ processContent()
-       if textExtractor.supports(mimeType): sourceClient.getContent(nodeId)
-       │ otherwise: sourceClient.downloadContent() + textExtractor.extractText()
+       if isTextMimeType(mimeType): sourceClient.getContent(nodeId)   # no extractor involved
+       │ else if textExtractor.supportsSourceReference(): textExtractor.extract(nodeId, mimeType)
+       │ else: sourceClient.downloadContent() + textExtractor.extract(resource, mimeType)
+       │       ──► ExtractedText(text, PLAIN | MARKDOWN)
        │
-       chunkingService.chunk(text)
+       chunkingService.chunk(extracted.text())          # markdown kept as-is
        embeddingService.embedChunks(chunks)
        hxprService.updateEmbeddings(hxprDocId, embeddings)
-       documentApi.updateById(hxprDocId, fulltext + INDEXED status)
+       documentApi.updateById(hxprDocId, plainText(extracted) + INDEXED status)
 ```
 
 Chunking is structure-aware: detected tables are kept as atomic `ChunkType.TABLE` chunks (never
@@ -36,6 +38,50 @@ what lets retrieval later expand a matched chunk back to its parent section (sma
 `rag.retrieval.small-to-big.enabled`). When keyword-context enrichment is enabled
 (`content-lake.ingest.keyword-context-enrichment-enabled`), document-level context is prepended to
 each chunk's keyword-search text so short chunks stay findable by the keyword leg of hybrid search.
+
+
+## Extraction Representation, and What Each Field Holds
+
+`TextExtractor` returns an `ExtractedText(text, format)` where format is `PLAIN` or `MARKDOWN`. The
+distinction exists because table detection needs structure: a table is recognised by a markdown
+separator row or by rows carrying at least two `|` characters, and flattening a document to plaintext
+removes exactly that signal. A PDF table extracted as plaintext arrives as an undelimited run of
+words and is classified `PROSE`.
+
+`extraction.format` (`plaintext` by default, or `auto` / `markdown`) decides whether a transform
+engine is asked for markdown, and markdown is requested only where the engine advertises that
+transform. Every source can use it: `TransformEngineTextExtractor` speaks the
+`alfresco-transform-core` `/transform` protocol directly rather than going through a repository, so
+the same engine serves the Alfresco, Nuxeo and filesystem connectors. Extractors are composed by
+`ChainingTextExtractor`, which falls through on a `null` return or an exception, so extraction
+degrades to in-process Tika and never fails an ingest.
+
+`text/markdown` is in `TEXT_MIME_TYPES`, so a markdown source document is read straight through with
+no extractor involved and reaches chunking with its structure intact. No transform engine is needed
+for markdown content.
+
+Chunks and the keyword index hold deliberately different representations:
+
+| Destination | Holds | Why |
+|---|---|---|
+| Chunks and their embeddings | the extracted representation as-is, markdown included | chunking segments on heading and table boundaries, and classifies tables from their pipe rows |
+| `cin_ingestProperties.contentLake_extractedText` | markup-stripped plain text | hxpr folds this into the analysed `sys_fulltext` index, which the lexical leg of hybrid search queries and re-scores by term frequency |
+| `sys_fulltextBinary` | markup-stripped plain text | the same content, for consistency |
+
+The reason both mirrors get stripped text rather than markdown: markdown punctuation is not a term
+anyone searches for, and leaving pipes, dash rules, backticks and link syntax in an analysed index
+dilutes the term frequencies of the words that are. `MarkdownToPlainText` renders a table row as its
+cells separated by two spaces, which is what the flattened extraction paths already produce for a
+table, so keyword behaviour is the same whichever path fed the document. Underscore emphasis is only
+stripped at word boundaries, so a `snake_case` identifier survives as one token, which the lexical leg
+depends on to retrieve rare identifiers at all.
+
+Note that `sys_fulltextBinary` is **not** exposed to HXQL, so it cannot be queried however it is
+spelled; `contentLake_extractedText` is the field that actually feeds keyword matching. Both are
+written from the same stripped text so the two can never disagree.
+
+When `extraction.format` is `plaintext`, the strip step is a no-op and every value written is
+byte-identical to a deployment without any of this.
 
 ---
 

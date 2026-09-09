@@ -64,6 +64,31 @@ filesystem:
         enabled: ${NOISE_REDUCTION_ENABLED:true}
         aggressive: ${NOISE_REDUCTION_AGGRESSIVE:false}
 
+# Optional transform engine for structure-aware extraction.
+#
+# This source has no repository transform service behind it, so extraction falls back to in-process
+# Tika unless an engine is configured here. Leave engine-url empty and behaviour is exactly as before.
+#
+# The engine speaks the alfresco-transform-core /transform protocol directly rather than going through
+# a repository, so it is not Alfresco-specific and can sit alongside this connector.
+#
+# format: plaintext (default) asks for text/plain; auto asks for text/markdown where the engine
+# advertises it, so headings and table rows survive into chunking; markdown behaves like auto but logs
+# each fall back to plaintext. Extraction always degrades rather than failing an ingest.
+extraction:
+  # Extraction services for this source, which has no repository transform service behind it. Empty
+  # leaves extraction on in-process Tika, exactly as before. Comma separated, most structural first,
+  # each optionally prefixed with a backend kind:
+  #
+  #   transform:http://transform-convert2md:8090,transform:http://transform-liteparse:8090
+  #
+  # An unprefixed entry means the alfresco-transform-core protocol. Other kinds (Document Filters, for
+  # example) register an ExtractionBackend bean and are selected by their own prefix. Each service
+  # claims only the MIME types it advertises, so a mixed list routes itself; order breaks ties.
+  engine-urls: ${EXTRACTION_ENGINE_URLS:}
+  engine-timeout-ms: ${EXTRACTION_ENGINE_TIMEOUT_MS:300000}
+  format: ${EXTRACTION_FORMAT:plaintext}
+
 hxpr:
   url: ${HXPR_URL:http://localhost:8080}
   repository-id: ${HXPR_REPOSITORY_ID:default}

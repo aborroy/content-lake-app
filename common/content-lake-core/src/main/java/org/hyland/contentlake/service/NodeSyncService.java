@@ -14,18 +14,22 @@ import org.hyland.contentlake.model.ContentLakeNodeStatus;
 import org.hyland.contentlake.model.HxprDocument;
 import org.hyland.contentlake.model.HxprEmbedding;
 import org.hyland.contentlake.model.SectionMap;
+import org.hyland.contentlake.extractor.MarkdownToPlainText;
 import org.hyland.contentlake.security.AclFilterBuilder;
 import org.hyland.contentlake.service.chunking.SimpleChunkingService;
 import org.hyland.contentlake.spi.ContentSourceClient;
+import org.hyland.contentlake.spi.ExtractedText;
 import org.hyland.contentlake.spi.SourceNode;
 import org.hyland.contentlake.spi.SourceTombstone;
 import org.hyland.contentlake.spi.TextExtractor;
+import org.hyland.contentlake.spi.TextFormat;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.web.client.HttpClientErrorException;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.*;
 
@@ -93,6 +97,7 @@ public class NodeSyncService {
 
     /* ---- text extraction helpers ---- */
     private static final String TARGET_MIME_TYPE = "text/plain";
+    private static final String MARKDOWN_MIME_TYPE = "text/markdown";
     private static final String ERR_NO_EXTRACTABLE_TEXT = "No extractable text produced for mimeType=%s";
     private static final String ERR_NO_CHUNKS = "No chunks produced from extracted text";
     private static final Set<String> TEXT_MIME_TYPES = Set.of(
@@ -201,8 +206,8 @@ public class NodeSyncService {
                                String nodeId, String mimeType,
                                String documentName, String documentPath) {
         try {
-            String text = extractText(nodeId, mimeType, documentName);
-            if (text == null || text.isBlank()) {
+            ExtractedText extracted = extractText(nodeId, mimeType, documentName);
+            if (extracted == null || extracted.text() == null || extracted.text().isBlank()) {
                 log.warn("Empty text for node {} ({})", nodeId, mimeType);
                 String noTextError = String.format(ERR_NO_EXTRACTABLE_TEXT, safeMimeType(mimeType));
                 patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED, noTextError, nodeId);
@@ -211,6 +216,11 @@ public class NodeSyncService {
 
             Map<String, Object> ingestProps = baseIngestProps;
 
+            // Chunking gets the extracted representation as-is: when it is markdown, segmentation
+            // splits on heading and table boundaries and a table is kept atomic as ChunkType.TABLE.
+            // The fulltext mirrors below get markup-stripped text instead, because they feed an
+            // analysed keyword index where markdown punctuation is noise, not terms.
+            String text = extracted.text();
             List<Chunk> chunks = chunkingService.chunk(text, nodeId, mimeType);
             if (chunks.isEmpty()) {
                 log.warn("No chunks for node {}", nodeId);
@@ -236,7 +246,8 @@ public class NodeSyncService {
             String keywordContext = keywordContextEnrichmentEnabled ? docContext : null;
 
             log.info("About to update fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
-            updateFulltextWithStatus(hxprDocId, text, keywordContext, sectionMapJson, ingestProps, nodeId);
+            String keywordText = MarkdownToPlainText.toPlainText(extracted);
+            updateFulltextWithStatus(hxprDocId, keywordText, keywordContext, sectionMapJson, ingestProps, nodeId);
             log.info("Successfully updated fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
 
             log.info("Completed sync for node {}: {} embeddings", nodeId, hxprEmbeddings.size());
@@ -542,19 +553,23 @@ public class NodeSyncService {
     // Text extraction
     // ──────────────────────────────────────────────────────────────────────
 
-    private String extractText(String nodeId, String mimeType, String documentName) {
+    private ExtractedText extractText(String nodeId, String mimeType, String documentName) {
         if (mimeType == null || mimeType.isBlank()) {
             log.info("Skipping content extraction for node {}: missing MIME type", nodeId);
             return null;
         }
 
         if (isTextMimeType(mimeType)) {
+            // Text arrives as-is; no extractor is involved. Markdown source content therefore
+            // reaches chunking with its headings and table rows intact, so it is reported as such
+            // rather than as PLAIN, which would leave the fulltext mirrors holding raw markup.
             byte[] content = sourceClient.getContent(nodeId);
-            return new String(content, StandardCharsets.UTF_8);
+            String text = new String(content, StandardCharsets.UTF_8);
+            return ExtractedText.of(text, formatOfTextMimeType(mimeType));
         }
 
         if (textExtractor.supportsSourceReference(mimeType)) {
-            return textExtractor.extractText(nodeId, mimeType);
+            return textExtractor.extract(nodeId, mimeType);
         }
 
         if (!textExtractor.supports(mimeType)) {
@@ -566,10 +581,18 @@ public class NodeSyncService {
         String tempFileName = resolveTempFileName(nodeId, documentName, mimeType);
         Resource temp = sourceClient.downloadContent(nodeId, tempFileName);
         try {
-            return textExtractor.extractText(temp, mimeType);
+            return textExtractor.extract(temp, mimeType);
         } finally {
             deleteTempFile(temp);
         }
+    }
+
+    /** Markdown source content is markdown; every other text type is flattened prose. */
+    private static TextFormat formatOfTextMimeType(String mimeType) {
+        String normalized = mimeType.toLowerCase();
+        return (normalized.startsWith(MARKDOWN_MIME_TYPE) || normalized.startsWith("text/x-markdown"))
+                ? TextFormat.MARKDOWN
+                : TextFormat.PLAIN;
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -598,6 +621,12 @@ public class NodeSyncService {
         return loc;
     }
 
+    /**
+     * Writes both fulltext mirrors and flips the document to INDEXED.
+     *
+     * @param text markup-stripped text. Both mirrors feed keyword matching, so callers pass plain
+     *             text even when the chunks hold markdown.
+     */
     private void updateFulltextWithStatus(String hxprDocId, String text, String docContext,
                                           String sectionMapJson, Map<String, Object> baseIngestProps,
                                           String nodeId) {
@@ -905,9 +934,31 @@ public class NodeSyncService {
         return nodeId + extensionForMimeType(mimeType);
     }
 
+    /**
+     * Deletes a downloaded temp file, and only a temp file.
+     *
+     * <p>Restricted to the system temp directory on purpose. A {@code ContentSourceClient} whose
+     * backing store is the local filesystem can return the source file itself from
+     * {@code downloadContent}, and deleting that would destroy the document just indexed. The SPI
+     * contract says the download is the caller's to delete, so this stays defence in depth rather than
+     * the primary guarantee: a source client must still return a copy.</p>
+     */
     private void deleteTempFile(Resource resource) {
-        if (resource instanceof FileSystemResource fsr) {
-            try { Files.deleteIfExists(fsr.getFile().toPath()); } catch (Exception ignored) {}
+        if (!(resource instanceof FileSystemResource fsr)) {
+            return;
+        }
+        try {
+            Path path = fsr.getFile().toPath().toAbsolutePath().normalize();
+            Path tempDir = Path.of(System.getProperty("java.io.tmpdir")).toAbsolutePath().normalize();
+            if (!path.startsWith(tempDir)) {
+                log.warn("Refusing to delete {} after extraction: it is outside {} and so is not a "
+                        + "temp file. The source client must return a copy, not the source file.",
+                        path, tempDir);
+                return;
+            }
+            Files.deleteIfExists(path);
+        } catch (Exception ignored) {
+            // A temp file that cannot be deleted is a housekeeping problem, not an ingest failure.
         }
     }
 

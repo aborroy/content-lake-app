@@ -5,6 +5,7 @@ import org.hyland.filesystem.contentlake.config.FileSystemProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.core.io.Resource;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -29,6 +30,54 @@ class FileSystemSourceClientTest {
         props.setSourceId("fs-test");
         props.setReadPrincipals(Set.of("__Everyone__"));
         client = new FileSystemSourceClient(props);
+    }
+
+    /**
+     * The pipeline deletes whatever {@code downloadContent} returns once extraction finishes, so
+     * returning the source path would delete the document that was just indexed. Every non-text MIME
+     * type on this source goes down that path.
+     */
+    @Test
+    void downloadContentReturnsATempCopyAndLeavesTheSourceFileInPlace() throws IOException {
+        Path source = root.resolve("report.pdf");
+        Files.writeString(source, "%PDF-1.4 report body", StandardCharsets.UTF_8);
+
+        Resource downloaded = client.downloadContent(source.toString(), "report.pdf");
+        Path temp = downloaded.getFile().toPath();
+
+        assertThat(temp).isNotEqualTo(source);
+        assertThat(temp).startsWith(Path.of(System.getProperty("java.io.tmpdir")).toRealPath());
+        assertThat(Files.readString(temp)).isEqualTo("%PDF-1.4 report body");
+
+        // Simulate the pipeline's cleanup: the source must survive it.
+        Files.deleteIfExists(temp);
+        assertThat(source).exists();
+        assertThat(Files.readString(source)).isEqualTo("%PDF-1.4 report body");
+    }
+
+    @Test
+    void downloadContentKeepsTheFileExtensionSoExtractorsCanSniffTheFormat() throws IOException {
+        Path source = root.resolve("matrix.xlsx");
+        Files.writeString(source, "sheet", StandardCharsets.UTF_8);
+
+        Path temp = client.downloadContent(source.toString(), "matrix.xlsx").getFile().toPath();
+
+        assertThat(temp.getFileName().toString()).endsWith(".xlsx");
+        Files.deleteIfExists(temp);
+    }
+
+    @Test
+    void downloadContentToleratesAnAwkwardFileName() throws IOException {
+        Path source = root.resolve("weird name.pdf");
+        Files.writeString(source, "body", StandardCharsets.UTF_8);
+
+        Path temp = client.downloadContent(source.toString(), "../../weird name.pdf").getFile().toPath();
+
+        // The guarantee that matters: nothing in a caller-supplied name walks out of the temp dir.
+        assertThat(temp.getFileName().toString()).doesNotContain("/").doesNotContain("..");
+        assertThat(temp).startsWith(Path.of(System.getProperty("java.io.tmpdir")).toRealPath());
+        assertThat(Files.readString(temp)).isEqualTo("body");
+        Files.deleteIfExists(temp);
     }
 
     @Test

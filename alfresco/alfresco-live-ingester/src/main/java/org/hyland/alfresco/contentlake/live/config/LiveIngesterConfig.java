@@ -5,7 +5,14 @@ import org.hyland.alfresco.contentlake.client.AlfrescoClient;
 import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
-import org.hyland.alfresco.contentlake.client.TransformClient;
+import java.util.List;
+import org.springframework.beans.factory.ObjectProvider;
+import org.hyland.contentlake.extractor.ExtractionBackend;
+import org.hyland.contentlake.extractor.ExtractionChain;
+import org.hyland.contentlake.extractor.ExtractionFormat;
+import org.hyland.contentlake.extractor.TikaTextExtractor;
+import org.hyland.contentlake.extractor.TransformEngineTextExtractor;
+import org.hyland.contentlake.spi.TextExtractor;
 import org.hyland.contentlake.config.HxprProperties;
 import org.hyland.alfresco.contentlake.config.TransformProperties;
 import org.hyland.alfresco.contentlake.service.ContentLakeScopeResolver;
@@ -76,12 +83,42 @@ public class LiveIngesterConfig {
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // Transform Service
+    // Text extraction
     // ──────────────────────────────────────────────────────────────────────
 
+    /**
+     * Extraction chain: extra engines, then the repository's own transform service, then Tika.
+     *
+     * <p>{@code extraction.engine-urls} takes a comma-separated list, because no single engine covers
+     * every format well: convert2md recovers tables from PDF but handles PDF only, liteparse covers
+     * PDF and Office and recovers tables from spreadsheets but not PDF. Each engine claims only what
+     * its own {@code /transform/config} advertises, so a list routes itself per MIME type and the
+     * order only decides precedence where two engines overlap. List them most structural first.</p>
+     *
+     * <p>Tika is last and is what makes extraction degrade rather than fail: any engine can be
+     * unreachable, still starting, out of memory or unable to handle a format, and the document still
+     * has to be indexed with whatever text can be recovered.</p>
+     *
+     * <p>{@code extraction.format} decides whether markdown is requested at all. It defaults to
+     * {@code plaintext}, so chunk boundaries and both fulltext mirrors stay byte-identical until an
+     * operator opts in.</p>
+     */
     @Bean
-    public TransformClient transformClient(TransformProperties props) {
-        return new TransformClient(props.getUrl(), props.getTimeoutMs());
+    public TextExtractor textExtractor(
+            TransformProperties props,
+            @org.springframework.beans.factory.annotation.Value("${extraction.engine-urls:}")
+            String engineUrls,
+            @org.springframework.beans.factory.annotation.Value("${extraction.format:plaintext}")
+            String extractionFormat,
+            ObjectProvider<ExtractionBackend> backendProvider
+    ) {
+        ExtractionFormat format = ExtractionFormat.parse(extractionFormat);
+        // Order: extra engines first, then the repository's own transform service, then Tika. Each
+        // engine claims only what its /transform/config advertises, so a mixed list routes itself;
+        // configuration only decides precedence when two engines both claim a format.
+        return ExtractionChain.of(engineUrls, props.getTimeoutMs(), format, backendProvider.orderedStream().toList(),
+                new TransformEngineTextExtractor(props.getUrl(), props.getTimeoutMs(), format),
+                new TikaTextExtractor());
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -148,7 +185,7 @@ public class LiveIngesterConfig {
             AlfrescoClient alfrescoClient,
             HxprDocumentApi documentApi,
             HxprService hxprService,
-            TransformClient transformClient,
+            TextExtractor textExtractor,
             EmbeddingService embeddingService,
             SimpleChunkingService chunkingService,
             HxprProperties hxprProps,
@@ -160,7 +197,7 @@ public class LiveIngesterConfig {
                 alfrescoClient,    // ContentSourceClient
                 documentApi,
                 hxprService,
-                transformClient,   // TextExtractor
+                textExtractor,
                 embeddingService,
                 chunkingService,
                 hxprProps.getTargetPath(),

@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
@@ -83,9 +84,36 @@ public class FileSystemSourceClient implements ContentSourceClient {
         }
     }
 
+    /**
+     * Copies the file to a temp file and returns that, never the source file itself.
+     *
+     * <p>The {@link org.hyland.contentlake.spi.ContentSourceClient#downloadContent} contract makes the
+     * caller responsible for deleting what it gets back, and the shared pipeline does exactly that
+     * after extraction. Returning the source path would therefore delete the very document just
+     * indexed. For a repository-backed source the distinction is invisible because the download is
+     * always a copy; here the source is a local file, so the copy has to be explicit.</p>
+     */
     @Override
     public Resource downloadContent(String nodeId, String fileName) {
-        return new FileSystemResource(Path.of(nodeId));
+        Path source = Path.of(nodeId);
+        try {
+            Path temp = Files.createTempFile("filesystem-", "-" + safeSuffix(fileName, source));
+            Files.copy(source, temp, StandardCopyOption.REPLACE_EXISTING);
+            return new FileSystemResource(temp);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to copy file for extraction: " + nodeId, e);
+        }
+    }
+
+    /** A temp-file suffix that keeps the extension, which extractors use to sniff the format. */
+    private static String safeSuffix(String fileName, Path source) {
+        String name = (fileName == null || fileName.isBlank())
+                ? String.valueOf(source.getFileName())
+                : fileName;
+        // Separators become underscores and dot runs collapse, so nothing in a caller-supplied name
+        // can walk out of the temp directory or produce a hidden file.
+        String sanitised = name.replaceAll("[^A-Za-z0-9._-]", "_").replaceAll("\\.{2,}", "_");
+        return sanitised.isBlank() ? "content" : sanitised;
     }
 
     @Override
