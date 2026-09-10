@@ -89,6 +89,14 @@
             <artifactId>tika-core</artifactId>
             <version>${tika.version}</version>
         </dependency>
+
+        <!-- Micrometer for the ingest metrics (#131). Optional: every application that uses core also
+             carries spring-boot-starter-actuator, and one that did not would simply register nothing. -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+            <optional>true</optional>
+        </dependency>
         <dependency>
             <groupId>org.apache.tika</groupId>
             <artifactId>tika-parsers-standard-package</artifactId>

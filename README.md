@@ -956,6 +956,27 @@ curl http://localhost:9091/api/rag/health -u admin:admin
 curl http://localhost:9091/actuator/metrics -u admin:admin
 ```
 
+#### Ingest Metrics
+
+Every ingester publishes how much re-embedding the content fingerprint avoided, tagged with the source
+type. Embedding is the pipeline's bottleneck, so this is the number that says what the fingerprint is
+worth, and a value that stops growing is the signal that something started perturbing the fingerprint
+inputs.
+
+| Metric | Meaning |
+|---|---|
+| `contentlake.ingest.content.shortcircuits` | Documents whose chunking and embedding were skipped because the content had not changed |
+| `contentlake.ingest.content.reprocesses` | Documents that were chunked and embedded |
+
+```bash
+curl http://localhost:9092/actuator/metrics/contentlake.ingest.content.shortcircuits -u admin:admin
+```
+
+Both are per-process and start at zero on restart, as any counter does. Expect the live ingesters to
+dominate the short-circuit count: a batch sync skips content entirely for an unchanged
+`source_modifiedAt` before the fingerprint is reached, so most batch passes never get as far as the short
+circuit.
+
 ### Live Ingester (port 9092)
 
 The live ingester consumes Alfresco Event2 messages from ActiveMQ using Alfresco Java SDK handler interfaces such as `OnNodeUpdatedEventHandler` and `OnPermissionUpdatedEventHandler`.
