@@ -1240,7 +1240,25 @@ class HybridSearchServiceTest {
         void anIdentifierWithInternalPunctuationFires() {
             assertThat(identifiersIn("CHG-105402")).containsExactly("chg-105402");
             assertThat(identifiersIn("AST-3121904")).containsExactly("ast-3121904");
-            assertThat(identifiersIn("nomic_embed.v1")).containsExactly("nomic_embed.v1");
+            assertThat(identifiersIn("v1.4-beta2")).containsExactly("v1.4-beta2");
+        }
+
+        /**
+         * The classifier accepts exactly what the chunk filter can express (#129). {@code _} is a
+         * single-character wildcard in HXQL {@code LIKE}, so {@code sanitizeLikeTerm} strips it: a token
+         * carrying one reaches hxpr as a different token and matches nothing, which would make the pass
+         * a silent no-op rather than an honest miss.
+         */
+        @Test
+        void anUnderscoreBearingTokenDoesNotFire() {
+            assertThat(identifiersIn("nomic_embed.v1")).isEmpty();
+            assertThat(identifiersIn("CHG_105402")).isEmpty();
+        }
+
+        /** The reason the classifier rejects it: the term the filter would carry is not the token. */
+        @Test
+        void theChunkFilterCannotExpressAnUnderscore() {
+            assertThat(HybridSearchService.buildChunkFts("nomic_embed.v1")).isEqualTo("nomicembed.v1");
         }
 
         @Test
@@ -1367,6 +1385,23 @@ class HybridSearchServiceTest {
 
             HybridSearchResponse response = svc.search(
                     HybridSearchRequest.builder().query("Which change was reversed?").build());
+
+            verify(hxprService, never()).vectorSearch(any(), any(), any(), any(), anyInt());
+            assertThat(response.getQueryVariants()).isNull();
+        }
+
+        /**
+         * End to end for #129: a query naming an underscore-bearing token runs the original variant
+         * only. Before, it added a restricted pass whose filter had the underscore stripped, so the pass
+         * matched nothing and the feature quietly did not apply to that class of identifier.
+         */
+        @Test
+        void anUnderscoreBearingTokenAddsNoPass() {
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+
+            HybridSearchResponse response = svc.search(
+                    HybridSearchRequest.builder().query("where is nomic_embed.v1 configured").build());
 
             verify(hxprService, never()).vectorSearch(any(), any(), any(), any(), anyInt());
             assertThat(response.getQueryVariants()).isNull();

@@ -351,11 +351,17 @@ public class HybridSearchService {
      * digits, and made only of characters an identifier can contain.
      *
      * <p>Requiring both a letter and a digit is what separates an identifier from a word and from a
-     * number. Internal {@code -}, {@code _} and {@code .} are kept, deliberately: real identifiers carry
-     * them ({@code CHG-105402}, {@code AST-3121904}), so a rule that rejected any punctuation would
-     * reject the very tokens this exists for, and {@link #sanitizeLikeTerm} already preserves internal
-     * hyphens for the same reason. Sentence punctuation is trimmed from the ends only, so a trailing
-     * question mark does not stop a token qualifying while an internal one still disqualifies it.</p>
+     * number. Internal {@code -} and {@code .} are kept, deliberately: real identifiers carry them
+     * ({@code CHG-105402}, {@code AST-3121904}), so a rule that rejected any punctuation would reject
+     * the very tokens this exists for, and {@link #sanitizeLikeTerm} preserves both for the same reason.
+     * Sentence punctuation is trimmed from the ends only, so a trailing question mark does not stop a
+     * token qualifying while an internal one still disqualifies it.</p>
+     *
+     * <p>{@code _} is <em>not</em> accepted, even though it occurs in real identifiers, because it is a
+     * single-character wildcard in HXQL {@code LIKE} and {@link #sanitizeLikeTerm} therefore strips it:
+     * the chunk restriction this pass is built on cannot express the token, so accepting it here would
+     * produce a pass that silently matches nothing (#129). What the classifier accepts is exactly what
+     * the query path can express.</p>
      */
     static List<String> identifierTerms(String queryText,
                                         RagProperties.RetrievalProperties.VerbatimIdentifierProperties config) {
@@ -372,7 +378,11 @@ public class HybridSearchService {
                 .toList();
     }
 
-    /** Mixes letters and digits, and carries nothing an identifier could not. */
+    /**
+     * Mixes letters and digits, and carries nothing an identifier could not — where "could not" means
+     * both "is not identifier punctuation" and "the chunk filter cannot express it", so {@code _} is
+     * rejected here because {@link #sanitizeLikeTerm} strips it.
+     */
     private static boolean looksLikeIdentifier(String term) {
         boolean letter = false;
         boolean digit = false;
@@ -382,7 +392,7 @@ public class HybridSearchService {
                 letter = true;
             } else if (Character.isDigit(c)) {
                 digit = true;
-            } else if (c != '-' && c != '_' && c != '.') {
+            } else if (c != '-' && c != '.') {
                 return false;
             }
         }
@@ -773,6 +783,10 @@ public class HybridSearchService {
      * containing {@code %} would otherwise match every document. Punctuation is trimmed from the
      * ends only, so a sentinel identifier such as {@code CHG-105402} keeps its hyphen and stays
      * matchable as one term, which is the whole point of the keyword leg.</p>
+     *
+     * <p>Stripping {@code _} means a token containing one cannot be matched verbatim, which is why
+     * {@link #looksLikeIdentifier} rejects such tokens rather than routing them into a chunk
+     * restriction that cannot match (#129).</p>
      */
     private static String sanitizeLikeTerm(String term) {
         String stripped = term.replace("\\", "")
