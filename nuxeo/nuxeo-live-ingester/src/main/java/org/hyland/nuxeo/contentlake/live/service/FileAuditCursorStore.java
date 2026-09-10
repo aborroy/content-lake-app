@@ -2,6 +2,9 @@ package org.hyland.nuxeo.contentlake.live.service;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.hyland.nuxeo.contentlake.live.model.AuditCursor;
 
 import java.io.IOException;
@@ -15,12 +18,29 @@ import java.util.TreeMap;
 
 public class FileAuditCursorStore implements AuditCursorStore {
 
-    private final Path cursorFile;
-    private final ObjectMapper objectMapper;
+    /**
+     * The cursor file's own mapper, owned here rather than injected.
+     *
+     * <p>{@link AuditCursor#lastLogDate()} is an {@link java.time.OffsetDateTime}, which Jackson
+     * serialises only with {@link JavaTimeModule} registered. Taking the mapper from the application
+     * context made that a property of whichever bean happened to be injected: the shared Jackson 2
+     * bean carries no modules, and Jackson's {@code REQUIRE_HANDLERS_FOR_JAVA8_TIMES} turns the gap
+     * into a hard failure, so every cycle with a cursor to save died and the position never advanced.
+     * Owning the mapper makes the format a property of this class, and the tests exercise the same
+     * one production uses.</p>
+     *
+     * <p>Timestamps are written as ISO-8601 strings rather than epoch decimals so the file can be read
+     * by an operator diagnosing where the ingester resumed from.</p>
+     */
+    private static final ObjectMapper OBJECT_MAPPER = JsonMapper.builder()
+            .addModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            .build();
 
-    public FileAuditCursorStore(Path cursorFile, ObjectMapper objectMapper) {
+    private final Path cursorFile;
+
+    public FileAuditCursorStore(Path cursorFile) {
         this.cursorFile = cursorFile;
-        this.objectMapper = objectMapper.copy();
     }
 
     @Override
@@ -41,7 +61,7 @@ public class FileAuditCursorStore implements AuditCursorStore {
             return CursorState.empty();
         }
         try {
-            CursorState state = objectMapper.readValue(cursorFile.toFile(), CursorState.class);
+            CursorState state = OBJECT_MAPPER.readValue(cursorFile.toFile(), CursorState.class);
             return state != null ? state : CursorState.empty();
         } catch (IOException e) {
             throw new IllegalStateException("Failed to read audit cursor file " + cursorFile, e);
@@ -55,7 +75,7 @@ public class FileAuditCursorStore implements AuditCursorStore {
                 Files.createDirectories(parent);
             }
             Path tempFile = cursorFile.resolveSibling(cursorFile.getFileName() + ".tmp");
-            objectMapper.writeValue(tempFile.toFile(), new CursorState(new TreeMap<>(state.cursors())));
+            OBJECT_MAPPER.writeValue(tempFile.toFile(), new CursorState(new TreeMap<>(state.cursors())));
             try {
                 Files.move(tempFile, cursorFile,
                         StandardCopyOption.REPLACE_EXISTING,

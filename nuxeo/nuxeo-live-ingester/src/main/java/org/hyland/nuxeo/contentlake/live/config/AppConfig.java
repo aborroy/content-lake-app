@@ -1,6 +1,5 @@
 package org.hyland.nuxeo.contentlake.live.config;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
@@ -148,12 +147,8 @@ public class AppConfig {
     }
 
     @Bean
-    public AuditCursorStore auditCursorStore(NuxeoLiveProperties props,
-                                             ObjectMapper objectMapper) {
-        return new FileAuditCursorStore(
-                Path.of(props.getAudit().getCursorFile()),
-                objectMapper
-        );
+    public AuditCursorStore auditCursorStore(NuxeoLiveProperties props) {
+        return new FileAuditCursorStore(Path.of(props.getAudit().getCursorFile()));
     }
 
     @Bean

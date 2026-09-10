@@ -255,7 +255,7 @@ class NuxeoAuditListenerIntegrationTest {
         Clock clock = Clock.systemUTC();
 
         NuxeoAuditClient auditClient = new NuxeoAuditClient(NUXEO_BASE_URL, authentication);
-        FileAuditCursorStore cursorStore = new FileAuditCursorStore(cursorFile, objectMapper);
+        FileAuditCursorStore cursorStore = new FileAuditCursorStore(cursorFile);
         NuxeoClient nuxeoClient = new NuxeoClient(NUXEO_BASE_URL, SOURCE_ID, "file:content", authentication);
         NuxeoScopeResolver scopeResolver = new NuxeoScopeResolver(
                 includedRoots,
