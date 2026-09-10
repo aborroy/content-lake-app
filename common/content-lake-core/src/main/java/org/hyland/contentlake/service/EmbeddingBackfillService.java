@@ -40,7 +40,14 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Resuming re-scans from the start and skips any document that already carries a child for the
  * target type. That makes the job idempotent, so an interrupted run, a restart and a deliberate pause
  * all recover the same way, with no cursor to persist and no risk of a stored offset pointing into a
- * corpus that has since changed.</p>
+ * corpus that has since changed. Because the pass starts over, so do the counters -- see
+ * {@link Progress}.</p>
+ *
+ * <h3>Rate</h3>
+ * <p>{@code docsPerMinute} bounds the documents this job re-embeds per minute, so an operator can leave
+ * the ingesters enough embedding throughput to keep up. Two things are deliberately outside it: a
+ * document skipped because it already carries the target type, which consumes no capacity, and the
+ * index wait, which is paid once per pass rather than once per document.</p>
  */
 @Slf4j
 public class EmbeddingBackfillService {
@@ -74,7 +81,15 @@ public class EmbeddingBackfillService {
     }
 
     /**
-     * What the job has done so far.
+     * What the job has done so far, in the <em>current scan pass</em>.
+     *
+     * <p>A resume re-scans the corpus from the start, so the counters are reset when it does and describe
+     * that pass alone. Reporting them cumulatively made {@code scanned} count the documents visited before
+     * the pause twice, so a completed run over 41 documents reported 44 (#127); it also left the counters
+     * unable to reconcile, since a document backfilled in an earlier pass is counted as already present in
+     * this one. Per-pass, {@code scanned} equals the corpus size and
+     * {@code scanned = backfilled + skippedAlreadyPresent + skippedNoText + skippedNotIngested + failed}.
+     * The numbers from the pass being resumed are logged before they are cleared.</p>
      *
      * @param state                 lifecycle position
      * @param targetType            the embedding type being written
@@ -83,6 +98,8 @@ public class EmbeddingBackfillService {
      * @param skippedAlreadyPresent documents that already carried the target type
      * @param skippedNoText         documents with no extracted-text mirror, which need a full re-sync
      *                              rather than a backfill
+     * @param skippedNotIngested    rows that are not ingested source documents, so there is nothing to
+     *                              re-embed
      * @param failed                documents whose re-embedding threw
      * @param error                 why the scan stopped, when it did
      */
@@ -92,8 +109,36 @@ public class EmbeddingBackfillService {
                            int backfilled,
                            int skippedAlreadyPresent,
                            int skippedNoText,
+                           int skippedNotIngested,
                            int failed,
                            String error) {
+    }
+
+    /**
+     * What visiting one document did.
+     *
+     * <p>{@code consumesThroughput} is what the rate limit applies to. Sleeping after a skip spends the
+     * whole budget on documents that used no embedding capacity, so a resume over a mostly-complete
+     * corpus paid {@code 60000/docsPerMinute} per no-op (#127). A failure counts as consuming: it may
+     * have thrown after the embedding call, and pausing between failures is the right behaviour anyway.</p>
+     */
+    private enum Outcome {
+
+        BACKFILLED(true),
+        FAILED(true),
+        SKIPPED_ALREADY_PRESENT(false),
+        SKIPPED_NO_TEXT(false),
+        SKIPPED_NOT_INGESTED(false);
+
+        private final boolean consumesThroughput;
+
+        Outcome(boolean consumesThroughput) {
+            this.consumesThroughput = consumesThroughput;
+        }
+
+        boolean consumesThroughput() {
+            return consumesThroughput;
+        }
     }
 
     /** Pauses between documents to honour the configured rate. Injected so tests need no real delay. */
@@ -115,6 +160,7 @@ public class EmbeddingBackfillService {
     private final AtomicInteger backfilled = new AtomicInteger();
     private final AtomicInteger skippedAlreadyPresent = new AtomicInteger();
     private final AtomicInteger skippedNoText = new AtomicInteger();
+    private final AtomicInteger skippedNotIngested = new AtomicInteger();
     private final AtomicInteger failed = new AtomicInteger();
 
     private volatile State state = State.IDLE;
@@ -160,12 +206,6 @@ public class EmbeddingBackfillService {
         if (state == State.RUNNING) {
             throw new IllegalStateException("A backfill is already running");
         }
-        scanned.set(0);
-        backfilled.set(0);
-        skippedAlreadyPresent.set(0);
-        skippedNoText.set(0);
-        failed.set(0);
-        error = null;
         return launch(docsPerMinute);
     }
 
@@ -182,10 +222,12 @@ public class EmbeddingBackfillService {
     }
 
     /**
-     * Continues a paused run, keeping its counters.
+     * Continues a paused run at the configured rate.
      *
      * <p>The scan restarts from the beginning: documents already carrying the target type are skipped,
-     * which is cheaper than persisting a cursor and correct even if the corpus changed while paused.</p>
+     * which is cheaper than persisting a cursor and correct even if the corpus changed while paused. The
+     * counters restart with it, because they count what this pass visited and a re-scanned document would
+     * otherwise be counted twice ({@link Progress}); the paused pass's numbers are logged first.</p>
      *
      * @throws IllegalStateException when there is no paused run to continue
      */
@@ -193,10 +235,18 @@ public class EmbeddingBackfillService {
         if (state != State.PAUSED) {
             throw new IllegalStateException("No paused backfill to resume (state is " + state + ")");
         }
+        log.info("Resuming the embedding backfill; the paused pass ended at {}", status());
         return launch(docsPerMinute);
     }
 
     private Progress launch(int ratePerMinute) {
+        scanned.set(0);
+        backfilled.set(0);
+        skippedAlreadyPresent.set(0);
+        skippedNoText.set(0);
+        skippedNotIngested.set(0);
+        failed.set(0);
+        error = null;
         this.docsPerMinute = ratePerMinute;
         pauseRequested.set(false);
         state = State.RUNNING;
@@ -208,7 +258,8 @@ public class EmbeddingBackfillService {
     /** What the job has done so far. Safe to call at any time. */
     public Progress status() {
         return new Progress(state, targetType(), scanned.get(), backfilled.get(),
-                skippedAlreadyPresent.get(), skippedNoText.get(), failed.get(), error);
+                skippedAlreadyPresent.get(), skippedNoText.get(), skippedNotIngested.get(),
+                failed.get(), error);
     }
 
     // ------------------------------------------------------------------
@@ -221,7 +272,9 @@ public class EmbeddingBackfillService {
         log.info("Embedding backfill started for type '{}' at {} docs/minute", target,
                 docsPerMinute > 0 ? docsPerMinute : "unlimited");
 
-        // Once, not per document: the per-call wait is up to 30 seconds and would dominate the run.
+        // Once, not per document: the per-call wait is up to 30 seconds and would dominate the run. Each
+        // document then lists its children without waiting and hands that list to the write, which is
+        // what keeps the wait out of the per-document path entirely (#127).
         hxprService.awaitIndex("embedding backfill");
 
         try {
@@ -240,8 +293,10 @@ public class EmbeddingBackfillService {
                         log.info("Embedding backfill paused after {} documents", scanned.get());
                         return;
                     }
-                    processDocument(document, target);
-                    if (delayMillis > 0) {
+                    Outcome outcome = processDocument(document, target);
+                    // Only work that spent embedding capacity is rate-limited. Throttling skips made a
+                    // resume over a mostly-done corpus pay the full delay per no-op (#127).
+                    if (delayMillis > 0 && outcome.consumesThroughput()) {
                         sleeper.sleep(delayMillis);
                     }
                 }
@@ -266,20 +321,25 @@ public class EmbeddingBackfillService {
         }
     }
 
-    private void processDocument(HxprDocument document, String targetType) {
+    private Outcome processDocument(HxprDocument document, String targetType) {
         scanned.incrementAndGet();
         String documentId = document.getSysId();
         if (documentId == null || document.getCinId() == null) {
             // Not an ingested source document; SysEmbeddings children carry no cin_id either.
-            return;
+            skippedNotIngested.incrementAndGet();
+            return Outcome.SKIPPED_NOT_INGESTED;
         }
 
         try {
-            boolean alreadyPresent = hxprService.listEmbeddingChildren(documentId, false).stream()
+            // Listed once, without waiting for the index (the job waits once before it starts), and
+            // handed to the write below so it does not list them again and pay the wait per document.
+            List<HxprService.EmbeddingChild> children =
+                    hxprService.listEmbeddingChildren(documentId, false);
+            boolean alreadyPresent = children.stream()
                     .anyMatch(child -> targetType.equals(child.embeddingType()));
             if (alreadyPresent) {
                 skippedAlreadyPresent.incrementAndGet();
-                return;
+                return Outcome.SKIPPED_ALREADY_PRESENT;
             }
 
             String text = mirrorText(document);
@@ -287,24 +347,26 @@ public class EmbeddingBackfillService {
                 skippedNoText.incrementAndGet();
                 log.debug("Backfill skipped document {}: no extracted-text mirror, needs a full re-sync",
                         documentId);
-                return;
+                return Outcome.SKIPPED_NO_TEXT;
             }
 
             List<Chunk> chunks = chunkingService.chunk(text, document.getCinId(), "text/plain");
             if (chunks.isEmpty()) {
                 skippedNoText.incrementAndGet();
-                return;
+                return Outcome.SKIPPED_NO_TEXT;
             }
 
             List<EmbeddingService.ChunkWithEmbedding> embedded =
                     embeddingService.embedChunks(chunks, documentContext(document));
-            hxprService.updateEmbeddings(documentId, toHxprEmbeddings(embedded, targetType));
+            hxprService.updateEmbeddings(documentId, toHxprEmbeddings(embedded, targetType), children);
             backfilled.incrementAndGet();
             log.debug("Backfilled document {} with {} embeddings under type '{}'",
                     documentId, embedded.size(), targetType);
+            return Outcome.BACKFILLED;
         } catch (Exception e) {
             failed.incrementAndGet();
             log.warn("Backfill failed for document {}: {}", documentId, e.getMessage());
+            return Outcome.FAILED;
         }
     }
 

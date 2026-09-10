@@ -227,10 +227,33 @@ public class HxprService {
      * @param embeddings embeddings to store
      */
     public void updateEmbeddings(String documentId, List<HxprEmbedding> embeddings) {
+        updateEmbeddings(documentId, embeddings, null);
+    }
+
+    /**
+     * Stores embeddings, reusing an embedding-child list the caller already holds.
+     *
+     * <p>The replace step has to know the document's existing children, and looking them up costs an
+     * index wait of up to {@link #INDEX_WAIT_TIMEOUT_SECONDS} seconds per call. A caller that walks the
+     * whole corpus waits for the index once and lists children without waiting, so paying the wait again
+     * here made a configured rate limit meaningless: the wait, not the limit, set the pace (#127). Such a
+     * caller passes the list it already has and no second lookup happens.</p>
+     *
+     * <p>The list is trusted as given. That is safe for the caller it exists for, whose list was read
+     * after a job-level index wait: if it is nonetheless stale for the target type, the child create that
+     * follows enforces {@code sys_name} uniqueness and fails with a 409, so the document is reported as
+     * failed rather than ending up with two children.</p>
+     *
+     * @param knownChildren the document's embedding children, or {@code null} to look them up (which
+     *                      waits for the index first)
+     */
+    public void updateEmbeddings(String documentId,
+                                 List<HxprEmbedding> embeddings,
+                                 List<EmbeddingChild> knownChildren) {
         log.info("Updating {} embeddings for document: {}", embeddings.size(), documentId);
 
         // Always use Parquet storage for all embeddings
-        updateEmbeddingsInBatches(documentId, embeddings);
+        updateEmbeddingsInBatches(documentId, embeddings, knownChildren);
 
         int vectorDim = embeddings.isEmpty() || embeddings.get(0).getVector() == null
                 ? 0
@@ -249,8 +272,12 @@ public class HxprService {
      *
      * @param documentId hxpr document identifier
      * @param embeddings complete list of embeddings to store
+     * @param knownChildren the document's embedding children when the caller already has them,
+     *                      {@code null} to look them up
      */
-    private void updateEmbeddingsInBatches(String documentId, List<HxprEmbedding> embeddings) {
+    private void updateEmbeddingsInBatches(String documentId,
+                                           List<HxprEmbedding> embeddings,
+                                           List<EmbeddingChild> knownChildren) {
         log.info("Document {} has {} embeddings. Storing as Parquet file in child document (embedding type: {})",
                 documentId, embeddings.size(), embeddingType);
 
@@ -262,7 +289,7 @@ public class HxprService {
             ensureEmbeddingParentMixin(documentId);
 
             // 3. Delete old embedding child if exists
-            deleteEmbeddingChildren(documentId, embeddingType);
+            deleteEmbeddingChildren(documentId, embeddingType, knownChildren);
 
             // 4. Create child document with Parquet file
             createEmbeddingChild(documentId, embeddingType, parquetContent);
@@ -401,7 +428,7 @@ public class HxprService {
      *         before creating a new child, otherwise duplicates would survive.
      */
     private void deleteEmbeddingChildren(String documentId) {
-        deleteEmbeddingChildren(documentId, null);
+        deleteEmbeddingChildren(documentId, null, null);
     }
 
     /**
@@ -429,11 +456,17 @@ public class HxprService {
      * type-agnostic ({@link #deleteEmbeddings}), rather than by guessing from a name which type a child
      * belongs to. Guessing is what lost data.</p>
      *
+     * <p>{@code knownChildren} lets a caller that has already listed the children skip the lookup, and
+     * with it the per-call index wait (#127). A null value lists them here, waiting for the index first.</p>
+     *
      * @throws RuntimeException if the lookup or any delete fails; the caller must abort
      *         before creating a new child, otherwise duplicates would survive.
      */
-    private void deleteEmbeddingChildren(String documentId, String onlyType) {
-        for (EmbeddingChild child : listEmbeddingChildren(documentId)) {
+    private void deleteEmbeddingChildren(String documentId, String onlyType,
+                                         List<EmbeddingChild> knownChildren) {
+        List<EmbeddingChild> children =
+                knownChildren != null ? knownChildren : listEmbeddingChildren(documentId);
+        for (EmbeddingChild child : children) {
             if (!isDeletable(child.embeddingType(), onlyType)) {
                 continue;
             }

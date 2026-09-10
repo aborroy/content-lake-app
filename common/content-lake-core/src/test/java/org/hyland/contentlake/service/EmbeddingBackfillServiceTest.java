@@ -132,8 +132,8 @@ class EmbeddingBackfillServiceTest {
         assertThat(progress.state()).isEqualTo(EmbeddingBackfillService.State.COMPLETED);
         assertThat(progress.scanned()).isEqualTo(2);
         assertThat(progress.backfilled()).isEqualTo(2);
-        verify(hxprService).updateEmbeddings(eq("hxpr-1"), any());
-        verify(hxprService).updateEmbeddings(eq("hxpr-2"), any());
+        verify(hxprService).updateEmbeddings(eq("hxpr-1"), any(), any());
+        verify(hxprService).updateEmbeddings(eq("hxpr-2"), any(), any());
     }
 
     /** The rows carry the target type, which is what an embeddings query matches on. */
@@ -146,7 +146,7 @@ class EmbeddingBackfillServiceTest {
         service.start(0);
 
         ArgumentCaptor<List<HxprEmbedding>> captor = ArgumentCaptor.captor();
-        verify(hxprService).updateEmbeddings(eq("hxpr-1"), captor.capture());
+        verify(hxprService).updateEmbeddings(eq("hxpr-1"), captor.capture(), any());
         assertThat(captor.getValue()).allSatisfy(embedding ->
                 assertThat(embedding.getType()).isEqualTo(TARGET_TYPE));
     }
@@ -200,7 +200,7 @@ class EmbeddingBackfillServiceTest {
 
         assertThat(progress.skippedAlreadyPresent()).isEqualTo(1);
         assertThat(progress.backfilled()).isZero();
-        verify(hxprService, never()).updateEmbeddings(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any(), any());
     }
 
     @Test
@@ -223,7 +223,7 @@ class EmbeddingBackfillServiceTest {
 
         assertThat(progress.skippedNoText()).isEqualTo(2);
         assertThat(progress.backfilled()).isZero();
-        verify(hxprService, never()).updateEmbeddings(any(), any());
+        verify(hxprService, never()).updateEmbeddings(any(), any(), any());
     }
 
     /** The fingerprint is deliberately left stale, so the next content sync re-embeds properly. */
@@ -245,7 +245,7 @@ class EmbeddingBackfillServiceTest {
         hasNoEmbeddingChildren();
         embedsSuccessfully();
         org.mockito.Mockito.doThrow(new RuntimeException("hxpr said 500"))
-                .when(hxprService).updateEmbeddings(eq("hxpr-1"), any());
+                .when(hxprService).updateEmbeddings(eq("hxpr-1"), any(), any());
 
         EmbeddingBackfillService.Progress progress = service.start(0);
 
@@ -293,6 +293,31 @@ class EmbeddingBackfillServiceTest {
     }
 
     /**
+     * A skip consumes no embedding capacity, so it is not what the rate limit is for. Throttling skips
+     * made a resume over a mostly-complete corpus pay the full per-document delay for every document it
+     * had already done (#127).
+     */
+    @Test
+    void skippedDocumentsAreNotRateLimited() {
+        corpus(document("hxpr-1", "node-1", "first body"),
+                document("hxpr-2", "node-2", "second body"),
+                document("hxpr-3", "node-3", null));
+        when(hxprService.listEmbeddingChildren("hxpr-1", false)).thenReturn(List.of(
+                new HxprService.EmbeddingChild("child-1", "_e_" + TARGET_TYPE, TARGET_TYPE)));
+        when(hxprService.listEmbeddingChildren("hxpr-2", false)).thenReturn(List.of());
+        when(hxprService.listEmbeddingChildren("hxpr-3", false)).thenReturn(List.of());
+        embedsSuccessfully();
+
+        EmbeddingBackfillService.Progress progress = service.start(60);
+
+        // hxpr-2 is the only document that spent an embedding call.
+        assertThat(sleeps).containsExactly(1000L);
+        assertThat(progress.skippedAlreadyPresent()).isEqualTo(1);
+        assertThat(progress.skippedNoText()).isEqualTo(1);
+        assertThat(progress.backfilled()).isEqualTo(1);
+    }
+
+    /**
      * Pause takes effect between documents and does not hold a thread. Resume re-scans and skips what
      * is already done, which is why no cursor has to be persisted.
      */
@@ -310,14 +335,14 @@ class EmbeddingBackfillServiceTest {
         org.mockito.Mockito.doAnswer(invocation -> {
             firstChildren.add(new HxprService.EmbeddingChild("child-1", "_e_" + TARGET_TYPE, TARGET_TYPE));
             return null;
-        }).when(hxprService).updateEmbeddings(eq("hxpr-1"), any());
+        }).when(hxprService).updateEmbeddings(eq("hxpr-1"), any(), any());
 
         onSleep = () -> service.pause();
         EmbeddingBackfillService.Progress paused = service.start(60);
 
         assertThat(paused.state()).isEqualTo(EmbeddingBackfillService.State.PAUSED);
         assertThat(paused.backfilled()).isEqualTo(1);
-        verify(hxprService, never()).updateEmbeddings(eq("hxpr-2"), any());
+        verify(hxprService, never()).updateEmbeddings(eq("hxpr-2"), any(), any());
 
         onSleep = null;
         EmbeddingBackfillService.Progress resumed = service.resume();
@@ -326,8 +351,53 @@ class EmbeddingBackfillServiceTest {
         assertThat(resumed.skippedAlreadyPresent())
                 .as("the resumed scan re-visits hxpr-1 and skips it")
                 .isEqualTo(1);
-        assertThat(resumed.backfilled()).isEqualTo(2);
-        verify(hxprService).updateEmbeddings(eq("hxpr-2"), any());
+        // Per-pass counters: the resumed pass backfilled hxpr-2 only, and hxpr-1 shows up as skipped
+        // rather than being counted a second time.
+        assertThat(resumed.backfilled()).isEqualTo(1);
+        assertThat(resumed.scanned())
+                .as("a resumed pass reports the corpus size, not the corpus plus what it had already done")
+                .isEqualTo(2);
+        verify(hxprService).updateEmbeddings(eq("hxpr-2"), any(), any());
+    }
+
+    /**
+     * The counters have to add up, or {@code status} cannot be read as progress. Before #127 a resume
+     * re-scanned from page 0 without resetting {@code scanned}, so a completed run over 41 documents
+     * reported 44, which reads like a bug in the corpus rather than in the counter.
+     */
+    @Test
+    void aResumedRunsCountersReconcileWithTheCorpusSize() {
+        HxprDocument first = document("hxpr-1", "node-1", "first body");
+        HxprDocument second = document("hxpr-2", "node-2", "second body");
+        HxprDocument noMirror = document("hxpr-3", "node-3", null);
+        HxprDocument stray = new HxprDocument();
+        stray.setSysId("hxpr-stray");
+        corpus(first, second, noMirror, stray);
+        embedsSuccessfully();
+
+        List<HxprService.EmbeddingChild> firstChildren = new ArrayList<>();
+        when(hxprService.listEmbeddingChildren("hxpr-1", false)).thenReturn(firstChildren);
+        when(hxprService.listEmbeddingChildren("hxpr-2", false)).thenReturn(List.of());
+        when(hxprService.listEmbeddingChildren("hxpr-3", false)).thenReturn(List.of());
+        org.mockito.Mockito.doAnswer(invocation -> {
+            firstChildren.add(new HxprService.EmbeddingChild("child-1", "_e_" + TARGET_TYPE, TARGET_TYPE));
+            return null;
+        }).when(hxprService).updateEmbeddings(eq("hxpr-1"), any(), any());
+
+        onSleep = () -> service.pause();
+        service.start(60);
+        onSleep = null;
+
+        EmbeddingBackfillService.Progress resumed = service.resume();
+
+        assertThat(resumed.state()).isEqualTo(EmbeddingBackfillService.State.COMPLETED);
+        assertThat(resumed.scanned()).isEqualTo(4);
+        assertThat(resumed.backfilled()
+                + resumed.skippedAlreadyPresent()
+                + resumed.skippedNoText()
+                + resumed.skippedNotIngested()
+                + resumed.failed())
+                .isEqualTo(resumed.scanned());
     }
 
     @Test
@@ -361,6 +431,27 @@ class EmbeddingBackfillServiceTest {
         verify(hxprService, never()).listEmbeddingChildren(anyString(), eq(true));
     }
 
+    /**
+     * The write is handed the child list the job already fetched. Without that, the write's own replace
+     * step listed the children again through the <em>waiting</em> overload, so the up-to-30-second index
+     * wait was paid on exactly the documents that did work and {@code docsPerMinute} meant nothing
+     * whenever the index was behind (#127).
+     */
+    @Test
+    void theWriteReusesTheChildListTheScanAlreadyFetched() {
+        corpus(document("hxpr-1", "node-1", "first body"));
+        List<HxprService.EmbeddingChild> children = List.of(
+                new HxprService.EmbeddingChild("child-1", "_e_" + PREVIOUS_TYPE, PREVIOUS_TYPE));
+        when(hxprService.listEmbeddingChildren("hxpr-1", false)).thenReturn(children);
+        embedsSuccessfully();
+
+        service.start(0);
+
+        ArgumentCaptor<List<HxprService.EmbeddingChild>> captor = ArgumentCaptor.captor();
+        verify(hxprService).updateEmbeddings(eq("hxpr-1"), any(), captor.capture());
+        assertThat(captor.getValue()).isEqualTo(children);
+    }
+
     @Test
     void startingASecondRunWhileOneIsRunningIsRejected() {
         // The same-thread executor means start() returns only once the run is over, so a second start
@@ -384,6 +475,8 @@ class EmbeddingBackfillServiceTest {
         EmbeddingBackfillService.Progress progress = service.start(0);
 
         assertThat(progress.scanned()).isEqualTo(1);
+        // Counted, not silently dropped: an uncounted skip is what stopped the counters reconciling.
+        assertThat(progress.skippedNotIngested()).isEqualTo(1);
         assertThat(progress.backfilled()).isZero();
         verify(hxprService, never()).listEmbeddingChildren(anyString(), anyBoolean());
     }
