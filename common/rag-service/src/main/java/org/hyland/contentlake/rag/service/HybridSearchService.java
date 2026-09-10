@@ -208,10 +208,12 @@ public class HybridSearchService {
                 : properties.getDefaultMinScore();
 
         // --- Expand into query variants (no-op unless multi-query, HyDE or decomposition is on) ---
-        List<QueryVariant> variants = expand(request.getQuery());
-        List<QueryVariant> passes = variants != null
-                ? variants
-                : List.of(QueryVariant.original(request.getQuery()));
+        List<QueryVariant> expanded = expand(request.getQuery());
+        // The verbatim-identifier pass (#122) is appended on top, and is itself a no-op unless the flag
+        // is on and the query names an identifier.
+        final List<QueryVariant> passes = withVerbatimPass(
+                expanded != null ? expanded : List.of(QueryVariant.original(request.getQuery())),
+                request);
 
         // --- Retrieve and leg-fuse once per variant ---
         List<List<FusedResult>> perVariant = new ArrayList<>(passes.size());
@@ -258,7 +260,7 @@ public class HybridSearchService {
                 .resultCount(hits.size())
                 .vectorCandidates(vectorCandidates)
                 .keywordCandidates(keywordCandidates)
-                .queryVariants(variants != null ? passes.size() : null)
+                .queryVariants(passes.size() > 1 ? passes.size() : null)
                 .searchTimeMs(searchTimeMs)
                 .results(hits)
                 .build();
@@ -277,6 +279,118 @@ public class HybridSearchService {
     /** Runs {@code work} inside a named tracing span when observation is wired; otherwise inline. */
     private <T> T traced(String name, java.util.function.Supplier<T> work) {
         return observations != null ? observations.observe(name, work) : work.get();
+    }
+
+    // ---------------------------------------------------------------
+    // Verbatim matching for identifier-like queries (#122)
+    // ---------------------------------------------------------------
+
+    /**
+     * Appends the verbatim pass when the query names an identifier, and returns {@code passes}
+     * untouched otherwise.
+     *
+     * <p>Expressed as an extra query variant rather than as a new fusion stage, which is what buys the
+     * "never empty the result set" guarantee structurally instead of by a special case. The original
+     * variant always runs; if the verbatim pass matches nothing it contributes an empty result set,
+     * cross-variant fusion sees a single contributor, and the ranking is exactly the one the search
+     * would have produced with the flag off. Scores stay on the leg-fusion scale and {@code minScore}
+     * stays applied per variant, both unchanged.</p>
+     *
+     * <p>The chunk-level restriction is expressed through {@code VectorQuery.chunkFTS} rather than by
+     * post-filtering. That is the only server-side lever available: HXQL {@code LIKE} fails on keyword
+     * fields, and a {@code sys_fulltext} predicate selects <em>documents</em>, so neither can say
+     * "chunks containing this token".</p>
+     */
+    private List<QueryVariant> withVerbatimPass(List<QueryVariant> passes, HybridSearchRequest request) {
+        RagProperties.RetrievalProperties.VerbatimIdentifierProperties config =
+                ragProperties.getRetrieval().getVerbatimIdentifier();
+        if (!config.isEnabled()) {
+            return passes;
+        }
+
+        List<String> identifiers = identifierTerms(request.getQuery(), config);
+        if (identifiers.isEmpty()) {
+            return passes;
+        }
+        if (passes.size() >= ragProperties.getQueryExpansion().getMaxVariants()) {
+            log.debug("Verbatim pass for {} skipped: already at the {} variant ceiling",
+                    identifiers, passes.size());
+            return passes;
+        }
+
+        // The query's own vector, so the extra pass costs a retrieval call and no extra embedding call.
+        List<Double> queryVector = embedQueryCached(request.getQuery(), request.getEmbeddingType());
+        if (queryVector == null || queryVector.isEmpty()) {
+            return passes;
+        }
+
+        log.info("Identifier-like query \"{}\": adding a verbatim pass for {}",
+                request.getQuery(), identifiers);
+        List<QueryVariant> withVerbatim = new ArrayList<>(passes.size() + 1);
+        for (QueryVariant pass : passes) {
+            // Any pass embedding this same text reuses the vector just computed, so adding the verbatim
+            // pass costs one retrieval call and no second embedding call.
+            withVerbatim.add(request.getQuery().equals(pass.vectorText())
+                    ? pass.withVector(queryVector)
+                    : pass);
+        }
+        withVerbatim.add(QueryVariant.verbatim(request.getQuery(), queryVector, identifiers));
+        return List.copyOf(withVerbatim);
+    }
+
+    /**
+     * The identifier-like tokens in a query: at least {@code minLength} characters, mixing letters and
+     * digits, and made only of characters an identifier can contain.
+     *
+     * <p>Requiring both a letter and a digit is what separates an identifier from a word and from a
+     * number. Internal {@code -}, {@code _} and {@code .} are kept, deliberately: real identifiers carry
+     * them ({@code CHG-105402}, {@code AST-3121904}), so a rule that rejected any punctuation would
+     * reject the very tokens this exists for, and {@link #sanitizeLikeTerm} already preserves internal
+     * hyphens for the same reason. Sentence punctuation is trimmed from the ends only, so a trailing
+     * question mark does not stop a token qualifying while an internal one still disqualifies it.</p>
+     */
+    static List<String> identifierTerms(String queryText,
+                                        RagProperties.RetrievalProperties.VerbatimIdentifierProperties config) {
+        if (queryText == null || queryText.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(queryText.split("\\s+"))
+                .map(HybridSearchService::trimEdgePunctuation)
+                .filter(term -> term.length() >= config.getMinLength())
+                .filter(HybridSearchService::looksLikeIdentifier)
+                .map(term -> term.toLowerCase(Locale.ROOT))
+                .distinct()
+                .limit(Math.max(1, config.getMaxTerms()))
+                .toList();
+    }
+
+    /** Mixes letters and digits, and carries nothing an identifier could not. */
+    private static boolean looksLikeIdentifier(String term) {
+        boolean letter = false;
+        boolean digit = false;
+        for (int i = 0; i < term.length(); i++) {
+            char c = term.charAt(i);
+            if (Character.isLetter(c)) {
+                letter = true;
+            } else if (Character.isDigit(c)) {
+                digit = true;
+            } else if (c != '-' && c != '_' && c != '.') {
+                return false;
+            }
+        }
+        return letter && digit;
+    }
+
+    private static String trimEdgePunctuation(String term) {
+        int start = 0;
+        int end = term.length();
+        while (start < end && !Character.isLetterOrDigit(term.charAt(start))) {
+            start++;
+        }
+        while (end > start && !Character.isLetterOrDigit(term.charAt(end - 1))) {
+            end--;
+        }
+        return term.substring(start, end);
     }
 
     /** Expansion is best-effort: a failure here must never fail the search. */
@@ -320,7 +434,10 @@ public class HybridSearchService {
         // #37: when chunk-FTS mode is on, push the keyword terms into the vector call as
         // VectorQuery.chunkFTS so hxpr filters at the chunk level, and skip the separate
         // BM25-rescored keyword leg below. Off by default (behaviour-changing, eval-gated).
-        boolean chunkFtsMode = properties.isChunkFtsEnabled() && variant.hasKeywordLeg();
+        // The verbatim-identifier variant (#122) forces the same mode for itself whatever the global
+        // setting is, because restricting to chunks holding the token is what that variant is for.
+        boolean chunkFtsMode =
+                (properties.isChunkFtsEnabled() || variant.forceChunkFts()) && variant.hasKeywordLeg();
         String chunkFts = chunkFtsMode ? buildChunkFts(variant.keywordText()) : null;
 
         if (vector != null && !vector.isEmpty()) {

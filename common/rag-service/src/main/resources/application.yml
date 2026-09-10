@@ -165,6 +165,15 @@ rag:
     small-to-big:
       enabled: ${RAG_RETRIEVAL_SMALL_TO_BIG_ENABLED:false}
       max-section-chars: ${RAG_RETRIEVAL_SMALL_TO_BIG_MAX_SECTION_CHARS:4000}
+    # Verbatim matching for identifier-like queries (#122). A short alphanumeric identifier embeds
+    # poorly because the token is rare, not because the query is ambiguous, which is why query expansion
+    # does not rescue it. When the query names one, an extra pass restricts the search to chunks holding
+    # the token literally. Off by default until the eval confirms the gain; when it matches nothing the
+    # ranking is the one the search would have produced anyway.
+    verbatim-identifier:
+      enabled: ${RAG_VERBATIM_IDENTIFIER_ENABLED:false}
+      min-length: ${RAG_VERBATIM_IDENTIFIER_MIN_LENGTH:3}
+      max-terms: ${RAG_VERBATIM_IDENTIFIER_MAX_TERMS:2}
   # In-app evaluation smoke endpoint. Off by default; content-lake-eval is the authoritative gate.
   evaluation:
     enabled: ${RAG_EVALUATION_ENABLED:false}

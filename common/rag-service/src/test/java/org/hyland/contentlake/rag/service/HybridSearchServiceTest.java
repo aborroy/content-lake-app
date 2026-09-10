@@ -55,6 +55,11 @@ class HybridSearchServiceTest {
         org.mockito.Mockito.lenient()
                 .when(vocabularyService.resolve(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(inv -> inv.getArgument(0));
+        // Retrieval shaping defaults to the real properties with every flag off, so a search behaves as
+        // it did before #122. The verbatim tests replace this with the flag on.
+        org.mockito.Mockito.lenient()
+                .when(ragProperties.getRetrieval())
+                .thenReturn(new RagProperties.RetrievalProperties());
         ReflectionTestUtils.setField(service, "alfrescoSourceId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
@@ -1186,6 +1191,263 @@ class HybridSearchServiceTest {
 
             assertThat(service.executeKeywordSearch("alfresco", "filter", 20)).isEmpty();
             verify(hxprService, never()).vectorSearch(any(), any(), any(), anyInt());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Verbatim matching for identifier-like queries (#122)
+    // -----------------------------------------------------------------------
+
+    /**
+     * A short alphanumeric identifier embeds poorly, and the keyword leg alone does not rescue it.
+     * Query expansion cannot either: the token is rare, not ambiguous. The verbatim pass restricts the
+     * search to chunks holding the token literally, and must never cost a result: a query that looks
+     * token-like but matches nothing verbatim has to rank exactly as it would with the flag off.
+     */
+    @Nested
+    class VerbatimIdentifier {
+
+        private RagProperties.RetrievalProperties.VerbatimIdentifierProperties config;
+
+        @BeforeEach
+        void enableVerbatimPass() {
+            RagProperties.RetrievalProperties retrieval = new RagProperties.RetrievalProperties();
+            config = retrieval.getVerbatimIdentifier();
+            config.setEnabled(true);
+            lenient().when(ragProperties.getRetrieval()).thenReturn(retrieval);
+            // The verbatim pass is bounded by the shared variant ceiling, so the real defaults are
+            // needed; the ceiling test overrides this with a tighter one.
+            lenient().when(ragProperties.getQueryExpansion())
+                    .thenReturn(new RagProperties.QueryExpansionProperties());
+        }
+
+        private List<String> identifiersIn(String query) {
+            return HybridSearchService.identifierTerms(query, config);
+        }
+
+        // --- the classifier ---
+
+        @Test
+        void aBareIdentifierFires() {
+            assertThat(identifiersIn("CL3004")).containsExactly("cl3004");
+        }
+
+        /**
+         * The corpus's own identifiers carry internal hyphens, so a rule rejecting all punctuation would
+         * reject the very tokens this feature exists for.
+         */
+        @Test
+        void anIdentifierWithInternalPunctuationFires() {
+            assertThat(identifiersIn("CHG-105402")).containsExactly("chg-105402");
+            assertThat(identifiersIn("AST-3121904")).containsExactly("ast-3121904");
+            assertThat(identifiersIn("nomic_embed.v1")).containsExactly("nomic_embed.v1");
+        }
+
+        @Test
+        void anIdentifierInsideAQuestionFires() {
+            assertThat(identifiersIn("where is CHG-105402 recorded?"))
+                    .containsExactly("chg-105402");
+        }
+
+        @Test
+        void aProseQueryDoesNotFire() {
+            assertThat(identifiersIn("Which change was reversed after it went wrong?")).isEmpty();
+        }
+
+        @Test
+        void aTokenBelowTheMinimumLengthDoesNotFire() {
+            assertThat(identifiersIn("A1")).isEmpty();
+        }
+
+        /** Letters alone are an acronym and digits alone are a number; neither is an identifier. */
+        @Test
+        void allLettersOrAllDigitsDoNotFire() {
+            assertThat(identifiersIn("OAUTH")).isEmpty();
+            assertThat(identifiersIn("105402")).isEmpty();
+        }
+
+        @Test
+        void internalSentencePunctuationDisqualifiesAToken() {
+            assertThat(identifiersIn("CHG:105402")).isEmpty();
+            assertThat(identifiersIn("what/is1")).isEmpty();
+        }
+
+        @Test
+        void trailingPunctuationIsTrimmedRatherThanDisqualifying() {
+            assertThat(identifiersIn("CL3004?")).containsExactly("cl3004");
+            assertThat(identifiersIn("(CL3004)")).containsExactly("cl3004");
+        }
+
+        @Test
+        void theTermCapIsHonoured() {
+            config.setMaxTerms(2);
+
+            assertThat(identifiersIn("CL3004 CL1006 CHG-105402 AST-3121904")).hasSize(2);
+        }
+
+        @Test
+        void duplicateIdentifiersAreCollapsed() {
+            assertThat(identifiersIn("CL3004 and CL3004 again")).containsExactly("cl3004");
+        }
+
+        // --- the pass ---
+
+        private HybridSearchService stubbedSearch() {
+            when(properties.getStrategy()).thenReturn("rrf");
+            when(properties.getCandidateCount()).thenReturn(20);
+            when(properties.getMaxResults()).thenReturn(5);
+            when(properties.getRrfK()).thenReturn(60);
+            when(properties.getDefaultMinScore()).thenReturn(0.0);
+            when(securityContextService.getCurrentUsername()).thenReturn("user");
+            when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
+            lenient().when(embeddingService.getModelName()).thenReturn("test-model");
+
+            HybridSearchService svc = spy(service);
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
+            doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
+            return svc;
+        }
+
+        private VectorSearchResult emptyResult() {
+            VectorSearchResult result = mock(VectorSearchResult.class, withSettings().lenient());
+            doReturn(List.of()).when(result).getEmbeddings();
+            return result;
+        }
+
+        /**
+         * doReturn rather than when(...).thenReturn(...): the result is itself a mock, and building one
+         * inside an open when(...) leaves an unfinished stubbing that fails the next interaction.
+         */
+        private void stubUnrestricted(VectorSearchResult result) {
+            doReturn(result).when(hxprService).vectorSearch(any(), any(), any(), anyInt());
+        }
+
+        private void stubRestricted(VectorSearchResult result) {
+            doReturn(result).when(hxprService).vectorSearch(any(), any(), any(), any(), anyInt());
+        }
+
+        /**
+         * The restriction is expressed through {@code VectorQuery.chunkFTS}, which is the only
+         * server-side lever that filters at the chunk level. HXQL {@code LIKE} fails on keyword fields
+         * and a {@code sys_fulltext} predicate selects documents, so neither can say "chunks containing
+         * this token".
+         */
+        @Test
+        void anIdentifierQueryAddsAChunkRestrictedPass() {
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+            stubRestricted(emptyResult());
+
+            HybridSearchResponse response =
+                    svc.search(HybridSearchRequest.builder().query("where is CHG-105402").build());
+
+            // The original variant runs unrestricted...
+            verify(hxprService).vectorSearch(any(), any(), any(), anyInt());
+            // ...and the verbatim pass restricts to chunks holding the identifier.
+            verify(hxprService).vectorSearch(any(), any(), any(), eq("chg-105402"), anyInt());
+            assertThat(response.getQueryVariants()).isEqualTo(2);
+        }
+
+        /** No second embedding call: the verbatim pass reuses the query vector already computed. */
+        @Test
+        void theVerbatimPassCostsNoExtraEmbeddingCall() {
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+            stubRestricted(emptyResult());
+
+            svc.search(HybridSearchRequest.builder().query("CHG-105402").build());
+
+            verify(embeddingService, times(1)).embedQuery(any());
+        }
+
+        @Test
+        void aProseQueryAddsNoPass() {
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+
+            HybridSearchResponse response = svc.search(
+                    HybridSearchRequest.builder().query("Which change was reversed?").build());
+
+            verify(hxprService, never()).vectorSearch(any(), any(), any(), any(), anyInt());
+            assertThat(response.getQueryVariants()).isNull();
+        }
+
+        @Test
+        void withTheFlagOffAnIdentifierQueryAddsNoPass() {
+            config.setEnabled(false);
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+
+            HybridSearchResponse response =
+                    svc.search(HybridSearchRequest.builder().query("CHG-105402").build());
+
+            verify(hxprService, never()).vectorSearch(any(), any(), any(), any(), anyInt());
+            assertThat(response.getQueryVariants()).isNull();
+        }
+
+        /**
+         * The acceptance criterion that matters most: a verbatim pass that finds nothing must leave the
+         * ranking exactly as it was. It comes out of the variant structure rather than a special case,
+         * since a variant contributing no results is not a contributor to cross-variant fusion.
+         */
+        @Test
+        void aVerbatimPassThatMatchesNothingLeavesTheRankingUnchanged() {
+            Embedding hit = mock(Embedding.class, withSettings().lenient());
+            doReturn("doc-1").when(hit).getSysembedDocId();
+            doReturn("c1").when(hit).getSysembedId();
+            doReturn("a chunk with no identifier in it").when(hit).getSysembedText();
+            doReturn(0.9d).when(hit).getSysembedScore();
+
+            VectorSearchResult unrestricted = mock(VectorSearchResult.class, withSettings().lenient());
+            doReturn(List.of(hit)).when(unrestricted).getEmbeddings();
+
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(unrestricted);
+            stubRestricted(emptyResult());
+
+            HybridSearchResponse withPass =
+                    svc.search(HybridSearchRequest.builder().query("CHG-105402").build());
+
+            assertThat(withPass.getResultCount()).isEqualTo(1);
+            assertThat(withPass.getResults().get(0).getChunkText())
+                    .isEqualTo("a chunk with no identifier in it");
+        }
+
+        @Test
+        void aVerbatimHitIsReturnedAlongsideTheUnrestrictedOnes() {
+            Embedding verbatimHit = mock(Embedding.class, withSettings().lenient());
+            doReturn("doc-2").when(verbatimHit).getSysembedDocId();
+            doReturn("c2").when(verbatimHit).getSysembedId();
+            doReturn("Change CHG-105402 was reverted").when(verbatimHit).getSysembedText();
+            doReturn(0.5d).when(verbatimHit).getSysembedScore();
+
+            VectorSearchResult restricted = mock(VectorSearchResult.class, withSettings().lenient());
+            doReturn(List.of(verbatimHit)).when(restricted).getEmbeddings();
+
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+            stubRestricted(restricted);
+
+            HybridSearchResponse response =
+                    svc.search(HybridSearchRequest.builder().query("CHG-105402").build());
+
+            assertThat(response.getResults()).hasSize(1);
+            assertThat(response.getResults().get(0).getChunkText())
+                    .isEqualTo("Change CHG-105402 was reverted");
+        }
+
+        /** The shared variant ceiling applies: the verbatim pass does not get to exceed it. */
+        @Test
+        void theVariantCeilingIsRespected() {
+            RagProperties.QueryExpansionProperties ceiling = new RagProperties.QueryExpansionProperties();
+            ceiling.setMaxVariants(1);
+            when(ragProperties.getQueryExpansion()).thenReturn(ceiling);
+            HybridSearchService svc = stubbedSearch();
+            stubUnrestricted(emptyResult());
+
+            svc.search(HybridSearchRequest.builder().query("CHG-105402").build());
+
+            verify(hxprService, never()).vectorSearch(any(), any(), any(), any(), anyInt());
         }
     }
 }

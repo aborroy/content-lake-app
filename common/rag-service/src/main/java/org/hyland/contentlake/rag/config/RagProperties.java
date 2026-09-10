@@ -272,6 +272,41 @@ public class RagProperties {
         /** Small-to-big (parent-child) expansion of retrieved chunks to their parent section. */
         private SmallToBigProperties smallToBig = new SmallToBigProperties();
 
+        /** Verbatim matching for identifier-like queries (#122). */
+        private VerbatimIdentifierProperties verbatimIdentifier = new VerbatimIdentifierProperties();
+
+        /**
+         * An extra retrieval pass restricted to chunks containing an identifier verbatim.
+         *
+         * <p>A short alphanumeric identifier embeds poorly, and the keyword leg alone does not rescue
+         * it. Query expansion does not help either: the problem is that the token is rare, not that the
+         * query is ambiguous. Nothing else in the retrieval stack treats an identifier differently from
+         * prose.</p>
+         */
+        @Data
+        public static class VerbatimIdentifierProperties {
+
+            /**
+             * Enables the verbatim pass. Off by default until the eval confirms the gain, and safe when
+             * on: the pass is an additional query variant, so if it matches nothing the ranking is the
+             * one the search would have produced anyway. A result is never discarded merely because the
+             * query looked token-like.
+             */
+            private boolean enabled = false;
+
+            /**
+             * Shortest token treated as an identifier. Below this a token matches so much of the corpus
+             * that the pass costs query time for no selectivity.
+             */
+            private int minLength = 3;
+
+            /**
+             * Most identifiers taken from one query. A query naming several is unusual; the cap stops a
+             * pathological one from turning into a long term list.
+             */
+            private int maxTerms = 2;
+        }
+
         @Data
         public static class SmallToBigProperties {
 
