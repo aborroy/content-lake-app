@@ -121,8 +121,8 @@ alfresco-content-app/
 
 ## SPI Interfaces
 
-Four interfaces in `content-lake-spi` (`org.hyland.contentlake.spi`), carrying zero Alfresco/Nuxeo
-imports. Every content source adapter must implement them.
+Four interfaces plus their data carriers in `content-lake-spi` (`org.hyland.contentlake.spi`), carrying
+zero Alfresco/Nuxeo imports. Every content source adapter must implement them.
 
 ### `SourceNode` -- universal document representation
 
@@ -154,8 +154,78 @@ public interface ContentSourceClient {
     byte[] getContent(String nodeId);
     default void writeSyncStatus(String nodeId, String status, String error) {}  // optional sync-status write-back
     default void clearSyncStatus(String nodeId) {}                                // optional sync-status clear
+    default ConnectorSchema connectorSchema() { ... }                             // the settings this connector needs
 }
 ```
+
+### `ConnectorSchema` -- what a connector needs to be configured
+
+```java
+public record ConnectorSchema(String sourceType, List<Field> fields) {
+    public record Field(String name,            // property name, e.g. "nuxeo.base-url"
+                        FieldType type,         // STRING | INTEGER | BOOLEAN | URL | DIRECTORY | LIST | ENUM
+                        String description,
+                        boolean required,
+                        boolean secret,         // a credential: never printed, never echoed
+                        List<String> allowedValues) {}
+
+    List<String> validate(UnaryOperator<String> valueLookup);   // the problems, empty when satisfied
+}
+```
+
+Two consumers. `ConnectorConfigurationValidator` in core checks the running configuration against every
+connector's schema after the singletons are instantiated, so a missing or malformed setting aborts
+startup with a message naming the setting rather than surfacing later as a downstream symptom
+(`content-lake.connector.validation` = `fail` by default, `warn`, or `off`).
+`GET /api/connectors/schema` publishes the schemas so operator tooling need not hardcode a form per
+source; each ingester registers that controller as a bean, because core is component-scanned by the RAG
+service too, which carries no connector.
+
+A schema describes the connector's own connection and scope settings. Shared pipeline configuration
+(hxpr, embedding, chunking, extraction engines) and per-ingester scheduling are deliberately outside it:
+they are not properties of the source, and listing them would repeat the same fields in every schema.
+The default is an empty schema, so an adapter that declares nothing validates trivially.
+
+Because schemas carry descriptors and never values, publishing one cannot disclose a credential. What
+`secret` buys is that validation messages and the DEBUG configuration dump print `***` instead of the
+value.
+
+### `ConnectorPlugin` -- a connector shipped as a jar
+
+```java
+public interface ConnectorPlugin {
+    String sourceType();                                          // cin_sourceId prefix, must be unique
+    ConnectorSchema schema();                                     // validated before createClient runs
+    ContentSourceClient createClient(ConnectorContext context);
+    default ScopeResolver createScopeResolver(ConnectorContext context, ContentSourceClient client);
+    default TextExtractor createTextExtractor(ConnectorContext context);   // null = host's chain
+    default String displayName();
+}
+```
+
+Discovered by the JDK `ServiceLoader` from jars in `/opt/content-lake/connectors`
+(`content-lake.connector.plugin-directory`), so a source can be built, shipped and iterated on without a
+Maven module or an edit to the six service Dockerfiles. `connector-archetype/` generates the skeleton.
+
+A factory rather than the connector itself, because `ServiceLoader` needs a no-argument constructor: the
+plugin declares its configuration, the host validates it and passes back a `ConnectorContext` (property
+lookup and nothing else, so a connector cannot reach into the host), and only then is the client built.
+
+`ConnectorPluginLoader` uses a `URLClassLoader` over the directory with the application's loader as
+**parent**, which is what makes a plugin's SPI types the same classes the host uses. The cost is that a
+plugin cannot pin a different version of a library the host already carries, so a connector should depend on
+the SPI as `provided` and keep its own dependencies to itself.
+
+Loaded connectors go into a `ConnectorRegistry` bean, **not** into the bean factory. Registering a plugin's
+`TextExtractor` or `ScopeResolver` as a bean would make injection by SPI type ambiguous in an ingester that
+already has one of its own, so mounting a jar next to the Alfresco ingester would break it. Per-plugin
+failure (unreadable jar, missing class, throwing constructor, source type already taken) is logged against
+the jar and skipped; only a configuration problem can abort startup, under the same
+`content-lake.connector.validation` rule as an in-tree connector.
+
+Consequence worth stating: an ingester whose pipeline is wired to a concrete client -- which is all five of
+them today -- does not ingest from a plugin connector. A plugin is discovered, configured, validated and
+published; driving a sync from one needs a host that resolves its connector from the registry.
 
 ### `TextExtractor`
 

@@ -3,6 +3,7 @@ package org.hyland.filesystem.contentlake.client;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
+import org.hyland.contentlake.spi.ConnectorSchema;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.hyland.contentlake.spi.PermissionRule;
 import org.hyland.contentlake.spi.SecurityConfig;
@@ -48,6 +49,35 @@ public class FileSystemSourceClient implements ContentSourceClient {
     @Override
     public String getSourceId() {
         return properties.getSourceId();
+    }
+
+    /**
+     * What this connector needs (#123).
+     *
+     * <p>{@code root-path} is validated as a directory that has to exist, which is the one startup check
+     * here that has real teeth: a filesystem ingester pointed at an unmounted path reports zero documents
+     * and looks like an empty source rather than a misconfiguration.</p>
+     *
+     * <p>{@code read-principals} is listed because the filesystem has no ACL model of its own, so this is
+     * the only thing deciding who can retrieve the ingested content. It is optional and defaults to
+     * everyone, which is worth an operator seeing stated.</p>
+     */
+    @Override
+    public ConnectorSchema connectorSchema() {
+        return ConnectorSchema.builder(getSourceType())
+                .required("filesystem.root-path", ConnectorSchema.FieldType.DIRECTORY,
+                        "Absolute directory to ingest from, a local path or a mounted volume")
+                .optional("filesystem.source-id", ConnectorSchema.FieldType.STRING,
+                        "Source alias stored as the second half of cin_sourceId")
+                .optional("filesystem.read-principals", ConnectorSchema.FieldType.LIST,
+                        "Principals granted read access to every ingested file; defaults to everyone")
+                .optional("filesystem.include-extensions", ConnectorSchema.FieldType.LIST,
+                        "Extensions to ingest, without the dot; empty means every file")
+                .optional("filesystem.exclude-patterns", ConnectorSchema.FieldType.LIST,
+                        "Path fragments that exclude a file or directory, e.g. .git")
+                .optional("filesystem.page-size", ConnectorSchema.FieldType.INTEGER,
+                        "Entries fetched per directory listing")
+                .build();
     }
 
     /** The configured root as an absolute node id, for discovery to start from. */

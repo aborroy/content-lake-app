@@ -1019,6 +1019,83 @@ curl http://localhost:9092/api/live/status
 
 ## Configuration
 
+### Connector Plugins
+
+A source connector can be a jar rather than a module of this build. Every ingester scans
+`/opt/content-lake/connectors` at startup, so a connector needs no Maven module, no entry in an intermediate
+POM and no COPY line in the six service Dockerfiles.
+
+```bash
+# Generate the skeleton (see connector-archetype/README.md for the properties)
+mvn archetype:generate -DarchetypeGroupId=org.hyland \
+  -DarchetypeArtifactId=content-lake-connector-archetype -DarchetypeVersion=1.0.0-SNAPSHOT \
+  -DgroupId=com.example -DartifactId=cmis-connector -Dpackage=com.example.cmis \
+  -DsourceType=cmis -DinteractiveMode=false
+
+cd cmis-connector && mvn package
+cp target/cmis-connector-1.0.0-SNAPSHOT.jar ../content-lake-app-deployment/connectors/
+```
+
+A connector implements `ConnectorPlugin` from `content-lake-spi` and declares itself in
+`META-INF/services/org.hyland.contentlake.spi.ConnectorPlugin`. The host validates its schema, hands it a
+`ConnectorContext` to read settings from, and then asks it for a client, a scope resolver and, optionally,
+its own text extractor.
+
+```bash
+curl http://localhost:9090/api/connectors -u admin:admin
+```
+
+```json
+{ "connectors": [
+    { "sourceType": "alfresco", "origin": "in-tree", "implementation": "...AlfrescoClient", "settings": 6 },
+    { "sourceType": "cmis", "origin": "cmis-connector-1.0.0-SNAPSHOT.jar",
+      "implementation": "com.example.cmis.SourceConnectorClient", "settings": 4 } ],
+  "problems": [] }
+```
+
+Failure is per connector and never fatal: a jar that cannot be read, a service entry naming a class that is
+not there, a plugin whose constructor throws, or one claiming a source type another connector already has is
+reported in `problems` and skipped. An ingester with one broken plugin and three working ones has three
+working connectors. The exception is configuration: a plugin whose settings do not satisfy its own schema is
+refused, and in the default `fail` mode that aborts startup rather than leaving a connector that cannot work
+looking like it is running.
+
+Plugin connectors are kept in a registry rather than registered as beans, deliberately: publishing a
+plugin's `TextExtractor` or `ScopeResolver` as a bean would make injection by type ambiguous in an ingester
+that already has one, so mounting a jar would break the ingester it was mounted next to.
+
+### Connector Schema And Startup Validation
+
+Each source connector publishes the settings it needs, and every ingester checks its configuration
+against that schema before it starts serving. A missing or malformed setting is reported by name instead
+of surfacing later as a downstream symptom, such as a filesystem ingester that finds no documents because
+its root path was never mounted.
+
+```bash
+curl http://localhost:9095/api/connectors/schema -u sync-user:sync-secret
+```
+
+```json
+[ { "sourceType": "filesystem",
+    "fields": [ { "name": "filesystem.root-path", "type": "DIRECTORY",
+                  "description": "Absolute directory to ingest from, a local path or a mounted volume",
+                  "required": true, "secret": false, "allowedValues": [] } ] } ]
+```
+
+The response carries field descriptors and never values, so it cannot disclose a credential; `secret`
+tells tooling to mask its own input, and keeps the value out of validation messages and logs. The
+endpoint is authenticated like every other API path.
+
+Validation covers the connector's own connection and scope settings. Shared pipeline configuration (hxpr,
+embedding model, chunking, extraction engines) and per-ingester scheduling are not part of a connector
+schema.
+
+| Setting | Values | Effect |
+|---|---|---|
+| `content-lake.connector.validation` | `fail` (default) | Startup aborts, listing every setting at fault |
+| | `warn` | Problems are logged and the service starts, for a deployment whose mount or endpoint appears late |
+| | `off` | No check |
+
 ### Ingestion
 
 Edit `alfresco/alfresco-batch-ingester/src/main/resources/application.yml`:

@@ -4,6 +4,9 @@ import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.nuxeo.contentlake.client.NuxeoClient;
+import org.hyland.contentlake.connector.ConnectorRegistry;
+import org.hyland.contentlake.connector.ConnectorSchemaController;
+import org.hyland.contentlake.spi.ContentSourceClient;
 import org.springframework.beans.factory.ObjectProvider;
 import org.hyland.contentlake.extractor.ExtractionBackend;
 import org.hyland.contentlake.extractor.ExtractionChain;
@@ -205,6 +208,21 @@ public class AppConfig {
                 keywordContextEnrichmentEnabled,
                 contentReuseEnabled
         );
+    }
+
+    /**
+     * Publishes this ingester's connector configuration schema at
+     * {@code GET /api/connectors/schema} (#123).
+     *
+     * <p>Registered explicitly rather than component-scanned, because core is scanned by every
+     * application including the RAG service, which carries no connector to describe. Default-deny
+     * security applies to it like any other mapped endpoint.</p>
+     */
+    @Bean
+    public ConnectorSchemaController connectorSchemaController(
+            ObjectProvider<ContentSourceClient> sourceClients,
+            ObjectProvider<ConnectorRegistry> connectorRegistries) {
+        return new ConnectorSchemaController(sourceClients, connectorRegistries);
     }
 
     private static ClientHttpRequestInterceptor hxprAuthInterceptor(HxprProperties props) {

@@ -20,6 +20,18 @@ public interface ContentSourceClient {
     String getSourceType();
 
     /**
+     * The configuration this connector needs, so a deployment can be checked before it runs and
+     * operator tooling can describe a source without hardcoding a form for it.
+     *
+     * <p>Defaults to an empty schema, which declares nothing and validates trivially, so an adapter
+     * written before this is unaffected. An implementation should describe its own connection and scope
+     * settings only; see {@link ConnectorSchema} for what is deliberately out of scope.</p>
+     */
+    default ConnectorSchema connectorSchema() {
+        return ConnectorSchema.empty(getSourceType());
+    }
+
+    /**
      * Fetches a single node by its source-system identifier.
      *
      * @param nodeId source-system node identifier

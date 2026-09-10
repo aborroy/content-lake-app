@@ -3,6 +3,7 @@ package org.hyland.alfresco.contentlake.client;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.alfresco.contentlake.adapter.AlfrescoSourceNodeAdapter;
+import org.hyland.contentlake.spi.ConnectorSchema;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.hyland.contentlake.spi.SourceNode;
 import org.alfresco.core.handler.NodesApi;
@@ -76,6 +77,32 @@ public class AlfrescoClient implements ContentSourceClient {
     @Override
     public String getSourceType() {
         return "alfresco";
+    }
+
+    /**
+     * What this connector needs to reach an ACS repository (#123).
+     *
+     * <p>The transform service is part of the Alfresco connector rather than shared extraction
+     * configuration, because it is the repository's own transform endpoint. What belongs to an
+     * ingester rather than to the source -- the ActiveMQ broker the live ingester listens on, the
+     * discovery roots and the batch executor -- is deliberately absent.</p>
+     */
+    @Override
+    public ConnectorSchema connectorSchema() {
+        return ConnectorSchema.builder(getSourceType())
+                .required("content.service.url", ConnectorSchema.FieldType.URL,
+                        "Base URL of the Alfresco repository, e.g. http://alfresco:8080")
+                .required("content.service.security.basicAuth.username", ConnectorSchema.FieldType.STRING,
+                        "Service account the ingester reads the repository with")
+                .secret("content.service.security.basicAuth.password",
+                        "Password for that service account", true)
+                .optional("transform.url", ConnectorSchema.FieldType.URL,
+                        "Alfresco Transform Core endpoint used to extract text")
+                .optional("transform.enabled", ConnectorSchema.FieldType.BOOLEAN,
+                        "Whether to use the transform service; false falls back to in-process Tika")
+                .optional("transform.timeout-ms", ConnectorSchema.FieldType.INTEGER,
+                        "How long to wait for one transform, in milliseconds")
+                .build();
     }
 
     /**

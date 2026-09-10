@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<archetype-descriptor xmlns="https://maven.apache.org/plugins/maven-archetype-plugin/archetype-descriptor/1.1.0"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xsi:schemaLocation="https://maven.apache.org/plugins/maven-archetype-plugin/archetype-descriptor/1.1.0 https://maven.apache.org/xsd/archetype-descriptor-1.1.0.xsd"
+                      name="content-lake-connector">
+
+    <requiredProperties>
+        <!-- Prefix of cin_sourceId for every document this connector ingests. Must not collide with a
+             connector the ingester already has: alfresco, nuxeo and filesystem are taken. -->
+        <requiredProperty key="sourceType">
+            <defaultValue>mysource</defaultValue>
+        </requiredProperty>
+
+        <!-- Version of content-lake-spi to compile against. -->
+        <requiredProperty key="contentLakeVersion">
+            <defaultValue>1.0.0-SNAPSHOT</defaultValue>
+        </requiredProperty>
+
+        <!-- Spring version supplying the Resource type ContentSourceClient returns. -->
+        <requiredProperty key="springVersion">
+            <defaultValue>7.0.2</defaultValue>
+        </requiredProperty>
+    </requiredProperties>
+
+    <fileSets>
+        <fileSet filtered="true" packaged="true" encoding="UTF-8">
+            <directory>src/main/java</directory>
+            <includes>
+                <include>**/*.java</include>
+            </includes>
+        </fileSet>
+        <fileSet filtered="true" packaged="true" encoding="UTF-8">
+            <directory>src/test/java</directory>
+            <includes>
+                <include>**/*.java</include>
+            </includes>
+        </fileSet>
+        <!-- The service declaration: one line naming the generated plugin class, which is what makes
+             ServiceLoader find it. Filtered, so it carries the generated package. -->
+        <fileSet filtered="true" encoding="UTF-8">
+            <directory>src/main/resources</directory>
+            <includes>
+                <include>**/*</include>
+            </includes>
+        </fileSet>
+        <fileSet filtered="true" encoding="UTF-8">
+            <directory></directory>
+            <includes>
+                <include>README.md</include>
+                <include>.gitignore</include>
+            </includes>
+        </fileSet>
+    </fileSets>
+</archetype-descriptor>

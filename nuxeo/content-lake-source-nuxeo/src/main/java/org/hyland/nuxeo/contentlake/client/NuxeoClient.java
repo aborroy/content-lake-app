@@ -6,6 +6,7 @@ import org.hyland.nuxeo.contentlake.auth.BasicNuxeoAuthentication;
 import org.hyland.nuxeo.contentlake.auth.NuxeoAuthentication;
 import org.hyland.nuxeo.contentlake.config.NuxeoProperties;
 import org.hyland.nuxeo.contentlake.model.NuxeoDocument;
+import org.hyland.contentlake.spi.ConnectorSchema;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.hyland.contentlake.spi.SourceNode;
 import org.springframework.core.io.FileSystemResource;
@@ -84,6 +85,44 @@ public class NuxeoClient implements ContentSourceClient {
     @Override
     public String getSourceType() {
         return SOURCE_TYPE;
+    }
+
+    /**
+     * What this connector needs to reach a Nuxeo instance (#123).
+     *
+     * <p>Scope is part of the connector: unlike Alfresco, Nuxeo has no in-repository marker aspect, so
+     * the roots and types to ingest are configuration rather than repository state. The audit polling
+     * interval and cursor file belong to the live ingester, not to the source, and are absent.</p>
+     */
+    @Override
+    public ConnectorSchema connectorSchema() {
+        return ConnectorSchema.builder(SOURCE_TYPE)
+                .required("nuxeo.base-url", ConnectorSchema.FieldType.URL,
+                        "Base URL of the Nuxeo instance, including the context path, e.g. "
+                                + "http://nuxeo:8080/nuxeo")
+                .required("nuxeo.username", ConnectorSchema.FieldType.STRING,
+                        "Account the ingester reads Nuxeo with")
+                .secret("nuxeo.password", "Password for that account", true)
+                .optional("nuxeo.source-id", ConnectorSchema.FieldType.STRING,
+                        "Instance alias stored as the second half of cin_sourceId")
+                .optional("nuxeo.blob-xpath", ConnectorSchema.FieldType.STRING,
+                        "XPath of the blob to ingest, e.g. file:content")
+                .optional("nuxeo.scope.included-roots", ConnectorSchema.FieldType.LIST,
+                        "Document paths to ingest below, e.g. /default-domain/workspaces")
+                .optional("nuxeo.scope.included-types", ConnectorSchema.FieldType.LIST,
+                        "Document types to ingest, e.g. File and Note")
+                .optional("nuxeo.scope.excluded-lifecycle-states", ConnectorSchema.FieldType.LIST,
+                        "Lifecycle states to skip, e.g. deleted")
+                .optional("nuxeo.discovery.page-size", ConnectorSchema.FieldType.INTEGER,
+                        "Documents fetched per discovery page")
+                .enumeration("nuxeo.discovery.mode",
+                        "How discovery walks the repository: an NXQL query or child listing", false,
+                        List.of("NXQL", "CHILDREN"))
+                .optional("nuxeo.conversion.enabled", ConnectorSchema.FieldType.BOOLEAN,
+                        "Whether to extract text through Nuxeo's own ConversionService")
+                .optional("nuxeo.conversion.timeout-ms", ConnectorSchema.FieldType.INTEGER,
+                        "How long to wait for one conversion, in milliseconds")
+                .build();
     }
 
     @Override
