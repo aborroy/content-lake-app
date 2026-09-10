@@ -26,6 +26,8 @@ SourceNode (from ContentSourceClient)
        │ else: sourceClient.downloadContent() + textExtractor.extract(resource, mimeType)
        │       ──► ExtractedText(text, PLAIN | MARKDOWN)
        │
+       ContentFingerprint.of(...) ──► matches the stored one? write INDEXED and stop
+       │
        chunkingService.chunk(extracted.text())          # markdown kept as-is
        embeddingService.embedChunks(chunks)
        hxprService.updateEmbeddings(hxprDocId, embeddings)
@@ -113,6 +115,45 @@ Documents land at: `/{hxprTargetPath}/{sourceId}/{sourcePath}/{nodeName}`
 Every write is guarded by a `modifiedAt` staleness check. If the hxpr version is already at or
 newer than the incoming node, the write is skipped. This makes it safe to run batch and live
 ingesters concurrently against the same node without producing duplicate writes.
+
+---
+
+## Content Reuse
+
+The staleness check stops a stale write from overwriting a newer one, but it cannot tell that content
+is byte-identical. A permission change, a property edit or a folder move all leave a newer
+`source_modifiedAt`, so all of them used to re-run extraction, chunking and embedding over content
+that had not changed.
+
+`processContent` therefore recomputes a content fingerprint after extraction and compares it against
+`cin_ingestProperties.contentLake_contentFingerprint`. On a match it writes the sync state and stops:
+no chunking, no embedding calls, and the existing embedding child stays as the current one.
+Extraction is still paid for, because the fingerprint is taken over the extracted text rather than the
+binary.
+
+The fingerprint covers the extracted text, the embedding type and the chunking parameters, plus the
+keyword-enrichment flag. Anything that would change the stored chunks or vectors therefore forces a
+reprocess: switching `EMBEDDING_MODEL` or `EMBEDDING_CHUNK_SIZE` re-embeds the corpus rather than
+short-circuiting it.
+
+Three conditions must all hold before the short circuit is taken:
+
+- `content-lake.ingest.content-reuse-enabled` is true, the default. The switch exists because the
+  failure mode is silent in the dangerous direction, so an operator can rule the fingerprint out
+  without a rebuild.
+- the stored fingerprint equals the recomputed one;
+- the extracted-text mirror is present.
+
+The last condition matters more than it looks. `processContent` writes the mirror and the fingerprint
+together in its final step, after the embeddings are stored, so the pair is evidence that a content
+pass ran to completion. A document that is `INDEXED` with no embeddings at all is invisible to search
+while looking finished to monitoring, and trusting a bare fingerprint would make that state permanent.
+
+Permissions are never skipped alongside content: `cin_read`, `cin_deny` and `sys_acl` are written on
+every metadata write, whatever the fingerprint says.
+
+`NodeSyncService.getContentReuseStats()` reports short circuits against full reprocesses, and every
+short circuit logs the running totals, so the saving is measurable rather than assumed.
 
 ---
 

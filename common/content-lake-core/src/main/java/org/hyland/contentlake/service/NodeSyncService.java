@@ -32,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Shared synchronisation pipeline used by both the batch-ingester and the
@@ -55,6 +56,14 @@ import java.util.*;
  * if the Content Lake already holds a version that is equal to or newer than
  * the incoming node, the write is skipped. This makes it safe to run both
  * ingesters concurrently against the same node.
+ *
+ * <h3>Content reuse</h3>
+ * The staleness check stops a stale write from overwriting a newer one, but it cannot tell that
+ * content is byte-identical, so a permission change, a property edit or a folder move all leave it
+ * with a newer {@code modifiedAt} and re-run the whole pipeline. A content fingerprint recorded per
+ * document closes that gap: when it still matches after extraction, chunking and embedding are
+ * skipped and only the sync state is written. Extraction is still paid for, since the fingerprint is
+ * taken over the extracted text rather than the binary.
  */
 @Slf4j
 @RequiredArgsConstructor
@@ -71,6 +80,19 @@ public class NodeSyncService {
     private static final String P_CL_SYNC_ERROR     = ContentLakeIngestProperties.CONTENT_LAKE_SYNC_ERROR;
     private static final String P_CL_EXTRACTED_TEXT = ContentLakeIngestProperties.CONTENT_LAKE_EXTRACTED_TEXT;
     private static final String P_CL_SECTION_MAP    = ContentLakeIngestProperties.CONTENT_LAKE_SECTION_MAP;
+    private static final String P_CL_FINGERPRINT    = ContentLakeIngestProperties.CONTENT_LAKE_CONTENT_FINGERPRINT;
+
+    /**
+     * Ingest properties derived from the document's content rather than from its source metadata.
+     *
+     * <p>A metadata write rebuilds {@code cin_ingestProperties} from the source node's properties
+     * alone, so without carrying these forward every property edit would drop the keyword-leg mirror
+     * and the section map until content processing rewrote them. Carrying them means a content short
+     * circuit can also write them back unchanged, which is what makes the short circuit safe whether
+     * hxpr replaces or merges a map-valued field on update.</p>
+     */
+    private static final List<String> CONTENT_DERIVED_PROPERTY_KEYS =
+            List.of(P_CL_EXTRACTED_TEXT, P_CL_SECTION_MAP, P_CL_FINGERPRINT);
 
     /**
      * Upper bound on the serialized section map stored per document. The map duplicates section text
@@ -125,6 +147,19 @@ public class NodeSyncService {
      * what {@code sys_fulltext} indexes, so it ships behind a flag until a sweep shows its delta.
      */
     private final boolean keywordContextEnrichmentEnabled;
+
+    /**
+     * When true (the default), a document whose recomputed content fingerprint matches the stored one
+     * skips chunking and embedding (#120).
+     *
+     * <p>The kill switch exists because the failure mode is silent in the dangerous direction: a
+     * fingerprint defect would stop changed content being re-embedded, and an operator needs one
+     * setting to rule that out without a rebuild.</p>
+     */
+    private final boolean contentReuseEnabled;
+
+    /** Short circuits versus full reprocesses, so the saving this service exists for is measurable. */
+    private final ContentReuseCounters contentReuseCounters = new ContentReuseCounters();
 
     // ──────────────────────────────────────────────────────────────────────
     // Public pipeline entry-points
@@ -216,6 +251,14 @@ public class NodeSyncService {
 
             Map<String, Object> ingestProps = baseIngestProps;
 
+            String fingerprint = ContentFingerprint.of(extracted.text(), hxprService.getEmbeddingType(),
+                    chunkingService.getConfig(), keywordContextEnrichmentEnabled);
+            if (canReuseContent(baseIngestProps, fingerprint)) {
+                reuseContent(hxprDocId, baseIngestProps, nodeId);
+                return;
+            }
+            contentReuseCounters.reprocesses.incrementAndGet();
+
             // Chunking gets the extracted representation as-is: when it is markdown, segmentation
             // splits on heading and table boundaries and a table is kept atomic as ChunkType.TABLE.
             // The fulltext mirrors below get markup-stripped text instead, because they feed an
@@ -247,7 +290,8 @@ public class NodeSyncService {
 
             log.info("About to update fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
             String keywordText = MarkdownToPlainText.toPlainText(extracted);
-            updateFulltextWithStatus(hxprDocId, keywordText, keywordContext, sectionMapJson, ingestProps, nodeId);
+            updateFulltextWithStatus(hxprDocId, keywordText, keywordContext, sectionMapJson,
+                    withFingerprint(ingestProps, fingerprint), nodeId);
             log.info("Successfully updated fulltext and status for hxprDocId: {}, nodeId: {}", hxprDocId, nodeId);
 
             log.info("Completed sync for node {}: {} embeddings", nodeId, hxprEmbeddings.size());
@@ -463,9 +507,46 @@ public class NodeSyncService {
         HxprDocument doc = buildDocument(node);
         doc.setSysId(existing.getSysId());
         doc.setSysMixinTypes(mergeMixinTypes(existing.getSysMixinTypes(), doc.getSysMixinTypes()));
+        carryForwardContentProperties(existing, doc);
         HxprDocument updated = documentApi.updateById(existing.getSysId(), doc);
+        // The properties written are the ones just built, not whatever the response happened to echo:
+        // the caller compares the content fingerprint against this map, and a response that omitted
+        // cin_ingestProperties would read as "no fingerprint stored" and reprocess every document.
+        updated.setCinIngestProperties(doc.getCinIngestProperties());
+        updated.setCinIngestPropertyNames(doc.getCinIngestPropertyNames());
         log.info("Updated hxpr document {} for node {}", updated.getSysId(), node.nodeId());
         return updated;
+    }
+
+    /**
+     * Copies the content-derived ingest properties from the stored document onto an update built from
+     * source metadata, together with the sync status they belong to.
+     *
+     * <p>{@link #buildIngestProperties} builds the map from the source node's own properties, so
+     * without this an update would drop the extracted-text mirror, the section map and the content
+     * fingerprint on every property edit. Dropping the fingerprint would defeat the short circuit it
+     * exists for, and dropping the mirror would silently remove the document from keyword matching
+     * until content processing rewrote it.</p>
+     */
+    private void carryForwardContentProperties(HxprDocument existing, HxprDocument doc) {
+        Map<String, Object> previous = existing.getCinIngestProperties();
+        if (previous == null || previous.isEmpty()) {
+            return;
+        }
+
+        Map<String, Object> props = doc.getCinIngestProperties() != null
+                ? new LinkedHashMap<>(doc.getCinIngestProperties())
+                : new LinkedHashMap<>();
+
+        for (String key : CONTENT_DERIVED_PROPERTY_KEYS) {
+            Object value = previous.get(key);
+            if (value != null) {
+                props.put(key, value);
+            }
+        }
+
+        doc.setCinIngestProperties(props);
+        doc.setCinIngestPropertyNames(new ArrayList<>(props.keySet()));
     }
 
     private HxprDocument buildDocument(SourceNode node) {
@@ -593,6 +674,89 @@ public class NodeSyncService {
         return (normalized.startsWith(MARKDOWN_MIME_TYPE) || normalized.startsWith("text/x-markdown"))
                 ? TextFormat.MARKDOWN
                 : TextFormat.PLAIN;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Content reuse (#120)
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Whether reprocessing this document would produce exactly what is already stored.
+     *
+     * <p>Three conditions, all required:</p>
+     * <ol>
+     *   <li>the feature is enabled;</li>
+     *   <li>the stored fingerprint equals the recomputed one, so the text, the embedding type and the
+     *       chunking parameters are all unchanged;</li>
+     *   <li>the extracted-text mirror is present.</li>
+     * </ol>
+     *
+     * <p>The third condition is what stops a document from becoming permanently unrepairable behind a
+     * fingerprint match. {@code processContent} writes the mirror and the fingerprint together in its
+     * final step, after the embeddings have been stored, so the pair is evidence that a content pass
+     * ran to completion. A fingerprint without a mirror is not, and a document indexed with no
+     * embeddings at all is invisible to search while looking finished to monitoring, which is exactly
+     * the state that must not be made permanent. The bias is deliberately towards doing the work.</p>
+     *
+     * <p>The section map is not required: it is skipped by design for documents whose serialized map
+     * would exceed its size cap.</p>
+     */
+    private boolean canReuseContent(Map<String, Object> baseIngestProps, String fingerprint) {
+        if (!contentReuseEnabled || baseIngestProps == null) {
+            return false;
+        }
+        if (!ContentFingerprint.matches(asText(baseIngestProps.get(P_CL_FINGERPRINT)), fingerprint)) {
+            return false;
+        }
+        return asText(baseIngestProps.get(P_CL_EXTRACTED_TEXT)) != null;
+    }
+
+    /**
+     * Completes a sync whose content is unchanged: flips the document to {@code INDEXED} and reports
+     * the same status back to the source, without chunking or embedding.
+     *
+     * <p>The properties written are the ones the metadata phase already carried forward, so the
+     * mirror, the section map and the fingerprint survive whether hxpr replaces or merges a
+     * map-valued field. {@code source_modifiedAt} was advanced by that same metadata write, which is
+     * what makes a metadata-only change cost nothing beyond extraction.</p>
+     *
+     * <p>Embedding children are deliberately untouched. {@code updateEmbeddings} net-replaces them
+     * and is precisely what is being skipped, so the existing child stays as the current one.</p>
+     */
+    private void reuseContent(String hxprDocId, Map<String, Object> baseIngestProps, String nodeId) {
+        contentReuseCounters.shortCircuits.incrementAndGet();
+        ContentReuseStats stats = contentReuseCounters.snapshot();
+
+        Map<String, Object> props = buildStatusedProps(baseIngestProps, ContentLakeNodeStatus.Status.INDEXED, null);
+        HxprDocument update = new HxprDocument();
+        update.setSyncStatus(HxprDocument.SyncStatus.INDEXED);
+        update.setSyncError(null);
+        update.setCinIngestProperties(props);
+        update.setCinIngestPropertyNames(new ArrayList<>(props.keySet()));
+        documentApi.updateById(hxprDocId, update);
+        sourceClient.writeSyncStatus(nodeId, ContentLakeNodeStatus.Status.INDEXED.name(), null);
+
+        log.info("Content unchanged for node {}: skipped chunking and embedding "
+                        + "(shortCircuits={}, reprocesses={})",
+                nodeId, stats.shortCircuits(), stats.reprocesses());
+    }
+
+    /** Returns {@code props} with the fingerprint of the content just processed added. */
+    private Map<String, Object> withFingerprint(Map<String, Object> props, String fingerprint) {
+        Map<String, Object> withFingerprint = props != null
+                ? new LinkedHashMap<>(props)
+                : new LinkedHashMap<>();
+        withFingerprint.put(P_CL_FINGERPRINT, fingerprint);
+        return withFingerprint;
+    }
+
+    /** A property value as non-blank text, or {@code null} when it is absent or blank. */
+    private static String asText(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String text = value.toString();
+        return text.isBlank() ? null : text;
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -977,6 +1141,39 @@ public class NodeSyncService {
         } catch (Exception e) {
             log.debug("Could not parse stored modifiedAt '{}' — will re-process", stored);
             return null;
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Content-reuse counters
+    // ──────────────────────────────────────────────────────────────────────
+
+    /** Snapshot of how much reprocessing the content fingerprint has avoided. */
+    public ContentReuseStats getContentReuseStats() {
+        return contentReuseCounters.snapshot();
+    }
+
+    /**
+     * How often content processing short-circuited on an unchanged fingerprint versus ran in full.
+     *
+     * @param shortCircuits documents whose chunking and embedding were skipped
+     * @param reprocesses   documents that were chunked and embedded
+     */
+    public record ContentReuseStats(long shortCircuits, long reprocesses) {
+    }
+
+    /**
+     * Plain atomics rather than Micrometer: {@code content-lake-core} does not depend on
+     * {@code micrometer-core}, and adding it to five ingester apps plus the RAG service to publish
+     * two numbers is not a trade worth making. Each short circuit also logs its running totals.
+     */
+    private static final class ContentReuseCounters {
+
+        private final AtomicLong shortCircuits = new AtomicLong();
+        private final AtomicLong reprocesses = new AtomicLong();
+
+        ContentReuseStats snapshot() {
+            return new ContentReuseStats(shortCircuits.get(), reprocesses.get());
         }
     }
 

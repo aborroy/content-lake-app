@@ -53,6 +53,20 @@ public final class ContentLakeIngestProperties {
      */
     public static final String CONTENT_LAKE_SECTION_MAP = "contentLake_sectionMap";
 
+    /**
+     * Fingerprint of everything that determines the document's stored chunks and vectors.
+     *
+     * <p>Held here rather than in a separate state store so there is no second source of truth to
+     * reconcile: the fingerprint travels with the document it describes, and is visible to anything
+     * that can read the document.</p>
+     *
+     * <p>A sync recomputes it after extraction and, on a match, skips chunking and embedding. It
+     * covers the embedding type and the chunking parameters as well as the text, so changing either
+     * forces a reprocess instead of stranding the corpus on vectors the new configuration would not
+     * produce. See {@code ContentFingerprint}.</p>
+     */
+    public static final String CONTENT_LAKE_CONTENT_FINGERPRINT = "contentLake_contentFingerprint";
+
     private ContentLakeIngestProperties() {
     }
 }

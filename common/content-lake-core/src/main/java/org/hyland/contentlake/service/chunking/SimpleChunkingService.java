@@ -1,5 +1,6 @@
 package org.hyland.contentlake.service.chunking;
 
+import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.model.Chunk;
@@ -26,7 +27,15 @@ import java.util.List;
 public class SimpleChunkingService {
 
     private final NoiseReductionService noiseReduction;
+
+    /**
+     * Exposed because the chunking parameters are part of the content fingerprint: a change to them
+     * produces different chunks from the same text, so a sync must reprocess rather than short
+     * circuit on unchanged content.
+     */
+    @Getter
     private final ChunkingConfig config;
+
     private final ChunkingStrategy strategy;
 
     /**

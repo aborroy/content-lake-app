@@ -61,7 +61,8 @@ class NodeSyncServiceTextExtractionTest {
                 chunkingService,
                 "/nuxeo-sync",
                 null,
-                false
+                false,
+                true
         );
     }
 
@@ -77,7 +78,6 @@ class NodeSyncServiceTextExtractionTest {
         when(chunkingService.chunk("Converted by Nuxeo", "node-1", "application/pdf")).thenReturn(List.of(chunk));
         when(embeddingService.embedChunks(eq(List.of(chunk)), any()))
                 .thenReturn(List.of(new EmbeddingService.ChunkWithEmbedding(chunk, List.of(0.1d, 0.2d))));
-        when(embeddingService.getModelName()).thenReturn("test-embedding-model");
         when(documentApi.updateById(eq("hxpr-doc-1"), any())).thenReturn(updatedDocument);
 
         service.processContent(
@@ -114,7 +114,6 @@ class NodeSyncServiceTextExtractionTest {
         when(chunkingService.chunk(markdown, "node-2", "application/pdf")).thenReturn(List.of(chunk));
         when(embeddingService.embedChunks(eq(List.of(chunk)), any()))
                 .thenReturn(List.of(new EmbeddingService.ChunkWithEmbedding(chunk, List.of(0.1d))));
-        when(embeddingService.getModelName()).thenReturn("test-embedding-model");
         when(documentApi.updateById(eq("hxpr-doc-2"), any())).thenReturn(updatedDocument);
 
         service.processContent(

@@ -91,7 +91,8 @@ class NodeSyncServiceTextAndMarkdownSourceTest {
                 chunkingService,
                 "/filesystem-sync",
                 null,
-                false
+                false,
+                true
         );
     }
 
@@ -172,7 +173,6 @@ class NodeSyncServiceTextAndMarkdownSourceTest {
                     .map(c -> new EmbeddingService.ChunkWithEmbedding(c, List.of(0.1d)))
                     .toList();
         });
-        when(embeddingService.getModelName()).thenReturn("test-embedding-model");
         when(documentApi.updateById(eq("hxpr-doc-2"), any())).thenReturn(new HxprDocument());
 
         service.processContent(
@@ -203,7 +203,6 @@ class NodeSyncServiceTextAndMarkdownSourceTest {
                     .map(c -> new EmbeddingService.ChunkWithEmbedding(c, List.of(0.1d)))
                     .toList();
         });
-        when(embeddingService.getModelName()).thenReturn("test-embedding-model");
         when(documentApi.updateById(eq("hxpr-doc-1"), any())).thenReturn(new HxprDocument());
     }
 

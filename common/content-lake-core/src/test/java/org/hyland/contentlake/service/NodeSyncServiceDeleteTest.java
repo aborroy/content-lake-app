@@ -57,7 +57,7 @@ class NodeSyncServiceDeleteTest {
     @BeforeEach
     void setUp() {
         service = new NodeSyncService(sourceClient, documentApi, hxprService, textExtractor,
-                embeddingService, chunkingService, "/alfresco-sync", null, false);
+                embeddingService, chunkingService, "/alfresco-sync", null, false, true);
         when(sourceClient.getSourceType()).thenReturn("alfresco");
         when(sourceClient.getSourceId()).thenReturn("repo-uuid");
     }

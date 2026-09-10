@@ -71,7 +71,8 @@ class NodeSyncServicePathConflictTest {
                 chunkingService,
                 TARGET_PATH,
                 null,
-                false
+                false,
+                true
         );
     }
 

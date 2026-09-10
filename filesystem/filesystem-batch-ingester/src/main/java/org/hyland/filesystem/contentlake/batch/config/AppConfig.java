@@ -151,7 +151,9 @@ public class AppConfig {
                                            SimpleChunkingService chunkingService,
                                            HxprProperties props,
                                            @Value("${content-lake.ingest.keyword-context-enrichment-enabled:false}")
-                                           boolean keywordContextEnrichmentEnabled) {
+                                           boolean keywordContextEnrichmentEnabled,
+                                           @Value("${content-lake.ingest.content-reuse-enabled:true}")
+                                           boolean contentReuseEnabled) {
         return new NodeSyncService(
                 fileSystemSourceClient,
                 documentApi,
@@ -161,7 +163,8 @@ public class AppConfig {
                 chunkingService,
                 props.getTargetPath(),
                 props.getPathRepositoryId(),
-                keywordContextEnrichmentEnabled);
+                keywordContextEnrichmentEnabled,
+                contentReuseEnabled);
     }
 
     @Bean(name = "filesystemBatchIngestionExecutor")

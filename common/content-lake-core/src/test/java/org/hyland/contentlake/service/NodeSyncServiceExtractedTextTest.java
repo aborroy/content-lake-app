@@ -66,7 +66,8 @@ class NodeSyncServiceExtractedTextTest {
                 chunkingService,
                 "/nuxeo-sync",
                 null,
-                true  // keyword-leg context enrichment on: these tests assert the prefix
+                true,  // keyword-leg context enrichment on: these tests assert the prefix
+                true
         );
     }
 
@@ -80,7 +81,6 @@ class NodeSyncServiceExtractedTextTest {
         when(chunkingService.chunk(text, "node-1", "text/plain")).thenReturn(List.of(chunk));
         when(embeddingService.embedChunks(eq(List.of(chunk)), any()))
                 .thenReturn(List.of(new EmbeddingService.ChunkWithEmbedding(chunk, List.of(0.1d, 0.2d))));
-        when(embeddingService.getModelName()).thenReturn("test-embedding-model");
         when(documentApi.updateById(eq("hxpr-doc-1"), any())).thenReturn(updated);
 
         service.processContent(

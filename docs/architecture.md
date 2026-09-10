@@ -220,7 +220,6 @@ public interface ScopeResolver {
 | Constant | Key string | Meaning |
 |---|---|---|
 | `SOURCE_NODE_ID` | `source_nodeId` | node ID within the source system |
-| `SOURCE_SYSTEM_ID` | `source_systemId` | source system instance identifier |
 | `SOURCE_TYPE` | `source_type` | `"alfresco"`, `"nuxeo"`, ... |
 | `SOURCE_PATH` | `source_path` | node path |
 | `SOURCE_NAME` | `source_name` | node name |
@@ -228,6 +227,16 @@ public interface ScopeResolver {
 | `SOURCE_MODIFIED_AT` | `source_modifiedAt` | ISO-8601 timestamp |
 | `CONTENT_LAKE_SYNC_STATUS` | `contentLake_syncStatus` | `PENDING`, `INDEXED`, `FAILED` |
 | `CONTENT_LAKE_SYNC_ERROR` | `contentLake_syncError` | error message when FAILED |
+| `CONTENT_LAKE_EXTRACTED_TEXT` | `contentLake_extractedText` | extracted body, mirrored here because `sys_fulltextBinary` is not queryable from HXQL |
+| `CONTENT_LAKE_SECTION_MAP` | `contentLake_sectionMap` | per-chunk section index and section text, for small-to-big retrieval |
+| `CONTENT_LAKE_CONTENT_FINGERPRINT` | `contentLake_contentFingerprint` | fingerprint of everything determining the stored chunks and vectors |
+
+The last three are derived from content rather than from source metadata, so a metadata write carries
+them forward from the stored document instead of rebuilding them.
+
+`contentLake_contentFingerprint` covers the extracted text, the embedding type and the chunking
+parameters, not the text alone. A text-only hash would match after an embedding-model change and skip
+the re-embed, leaving the corpus serving the retired model's vectors.
 
 Source adapters add extra properties via `SourceNode.sourceProperties()` using their own namespace
 (e.g. `alfresco_repositoryId`, `nuxeo_documentType`).
@@ -360,3 +369,9 @@ prose noise.
   (`FacetsService`), vocabulary lookup and chunk full-text search are expressed through hxpr's
   AdvancedQuery API rather than hand-built query strings, which is what powers the metadata filters on
   hybrid search and the `/search/facets` endpoint
+- **Content is fingerprinted, and the fingerprint covers the pipeline configuration** -- the
+  `modifiedAt` staleness guard cannot tell that content is byte-identical, so a permission change or a
+  property edit used to re-chunk and re-embed unchanged bytes, which is the largest avoidable consumer
+  of the pipeline's bottleneck. `contentLake_contentFingerprint` covers the embedding type and the
+  chunking parameters as well as the extracted text, because a fingerprint over text alone would match
+  after a model change and strand the corpus on the retired model's vectors
