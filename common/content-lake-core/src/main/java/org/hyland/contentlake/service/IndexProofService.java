@@ -26,11 +26,13 @@ import java.util.Map;
  * <h3>Why the chunk count is taken with a vector query</h3>
  * <p>hxpr has no aggregation endpoint over the embeddings index: {@code termsAggregation} covers the
  * document index only, and {@code GET /api/documents/{docId}/embedding/{embeddingId}} needs an id the
- * caller does not have yet. A vector query filtered to one {@code cin_id} with {@code trackTotalCount}
- * reports the total and returns the chunk ids, types and text in the same call. The vector itself is
- * irrelevant to the count because the HXQL filter does the selecting, so a fixed probe string is
- * embedded once and cached: correct dimensionality by construction, no per-request model call, and a
- * deterministic result.</p>
+ * caller does not have yet. A vector query filtered to one {@code cin_id} returns the document's chunk
+ * rows, with their ids, types and text. The vector itself is irrelevant to the count because the HXQL
+ * filter does the selecting, so a fixed probe string is embedded once and cached: correct dimensionality
+ * by construction, no per-request model call, and a deterministic result.</p>
+ *
+ * <p>The count is the number of rows returned, walked a page at a time, rather than the response's
+ * {@code totalCount} -- which reports {@code limit + offset} rather than the true total (#128).</p>
  */
 @Slf4j
 public class IndexProofService {
@@ -51,6 +53,16 @@ public class IndexProofService {
 
     /** Chunk text is truncated to this many characters: enough to recognise a chunk, no more. */
     public static final int TEXT_PREFIX_CHARS = 200;
+
+    /**
+     * Rows requested per counting page. Above any realistic chunk count for one document, so the count
+     * costs a single call in normal operation, and small enough that the discarded rows beyond the
+     * sample are not a large response.
+     */
+    static final int COUNT_PAGE_SIZE = 100;
+
+    /** Ceiling on the walk, so one pathological document cannot make a proof unbounded. */
+    static final int MAX_COUNT_PAGES = 100;
 
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
@@ -146,6 +158,15 @@ public class IndexProofService {
     /**
      * Counts and samples the document's chunks off the embeddings index.
      *
+     * <p>The count is the number of rows walked, not {@code totalCount}. Probing
+     * {@code POST /api/query/embeddings} against a 587-row index returned a {@code totalCount} equal to
+     * {@code limit + offset} in every case, with {@code trackTotalCountUpTo: -1} making no difference, so
+     * the reported total says how much was asked for rather than how much exists (#128). Trusting it
+     * capped a document's chunk count at the sample size, which inverts the diagnostic this service
+     * exists for: a document with more chunks than the sample would show fewer measured chunks than its
+     * section map claims, and so read as embedded-but-unretrievable when it is healthy. Counting rows is
+     * correct whether or not the platform ever starts reporting a true total.</p>
+     *
      * <p>{@code POST /api/query/embeddings} returns intermittent 500s, so a failure here degrades to
      * a null count plus an error rather than failing the whole proof.</p>
      */
@@ -153,34 +174,54 @@ public class IndexProofService {
         String hxqlFilter = String.format(
                 "SELECT * FROM SysFile WHERE cin_id = '%s'", AclFilterBuilder.escapeLiteral(nodeId));
 
-        // A sample of 0 still needs a positive limit for the count to come back; the rows are then
-        // discarded rather than returned.
-        int limit = Math.max(1, sample);
+        long counted = 0;
+        boolean truncated = false;
+        List<IndexProof.ChunkRef> chunkSample = new ArrayList<>();
 
         try {
-            // embeddingType null so hxpr substitutes the * wildcard: the count must span every type,
-            // including one left behind by a retired model (#113).
-            // The limit bounds the returned rows, not the reported total, so the response size does
-            // not grow with the document.
-            VectorSearchResult result = hxprService.vectorSearch(probeVector(), null, hxqlFilter, limit);
+            for (int page = 0; page < MAX_COUNT_PAGES; page++) {
+                // embeddingType null so hxpr substitutes the * wildcard: the count must span every type,
+                // including one left behind by a retired model (#113).
+                VectorSearchResult result = hxprService.vectorSearch(
+                        probeVector(), null, hxqlFilter, null, COUNT_PAGE_SIZE, page * COUNT_PAGE_SIZE);
 
-            if (result == null) {
-                return new ChunkMeasurement(null, null, List.of(),
-                        "Embeddings query returned no result for document " + documentId);
-            }
+                if (result == null) {
+                    if (page == 0) {
+                        return new ChunkMeasurement(null, null, List.of(),
+                                "Embeddings query returned no result for document " + documentId);
+                    }
+                    // Rows were counted before the walk broke down, so the count is a floor rather than
+                    // nothing. Saying so is more useful than discarding what was measured.
+                    truncated = true;
+                    break;
+                }
 
-            Long total = result.getTotalCount() != null ? result.getTotalCount() : result.getCount();
-            List<IndexProof.ChunkRef> chunkSample = new ArrayList<>();
-            if (sample > 0 && result.getEmbeddings() != null) {
-                for (Embedding embedding : result.getEmbeddings()) {
-                    chunkSample.add(toChunkRef(embedding));
+                List<Embedding> rows = result.getEmbeddings();
+                if (rows == null || rows.isEmpty()) {
+                    break;
+                }
+                counted += rows.size();
+
+                for (Embedding embedding : rows) {
                     if (chunkSample.size() >= sample) {
                         break;
                     }
+                    chunkSample.add(toChunkRef(embedding));
+                }
+
+                if (rows.size() < COUNT_PAGE_SIZE) {
+                    break;
+                }
+                if (page == MAX_COUNT_PAGES - 1) {
+                    // A document with more chunks than the walk covers: report the floor as approximate
+                    // rather than a total that happens to be where the walk stopped.
+                    truncated = true;
+                    log.warn("Index proof for {}: chunk count stopped at the {}-row ceiling",
+                            nodeId, MAX_COUNT_PAGES * COUNT_PAGE_SIZE);
                 }
             }
 
-            return new ChunkMeasurement(total, result.getTotalCountIsTruncated(), chunkSample, null);
+            return new ChunkMeasurement(counted, truncated, chunkSample, null);
 
         } catch (Exception e) {
             log.warn("Index proof for {}: embeddings query failed: {}", nodeId, e.getMessage());

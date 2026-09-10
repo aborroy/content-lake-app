@@ -46,9 +46,10 @@ public record IndexProof(
      * @param cinSourceId         the {@code cin_sourceId} variant the document was actually found
      *                            under, which differs from the queried value for documents indexed
      *                            before the {@code type:rawId} format
-     * @param chunkCount          chunks the embeddings index holds, {@code null} when the count
-     *                            could not be taken
-     * @param chunkCountTruncated whether hxpr reported the count as approximate
+     * @param chunkCount          chunks the embeddings index holds, counted by walking the rows,
+     *                            {@code null} when the count could not be taken
+     * @param chunkCountTruncated whether the count is a floor rather than the total, because the walk
+     *                            stopped at its row ceiling or broke down part way
      * @param embeddingTypes      every type the document has an embedding child for, so a child left
      *                            behind by a retired model is visible
      * @param embeddingChildren   the embedding children themselves, name and id
