@@ -124,6 +124,82 @@ public class RagProperties {
     /** Span payloads and content capture on the RAG pipeline spans (#116). Both off by default. */
     private ObservabilityProperties observability = new ObservabilityProperties();
 
+    /** Multi-embedding-type retrieval and the re-embedding backfill (#121). */
+    private EmbeddingProperties embedding = new EmbeddingProperties();
+
+    /**
+     * Querying a corpus that holds vectors from more than one embedding model, and moving it onto a
+     * new one without search degrading in the meantime (#121).
+     *
+     * <p>Changing the embedding model invalidates every vector, so an upgrade would otherwise mean a
+     * full re-ingest with search degraded throughout, which makes model upgrades indefinitely
+     * deferrable.</p>
+     */
+    @Data
+    public static class EmbeddingProperties {
+
+        /**
+         * Models, besides the configured one, whose vectors are still present in the corpus.
+         *
+         * <p>Empty by default, which leaves retrieval on exactly the single-type path it has always
+         * used. Naming a model here is what allows its type to be queried <em>in its own vector
+         * space</em>: the query is embedded once per model, because a vector from one model has no
+         * meaningful similarity to vectors from another. A type present in the corpus but not named
+         * here is still queried, using the configured model, which is no worse than the wildcard does
+         * today but is not a correct comparison either.</p>
+         *
+         * <p>Coexisting types must share vector dimensionality, which is a property of the index
+         * rather than of this setting.</p>
+         */
+        private List<String> additionalModels = new ArrayList<>();
+
+        /** Reading back the embedding types actually present in the index. */
+        private TypeDiscoveryProperties typeDiscovery = new TypeDiscoveryProperties();
+
+        /** The re-embedding backfill job. */
+        private BackfillProperties backfill = new BackfillProperties();
+
+        @Data
+        public static class TypeDiscoveryProperties {
+
+            /**
+             * When true, the embedding types to query are read from the index rather than assumed from
+             * configuration. This is what finds a type written by a retired model, and what tolerates a
+             * type recorded in a form the current derivation does not produce. Turning it off pins
+             * retrieval to the configured type alone.
+             */
+            private boolean enabled = true;
+
+            /**
+             * How long the discovered set is reused. It is a property of the corpus, not of a request,
+             * and it changes only when a model is introduced or retired.
+             */
+            private long ttlSeconds = 300;
+        }
+
+        @Data
+        public static class BackfillProperties {
+
+            /**
+             * Enables the backfill endpoints. Off by default: the job writes to every document in the
+             * corpus and spends embedding throughput, so it is started deliberately.
+             */
+            private boolean enabled = false;
+
+            /**
+             * Documents processed per minute, which is what makes the job something that can run
+             * against a live system. Zero or less means no limit.
+             */
+            private int docsPerMinute = 60;
+
+            /**
+             * Accounts allowed to start, pause and resume the job. Empty by default, so the endpoints
+             * are closed until a deployment names an operator.
+             */
+            private List<String> operatorUsers = new ArrayList<>();
+        }
+    }
+
     @Data
     public static class RerankerProperties {
 

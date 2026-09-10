@@ -112,6 +112,21 @@ rag:
       base-path: ${RAG_CONVERSATION_SUMMARY_BASE_PATH:/_sessions}
   # Query expansion. Shared bounds for multi-query, HyDE and decomposition, all of which append to the
   # same variant list; max-variants is the ceiling on the per-request embedding and hxpr call count.
+  # Multi-embedding-type retrieval (#121). additional-models is empty by default, which leaves the
+  # vector leg on the single-type path it has always used. Naming a model here lets its embedding type
+  # be queried in its own vector space, which is what keeps recall from dropping for documents still on
+  # a previous model during a migration. Coexisting types must share vector dimensionality.
+  embedding:
+    additional-models: ${RAG_EMBEDDING_ADDITIONAL_MODELS:}
+    type-discovery:
+      enabled: ${RAG_EMBEDDING_TYPE_DISCOVERY_ENABLED:true}
+      ttl-seconds: ${RAG_EMBEDDING_TYPE_DISCOVERY_TTL_SECONDS:300}
+    # Re-embeds the corpus into the configured type while the previous one keeps serving queries. Off
+    # by default, and operator-gated: it writes to every document and spends embedding throughput.
+    backfill:
+      enabled: ${RAG_EMBEDDING_BACKFILL_ENABLED:false}
+      docs-per-minute: ${RAG_EMBEDDING_BACKFILL_DOCS_PER_MINUTE:60}
+      operator-users: ${RAG_EMBEDDING_BACKFILL_OPERATOR_USERS:}
   # rrf-k here fuses across variants, one level above search.hybrid.rrf-k which fuses the two legs.
   query-expansion:
     max-variants: ${RAG_QUERY_EXPANSION_MAX_VARIANTS:6}
@@ -244,6 +259,18 @@ search:
     final-results: ${SEARCH_HYBRID_FINAL_RESULTS:${HYBRID_SEARCH_MAX_RESULTS:20}}
     rrf-k: ${SEARCH_HYBRID_RRF_K:${HYBRID_SEARCH_RRF_K:60}}
     default-min-score: ${SEARCH_HYBRID_MIN_SCORE:${HYBRID_SEARCH_MIN_SCORE:0.01}}
+
+# Chunking parameters, read only by the embedding backfill (#121). It re-chunks stored text, so these
+# must be the same EMBEDDING_* values the ingesters use, or a backfilled document would be chunked
+# differently from a synced one.
+embedding:
+  min-chunk-size: ${EMBEDDING_MIN_CHUNK_SIZE:200}
+  chunk-size: ${EMBEDDING_CHUNK_SIZE:1024}
+  chunk-overlap: ${EMBEDDING_CHUNK_OVERLAP:256}
+  similarity-threshold: ${EMBEDDING_SIMILARITY_THRESHOLD:0.75}
+  noise-reduction:
+    enabled: ${NOISE_REDUCTION_ENABLED:true}
+    aggressive: ${NOISE_REDUCTION_AGGRESSIVE:false}
 
 # Actuator
 management:

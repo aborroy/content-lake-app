@@ -324,14 +324,26 @@ public class HxprService {
      *         abort, otherwise a stale child would survive alongside the new one.
      */
     public List<EmbeddingChild> listEmbeddingChildren(String documentId) {
+        return listEmbeddingChildren(documentId, true);
+    }
+
+    /**
+     * Lists a document's embedding children, optionally without first waiting for the index.
+     *
+     * <p>The wait costs up to {@link #INDEX_WAIT_TIMEOUT_SECONDS} seconds <em>per call</em>, which is
+     * the right trade for a single sync about to replace a child but dominates a job that walks the
+     * whole corpus. Such a caller waits once before it starts and passes {@code false} here.</p>
+     *
+     * @param documentId  hxpr document identifier
+     * @param waitForIndex whether to wait for full-text indexing before querying. Pass {@code true}
+     *                     when a stale answer would let a duplicate child be created.
+     */
+    public List<EmbeddingChild> listEmbeddingChildren(String documentId, boolean waitForIndex) {
         // hxpr's query index is eventually consistent: a child created on a prior sync may not yet
         // be visible here, so the lookup would miss it and a re-sync would create a duplicate. Wait
         // for the index to catch up before querying (same eventual-consistency class as #78).
-        try {
-            queryApi.waitForFullTextSearchIndexing(true, INDEX_WAIT_TIMEOUT_SECONDS);
-        } catch (Exception e) {
-            log.warn("waitForFullTextSearchIndexing failed before embedding-child lookup for {}: {}",
-                    documentId, e.getMessage());
+        if (waitForIndex) {
+            awaitIndex(documentId);
         }
 
         String hxql = String.format(
@@ -369,6 +381,20 @@ public class HxprService {
     }
 
     /**
+     * Waits for hxpr's full-text index to catch up, so a child written by a prior call is visible.
+     *
+     * <p>Best effort: a failed wait is logged and the lookup proceeds, because a stale answer is
+     * better than no answer for every caller that has one.</p>
+     */
+    public void awaitIndex(String context) {
+        try {
+            queryApi.waitForFullTextSearchIndexing(true, INDEX_WAIT_TIMEOUT_SECONDS);
+        } catch (Exception e) {
+            log.warn("waitForFullTextSearchIndexing failed for {}: {}", context, e.getMessage());
+        }
+    }
+
+    /**
      * Deletes every embedding child of a document, whatever type it was written under.
      *
      * @throws RuntimeException if the lookup or any delete fails; the caller must abort
@@ -381,21 +407,49 @@ public class HxprService {
     /**
      * Deletes a document's embedding children, optionally narrowed to one embedding type.
      *
-     * <p>A null {@code onlyType} removes every child. A non-null one removes the canonical child
-     * name ({@code _e_{onlyType}}) plus any auto-suffixed siblings hxpr created for a name
-     * collision, so a re-sync of an unchanged node nets to a single fresh child.</p>
+     * <p>A null {@code onlyType} removes every child, whatever type it carries. A non-null one removes
+     * only the child whose type matches <em>exactly</em>, which is precisely what the write path needs:
+     * the create that follows uses {@code enforceSysName=true} and so would 409 on a surviving
+     * {@code _e_{onlyType}}, and no other child can block it.</p>
+     *
+     * <p>The match is deliberately exact rather than a prefix. A prefix match cannot tell a sibling type
+     * from a suffixed version of this one: with {@code onlyType} of {@code ai-mxbai-embed-large}, an
+     * existing {@code _e_ai-mxbai-embed-large-v2} child starts with it and was therefore deleted, so a
+     * sync under one model silently destroyed another model's vectors. That is the opposite of what
+     * multi-type retrieval exists for, and it fails in the dangerous direction: the deletion succeeds,
+     * the sync reports success, and the loss only shows up as missing search results. Derived types are
+     * not reserved prefixes of one another -- {@code nomic-embed-text-v1} and
+     * {@code nomic-embed-text-v1.5} are both legitimate and one prefixes the other -- so there is no
+     * prefix rule that is safe.</p>
+     *
+     * <p>What the prefix match also did, and this no longer does, is mop up children hxpr auto-suffixed
+     * as {@code _e_{type}.{random}} when a name collided. Those cannot be created any more: the child
+     * create has enforced {@code sys_name} uniqueness since #80 and returns 409 instead. Any left in an
+     * index written before that are removed by clearing the document's embeddings, which is
+     * type-agnostic ({@link #deleteEmbeddings}), rather than by guessing from a name which type a child
+     * belongs to. Guessing is what lost data.</p>
      *
      * @throws RuntimeException if the lookup or any delete fails; the caller must abort
      *         before creating a new child, otherwise duplicates would survive.
      */
     private void deleteEmbeddingChildren(String documentId, String onlyType) {
         for (EmbeddingChild child : listEmbeddingChildren(documentId)) {
-            if (onlyType != null && !child.embeddingType().startsWith(onlyType)) {
+            if (!isDeletable(child.embeddingType(), onlyType)) {
                 continue;
             }
             log.debug("Deleting existing embedding child: {} ({})", child.sysId(), child.sysName());
             documentApi.deleteById(child.sysId());
         }
+    }
+
+    /**
+     * Whether a child of {@code childType} is in scope for a delete narrowed to {@code onlyType}.
+     *
+     * <p>Exact equality, or everything when {@code onlyType} is null. Package-private so the rule can be
+     * asserted directly: it is one comparison, but getting it wrong deletes another model's vectors.</p>
+     */
+    static boolean isDeletable(String childType, String onlyType) {
+        return onlyType == null || onlyType.equals(childType);
     }
 
     /**
@@ -776,6 +830,26 @@ public class HxprService {
      */
     public VectorSearchResult vectorSearch(List<Double> vector, String embeddingType, String hxqlFilter,
                                            String chunkFTS, int limit) {
+        return vectorSearch(vector, embeddingType, hxqlFilter, chunkFTS, limit, 0);
+    }
+
+    /**
+     * Vector similarity search over one page of embedding rows.
+     *
+     * <p>The offset exists for scans that walk the embeddings index rather than answer a query, which
+     * is the only way to read the rows' own {@code sysembed_type}: there is no aggregation endpoint over
+     * the embeddings index, {@code termsAggregation} covering the document index only.</p>
+     *
+     * @param vector        query vector
+     * @param embeddingType embedding type, or {@code "*"} when {@code null}
+     * @param hxqlFilter    hxql filter, or a default query when {@code null}
+     * @param chunkFTS      space-separated terms matched against chunk text by hxpr, or {@code null}
+     * @param limit         max results in this page
+     * @param offset        index of the first row to return
+     * @return vector search result
+     */
+    public VectorSearchResult vectorSearch(List<Double> vector, String embeddingType, String hxqlFilter,
+                                           String chunkFTS, int limit, int offset) {
         VectorQuery vq = new VectorQuery();
         vq.setVector(vector);
         vq.setEmbeddingType(embeddingType != null ? embeddingType : "*");
@@ -784,7 +858,7 @@ public class HxprService {
             vq.setChunkFTS(chunkFTS);
         }
         vq.setLimit((long) limit);
-        vq.setOffset(0L);
+        vq.setOffset((long) offset);
         vq.setTrackTotalCount(true);
         return queryApi.vectorSearch(vq);
     }

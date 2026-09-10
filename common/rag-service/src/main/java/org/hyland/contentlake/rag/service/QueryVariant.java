@@ -25,12 +25,18 @@ import java.util.List;
  *                      whatever the global chunk-FTS mode is set to. Only the verbatim-identifier
  *                      variant uses it, where restricting to chunks containing the token is the entire
  *                      point of the pass
+ * @param documentSideVector true when {@code vectorText} must be embedded <em>document-side</em>, with
+ *                      no query instruction prefix. HyDE's passage is answer-shaped prose and belongs
+ *                      in the same region of the space as real chunks; a question does not. This is
+ *                      distinct from carrying a pre-computed vector, which only says the embedding call
+ *                      has already been made: the verbatim variant carries a query-side one
  */
 public record QueryVariant(String label,
                            String vectorText,
                            List<Double> vectorVector,
                            String keywordText,
-                           boolean forceChunkFts) {
+                           boolean forceChunkFts,
+                           boolean documentSideVector) {
 
     /** The user's query, unmodified, embedded query-side and driving both legs. */
     public static final String LABEL_ORIGINAL = "original";
@@ -40,17 +46,17 @@ public record QueryVariant(String label,
 
     /** The variant every search runs, with or without expansion enabled. */
     public static QueryVariant original(String query) {
-        return new QueryVariant(LABEL_ORIGINAL, query, null, query, false);
+        return new QueryVariant(LABEL_ORIGINAL, query, null, query, false, false);
     }
 
     /** An alternative phrasing of the question; drives both legs, embedded query-side. */
     public static QueryVariant rephrased(String label, String text) {
-        return new QueryVariant(label, text, null, text, false);
+        return new QueryVariant(label, text, null, text, false, false);
     }
 
     /** A vector-only variant carrying its own document-side embedding. */
     public static QueryVariant vectorOnly(String label, String text, List<Double> vector) {
-        return new QueryVariant(label, text, vector, null, false);
+        return new QueryVariant(label, text, vector, null, false, true);
     }
 
     /**
@@ -68,7 +74,8 @@ public record QueryVariant(String label,
      * @param identifiers the identifier-like tokens found in the query
      */
     public static QueryVariant verbatim(String query, List<Double> queryVector, List<String> identifiers) {
-        return new QueryVariant(LABEL_VERBATIM, query, queryVector, String.join(" ", identifiers), true);
+        return new QueryVariant(LABEL_VERBATIM, query, queryVector, String.join(" ", identifiers),
+                true, false);
     }
 
     /** True when this variant should contribute to the keyword leg. */
@@ -88,6 +95,6 @@ public record QueryVariant(String label,
         if (vectorVector != null || vector == null || vector.isEmpty()) {
             return this;
         }
-        return new QueryVariant(label, vectorText, vector, keywordText, forceChunkFts);
+        return new QueryVariant(label, vectorText, vector, keywordText, forceChunkFts, documentSideVector);
     }
 }

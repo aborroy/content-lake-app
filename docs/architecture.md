@@ -369,6 +369,17 @@ prose noise.
   (`FacetsService`), vocabulary lookup and chunk full-text search are expressed through hxpr's
   AdvancedQuery API rather than hand-built query strings, which is what powers the metadata filters on
   hybrid search and the `/search/facets` endpoint
+- **Embedding types are read from the index, and each is queried with its own model** -- a corpus can
+  hold vectors from more than one embedding model, and the types that matter during a model migration
+  are exactly the ones configuration no longer names, so `EmbeddingTypeCatalog` discovers them from
+  `sysembed_type` on the embedding rows rather than deriving them. It reads the row rather than the
+  embedding child's name because the row's type is the field a type-restricted query matches on, and the
+  two can disagree on a corpus written before they were reconciled. A query vector from one model has no
+  interpretable
+  similarity to another model's vectors, so `MultiTypeVectorSearchService` embeds the query once per
+  model and restricts each search to that model's type, then normalises each type's scores by that
+  type's best before merging. With one active type it makes exactly the single wildcard call that
+  predates it, so a single-model corpus is unaffected
 - **Content is fingerprinted, and the fingerprint covers the pipeline configuration** -- the
   `modifiedAt` staleness guard cannot tell that content is byte-identical, so a permission change or a
   property edit used to re-chunk and re-embed unchanged bytes, which is the largest avoidable consumer

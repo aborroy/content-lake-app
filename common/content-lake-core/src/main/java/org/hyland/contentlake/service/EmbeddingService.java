@@ -5,8 +5,11 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.model.Chunk;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.embedding.EmbeddingOptions;
 import org.springframework.ai.embedding.EmbeddingRequest;
 import org.springframework.ai.embedding.EmbeddingResponse;
+import org.springframework.ai.openai.OpenAiEmbeddingModel;
+import org.springframework.ai.openai.OpenAiEmbeddingOptions;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -68,9 +71,59 @@ public class EmbeddingService {
     @Getter
     private final String modelName;
 
+    /**
+     * Per-request options sent with every call, or {@code null} to use the model's own defaults.
+     *
+     * <p>Non-null only on a {@link #forModel(String)} view, which is how a second embedding model is
+     * reached without a second {@code EmbeddingModel} bean.</p>
+     */
+    private final EmbeddingOptions options;
+
     public EmbeddingService(EmbeddingModel embeddingModel, String modelName) {
+        this(embeddingModel, modelName, null);
+    }
+
+    public EmbeddingService(EmbeddingModel embeddingModel, String modelName, EmbeddingOptions options) {
         this.embeddingModel = embeddingModel;
         this.modelName = modelName;
+        this.options = options;
+    }
+
+    /**
+     * A view of this service that calls a different model on the same endpoint.
+     *
+     * <p>Needed by multi-embedding-type retrieval: a corpus holding vectors from two models can only
+     * be queried correctly by embedding the query once per model, since a vector from one model has no
+     * meaningful similarity to vectors from another. This produces the second embedder without a
+     * second bean, by overriding the model on the request options.</p>
+     *
+     * <p>The override is built <em>from</em> the model's own options, not from a bare builder, so the
+     * base URL, credentials and timeouts configured for the endpoint are carried over rather than
+     * left to whatever a merge would decide.</p>
+     *
+     * @param otherModelName the model to call instead
+     * @return a service calling {@code otherModelName}, or {@code null} when the underlying
+     *         {@code EmbeddingModel} does not support a per-request model override. Callers must treat
+     *         {@code null} as "this type cannot be queried in its own space" rather than substituting
+     *         this service, which would silently score foreign vectors in the wrong space.
+     */
+    public EmbeddingService forModel(String otherModelName) {
+        if (otherModelName == null || otherModelName.isBlank()) {
+            return null;
+        }
+        if (otherModelName.equals(modelName)) {
+            return this;
+        }
+        if (!(embeddingModel instanceof OpenAiEmbeddingModel openAi)) {
+            log.warn("Cannot target embedding model '{}': {} does not support a per-request model "
+                            + "override, so that embedding type cannot be queried in its own space",
+                    otherModelName, embeddingModel.getClass().getSimpleName());
+            return null;
+        }
+
+        OpenAiEmbeddingOptions.Builder builder = OpenAiEmbeddingOptions.builder().from(openAi.getOptions());
+        builder.model(otherModelName);
+        return new EmbeddingService(embeddingModel, otherModelName, builder.build());
     }
 
     /**
@@ -164,7 +217,7 @@ public class EmbeddingService {
         text = pretruncateForTokenLimit(text);
 
         try {
-            EmbeddingResponse response = embeddingModel.call(new EmbeddingRequest(List.of(text), null));
+            EmbeddingResponse response = embeddingModel.call(new EmbeddingRequest(List.of(text), options));
             float[] embedding = response.getResults().get(0).getOutput();
             return toDoubleList(embedding);
 

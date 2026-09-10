@@ -181,6 +181,60 @@ class HxprServiceEmbeddingChildTest {
         assertThat(service().getEmbeddingType()).isEqualTo(EMBEDDING_TYPE);
     }
 
+    // ---------------------------------------------------------------
+    // Which children a type-narrowed delete may remove (#121)
+    // ---------------------------------------------------------------
+
+    @Test
+    void aNarrowedDeleteRemovesTheExactTypeItNames() {
+        assertThat(HxprService.isDeletable(EMBEDDING_TYPE, EMBEDDING_TYPE)).isTrue();
+    }
+
+    @Test
+    void aNullTypeRemovesEverything_whichIsWhatClearingADocumentMeans() {
+        assertThat(HxprService.isDeletable(EMBEDDING_TYPE, null)).isTrue();
+        assertThat(HxprService.isDeletable("ai-nomic-embed-text", null)).isTrue();
+    }
+
+    /**
+     * The defect this replaced. A prefix match deleted a sibling type whose name merely extends the one
+     * being written, so a sync under one model destroyed another model's vectors while reporting
+     * success. Coexisting types are the entire point of multi-type retrieval.
+     */
+    @Test
+    void aNarrowedDeleteLeavesASiblingTypeThatMerelyExtendsTheName() {
+        assertThat(HxprService.isDeletable("ai-mxbai-embed-large-v2", EMBEDDING_TYPE)).isFalse();
+        assertThat(HxprService.isDeletable("ai-mxbai-embed-large-latest", EMBEDDING_TYPE)).isFalse();
+    }
+
+    /**
+     * Why no prefix rule is safe, not even one requiring a separator: real model versions prefix one
+     * another, and the derivation keeps the dot.
+     */
+    @Test
+    void aNarrowedDeleteLeavesAPointVersionOfTheTypeItNames() {
+        assertThat(HxprService.isDeletable("nomic-embed-text-v1.5", "nomic-embed-text-v1")).isFalse();
+    }
+
+    /**
+     * A child hxpr auto-suffixed for a name collision is no longer in scope either. It cannot be created
+     * any more, since the child create has enforced sys_name uniqueness since #80 and 409s instead, and
+     * one left by an older index is removed by clearing the document rather than by inferring ownership
+     * from a name. That inference is what deleted live data.
+     */
+    @Test
+    void aNarrowedDeleteLeavesAnAutoSuffixedChildToTheTypeAgnosticClearPath() {
+        assertThat(HxprService.isDeletable(EMBEDDING_TYPE + ".123456789", EMBEDDING_TYPE)).isFalse();
+        assertThat(HxprService.isDeletable(EMBEDDING_TYPE + ".123456789", null))
+                .as("still removed when the whole document is cleared")
+                .isTrue();
+    }
+
+    @Test
+    void aNarrowedDeleteLeavesAnUnrelatedType() {
+        assertThat(HxprService.isDeletable("ai-nomic-embed-text", EMBEDDING_TYPE)).isFalse();
+    }
+
     private HxprService service() {
         return new HxprService(documentApi, queryApi, restClient, EMBEDDING_TYPE);
     }

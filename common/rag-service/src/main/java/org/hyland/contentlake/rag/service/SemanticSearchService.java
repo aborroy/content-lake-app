@@ -71,6 +71,12 @@ public class SemanticSearchService {
     private final QueryExpansionService queryExpansionService;
     private final RagProperties ragProperties;
     private final NamedQueryService namedQueryService;
+    /**
+     * Optional (#121): the vector leg over every embedding type the corpus holds. Null in unit tests
+     * that construct this service without it, in which case the leg makes the same single wildcard
+     * call it always did.
+     */
+    private final MultiTypeVectorSearchService multiTypeVectorSearch;
     /** Optional (#72): null in unit tests that construct this service without the cache collaborator. */
     private final RagQueryCache queryCache;
     /** Optional (#73): null in unit tests that construct this service without the tracing collaborator. */
@@ -304,12 +310,8 @@ public class SemanticSearchService {
         String filter = hxqlFilter.get();
         log.debug("Executing vector search with filter: {}", filter);
         final List<Double> vector = queryVector;
-        VectorSearchResult vectorResult = traced("rag.search.vector", () -> hxprService.vectorSearch(
-                vector,
-                request.getEmbeddingType(),
-                filter,
-                topK
-        ));
+        VectorSearchResult vectorResult = traced("rag.search.vector",
+                () -> vectorLeg(variant, vector, request.getEmbeddingType(), filter, topK));
 
         if (vectorResult == null || vectorResult.getEmbeddings() == null || vectorResult.getEmbeddings().isEmpty()) {
             log.info("No results for query: \"{}\"", variant.vectorText());
@@ -338,6 +340,31 @@ public class SemanticSearchService {
                 .searchTimeMs(searchTimeMs)
                 .results(hits)
                 .build();
+    }
+
+    /**
+     * The kNN call, over every embedding type present when multi-type retrieval is wired (#121) and
+     * over the {@code *} wildcard when it is not.
+     *
+     * <p>A second model embeds this variant the same way the primary did: document-side for a variant
+     * that arrived with a pre-computed vector (HyDE's passage must not get the query instruction
+     * prefix), query-side otherwise.</p>
+     */
+    private VectorSearchResult vectorLeg(QueryVariant variant, List<Double> vector,
+                                         String embeddingType, String filter, int topK) {
+        if (multiTypeVectorSearch == null) {
+            return hxprService.vectorSearch(vector, embeddingType, filter, topK);
+        }
+
+        boolean documentSide = variant.documentSideVector();
+        return multiTypeVectorSearch.search(MultiTypeVectorSearchService.Request.of(
+                vector,
+                embedder -> documentSide
+                        ? embedder.embed(variant.vectorText())
+                        : embedder.embedQuery(variant.vectorText()),
+                embeddingType,
+                filter,
+                topK));
     }
 
     /** Outcome of a single variant's retrieval pass. */

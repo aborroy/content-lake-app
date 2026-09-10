@@ -769,7 +769,9 @@ public class NodeSyncService {
             HxprEmbedding emb = new HxprEmbedding();
             emb.setText(cwe.chunk().getText());
             emb.setVector(cwe.embedding());
-            emb.setType(embeddingService.getModelName());
+            // The derived embedding type, not the raw model name: it is what a query matches
+            // sysembed_type against and what names the embedding child, so the two must agree.
+            emb.setType(hxprService.getEmbeddingType());
             emb.setLocation(buildLocation(cwe.chunk().getIndex()));
             emb.setChunkId(cwe.chunk().getId());
             result.add(emb);

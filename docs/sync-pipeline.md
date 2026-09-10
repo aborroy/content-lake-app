@@ -355,3 +355,41 @@ Two consequences worth knowing:
 - Clearing a document's embeddings is type-agnostic: it removes every `_e_*` child, not only the one
   matching the current configuration. That is what stops a child written under a previously configured
   model from surviving a re-sync and continuing to answer queries.
+
+The derived type is written in two places that must agree: the child's `sys_name` and every Parquet
+row's `type` column, which is the `sysembed_type` an embeddings query matches on. Both come from the
+same argument in `ParquetEmbeddingWriter`, so they cannot diverge. They previously did, with the row
+carrying the raw configured model instead, which is invisible while the read path substitutes the `*`
+wildcard and is a total retrieval failure as soon as a query names a type.
+
+### Several types at once
+
+A corpus can hold vectors from more than one model, which is what makes a model upgrade something
+other than a full re-ingest with search degraded throughout:
+
+- `EmbeddingTypeCatalog` reads the types actually present from `sysembed_type` on the embedding rows,
+  cached for `rag.embedding.type-discovery.ttl-seconds`. Reading them back rather than deriving them is
+  what finds a type written by a retired model. It has to be the row's own type and not the child
+  document's `sys_name`: the name is always the sanitized derivation, so a name-based scan cannot see a
+  row that recorded the raw model name, and would report a type matching none of those rows. Every type
+  it reports therefore provably matches rows, because a row carrying it is how it was found.
+- There is no aggregation endpoint over the embeddings index, so that scan is a paged wildcard vector
+  query and is a sample rather than an enumeration. A type holding a very small share of a corpus larger
+  than the scan ceiling can be missed, and a type nobody discovers is a type nobody queries, so the
+  coverage achieved is logged. `rag.embedding.additional-models` pins the types when that matters.
+- `MultiTypeVectorSearchService` runs one search per active type, each with a query vector from that
+  type's own model, then normalises each type's scores by that type's best score before merging on the
+  best score per chunk. Both halves matter: a query vector from one model has no meaningful similarity
+  to another model's vectors, and two models' score scales differ, so without normalisation whichever
+  reports larger numbers would win every comparison.
+- With one active type this collapses to exactly the single wildcard call the services made before, so
+  a single-model corpus is unaffected.
+- A model whose vectors are still present must be listed in `rag.embedding.additional-models` for its
+  type to be queried in its own space. A type present but unlisted is still searched, using the
+  configured model, which is what the wildcard already did for it.
+- `EmbeddingBackfillService` re-embeds the corpus into the configured type at a controlled rate,
+  leaving other types in place so they keep answering queries until it finishes. It re-chunks the stored
+  extracted-text mirror rather than re-extracting from the source, so it needs no source credentials but
+  does not reproduce the original chunk boundaries exactly. It therefore leaves the content fingerprint
+  stale on purpose, so the next content sync reprocesses that document properly. Resuming re-scans and
+  skips documents that already carry the target type, which is why there is no cursor to persist.

@@ -86,7 +86,10 @@ public class ParquetEmbeddingWriter {
      * Writes embeddings to a Parquet file and returns the file content as byte array.
      *
      * @param embeddings list of embeddings to write
-     * @param embeddingType identifier for the embedding model (e.g., "mxbai-embed-large")
+     * @param embeddingType the hxpr embedding type every row is written under, as derived by
+     *                      {@code EmbeddingTypeResolver} (e.g. {@code "ai-mxbai-embed-large"}). It is
+     *                      both the child document's name suffix and each row's {@code type}, so the
+     *                      two cannot drift apart.
      * @return byte array containing the Parquet file content
      * @throws IOException if file generation fails
      */
@@ -123,8 +126,14 @@ public class ParquetEmbeddingWriter {
                     String id = embedding.getChunkId() != null ? embedding.getChunkId() : String.valueOf(index);
                     record.put("id", id);
 
-                    // Optional: type (derived from document name, so can be null)
-                    record.put("type", embedding.getType());
+                    // The embedding type of the file, not whatever each row happens to carry. Both
+                    // are in scope only here, and they used to disagree: the child document is named
+                    // _e_{embeddingType} from the sanitized derivation (ai-mxbai-embed-large) while
+                    // the row was written from the raw configured model (ai/mxbai-embed-large). That
+                    // divergence is invisible while the read path substitutes the '*' wildcard and
+                    // becomes a total retrieval failure the moment a query names a type, because
+                    // sysembed_type is what the query matches on.
+                    record.put("type", embeddingType);
 
                     // Required: vector
                     List<Double> vectorList = embedding.getVector();

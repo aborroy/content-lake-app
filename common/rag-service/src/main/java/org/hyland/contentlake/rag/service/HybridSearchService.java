@@ -98,6 +98,14 @@ public class HybridSearchService {
     private final RagProperties ragProperties;
     private final NamedQueryService namedQueryService;
     private final VocabularyService vocabularyService;
+    /**
+     * Optional (#121): the vector leg over every embedding type the corpus holds.
+     *
+     * <p>Null in unit tests that construct this service without it, and in that case the vector leg
+     * makes the same single call it always did. With one active type the two paths are identical by
+     * construction, so a single-model corpus behaves the same either way.</p>
+     */
+    private final MultiTypeVectorSearchService multiTypeVectorSearch;
     /** Optional (#72): null in unit tests that construct this service without the cache collaborator. */
     private final RagQueryCache queryCache;
     /** Optional (#73): null in unit tests that construct this service without the tracing collaborator. */
@@ -441,12 +449,8 @@ public class HybridSearchService {
         String chunkFts = chunkFtsMode ? buildChunkFts(variant.keywordText()) : null;
 
         if (vector != null && !vector.isEmpty()) {
-            // Default path stays on the 4-arg call; only chunk-FTS mode adds the chunkFTS argument.
-            VectorSearchResult vectorResult = traced("rag.search.vector", () -> (chunkFts != null)
-                    ? hxprService.vectorSearch(
-                            vector, request.getEmbeddingType(), permissionFilter, chunkFts, candidateCount)
-                    : hxprService.vectorSearch(
-                            vector, request.getEmbeddingType(), permissionFilter, candidateCount));
+            VectorSearchResult vectorResult = traced("rag.search.vector", () -> vectorLeg(
+                    variant, vector, request.getEmbeddingType(), permissionFilter, chunkFts, candidateCount));
             vectorChunks = extractVectorChunks(vectorResult);
         }
 
@@ -500,6 +504,36 @@ public class HybridSearchService {
 
     /** Outcome of a single variant's retrieval pass, thresholded but not yet limited. */
     private record VariantResult(List<FusedResult> fused, int vectorCount, int keywordCount) {
+    }
+
+    /**
+     * The kNN call, over every embedding type present when multi-type retrieval is wired (#121) and
+     * over the {@code *} wildcard when it is not.
+     *
+     * <p>The per-type embedder mirrors how this variant's own vector was produced: a variant carrying
+     * a pre-computed vector had it embedded document-side (HyDE passes an answer-shaped passage, which
+     * must not get the query instruction prefix), so a second model has to embed it the same way or
+     * the two types would be queried with differently-shaped vectors.</p>
+     */
+    private VectorSearchResult vectorLeg(QueryVariant variant, List<Double> vector, String embeddingType,
+                                         String permissionFilter, String chunkFts, int candidateCount) {
+        if (multiTypeVectorSearch == null) {
+            // Default path stays on the 4-arg call; only chunk-FTS mode adds the chunkFTS argument.
+            return (chunkFts != null)
+                    ? hxprService.vectorSearch(vector, embeddingType, permissionFilter, chunkFts, candidateCount)
+                    : hxprService.vectorSearch(vector, embeddingType, permissionFilter, candidateCount);
+        }
+
+        boolean documentSide = variant.documentSideVector();
+        return multiTypeVectorSearch.search(new MultiTypeVectorSearchService.Request(
+                vector,
+                embedder -> documentSide
+                        ? embedder.embed(variant.vectorText())
+                        : embedder.embedQuery(variant.vectorText()),
+                embeddingType,
+                permissionFilter,
+                chunkFts,
+                candidateCount));
     }
 
     // ---------------------------------------------------------------

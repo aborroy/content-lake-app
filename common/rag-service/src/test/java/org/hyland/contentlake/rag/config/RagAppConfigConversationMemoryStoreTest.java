@@ -22,7 +22,10 @@ class RagAppConfigConversationMemoryStoreTest {
                     // rejected rather than silently defaulted (#113).
                     "spring.ai.openai.embedding.model=ai/mxbai-embed-large"
             )
-            .withBean(EmbeddingModel.class, () -> mock(EmbeddingModel.class));
+            .withBean(EmbeddingModel.class, () -> mock(EmbeddingModel.class))
+            // RagProperties is a @Component in the running application, so this slice has to supply it:
+            // the multi-embedding-type beans (#121) read rag.embedding.* from it.
+            .withBean(RagProperties.class, RagProperties::new);
 
     @Test
     void conversationMemoryStore_withoutCustomBean_usesInMemoryDefault() {

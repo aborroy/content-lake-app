@@ -1,6 +1,7 @@
 package org.hyland.contentlake.rag.config;
 
 import lombok.Data;
+import org.hyland.contentlake.client.EmbeddingTypeCatalog;
 import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprQueryApi;
 import org.hyland.contentlake.client.HxprService;
@@ -9,8 +10,13 @@ import org.hyland.contentlake.client.NamedQueryService;
 import org.hyland.contentlake.client.VocabularyService;
 import org.hyland.contentlake.rag.conversation.ConversationMemoryStore;
 import org.hyland.contentlake.rag.conversation.InMemoryConversationMemoryStore;
+import org.hyland.contentlake.rag.service.MultiTypeVectorSearchService;
+import org.hyland.contentlake.service.EmbeddingBackfillService;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.hyland.contentlake.service.EmbeddingTypeResolver;
+import org.hyland.contentlake.service.chunking.NoiseReductionService;
+import org.hyland.contentlake.service.chunking.SimpleChunkingService;
+import org.hyland.contentlake.service.chunking.strategy.ChunkingStrategy;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
@@ -24,6 +30,9 @@ import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Central Spring configuration for the RAG service infrastructure.
@@ -105,6 +114,94 @@ public class RagAppConfig {
             EmbeddingModel embeddingModel,
             @Value("${spring.ai.openai.embedding.model:}") String embeddingModelName) {
         return new EmbeddingService(embeddingModel, embeddingModelName);
+    }
+
+    // ----------------------------------------------------------------------
+    // Multi-embedding-type retrieval and backfill (#121)
+    // ----------------------------------------------------------------------
+
+    /**
+     * The embedding types present in the index.
+     *
+     * <p>Seeded with the configured type, which is what it falls back to when discovery is off or the
+     * lookup fails, so retrieval keeps working on an index it cannot enumerate.</p>
+     */
+    /**
+     * Text embedded once to obtain a probe vector for the type scan. Its content is immaterial: the scan
+     * reads each returned row's {@code sysembed_type} and discards the scores, exactly as
+     * {@code IndexProofService} does for its chunk count.
+     */
+    private static final String TYPE_DISCOVERY_PROBE_TEXT = "content lake embedding type discovery probe";
+
+    @Bean
+    public EmbeddingTypeCatalog embeddingTypeCatalog(HxprService hxprService,
+                                                     EmbeddingService embeddingService,
+                                                     RagProperties ragProperties,
+                                                     Clock clock) {
+        RagProperties.EmbeddingProperties.TypeDiscoveryProperties discovery =
+                ragProperties.getEmbedding().getTypeDiscovery();
+        return new EmbeddingTypeCatalog(
+                hxprService,
+                () -> embeddingService.embed(TYPE_DISCOVERY_PROBE_TEXT),
+                hxprService.getEmbeddingType(),
+                discovery.isEnabled(),
+                Duration.ofSeconds(discovery.getTtlSeconds()),
+                clock);
+    }
+
+    @Bean
+    public MultiTypeVectorSearchService multiTypeVectorSearchService(HxprService hxprService,
+                                                                    EmbeddingTypeCatalog embeddingTypeCatalog,
+                                                                    EmbeddingService embeddingService,
+                                                                    RagProperties ragProperties) {
+        return new MultiTypeVectorSearchService(hxprService, embeddingTypeCatalog, embeddingService,
+                ragProperties.getEmbedding().getAdditionalModels());
+    }
+
+    /**
+     * Chunking for the backfill only.
+     *
+     * <p>Configured from the same {@code EMBEDDING_*} settings the ingesters use, because the backfill
+     * re-chunks stored text and chunk boundaries that disagreed with the ingesters' would produce a
+     * corpus chunked two different ways.</p>
+     */
+    @Bean
+    public SimpleChunkingService backfillChunkingService(
+            @Value("${embedding.min-chunk-size:200}") int minChunkSize,
+            @Value("${embedding.chunk-size:1024}") int chunkSize,
+            @Value("${embedding.chunk-overlap:256}") int chunkOverlap,
+            @Value("${embedding.similarity-threshold:0.75}") double similarityThreshold,
+            @Value("${embedding.noise-reduction.enabled:true}") boolean noiseReductionEnabled,
+            @Value("${embedding.noise-reduction.aggressive:false}") boolean noiseReductionAggressive) {
+        return new SimpleChunkingService(
+                new NoiseReductionService(noiseReductionEnabled, noiseReductionAggressive),
+                new ChunkingStrategy.ChunkingConfig(minChunkSize, chunkSize, chunkOverlap, similarityThreshold));
+    }
+
+    /**
+     * Single-threaded on purpose: the job's whole point is to spend embedding throughput at a rate an
+     * operator chose, and a pool would make that rate meaningless.
+     */
+    @Bean(destroyMethod = "shutdownNow")
+    public ExecutorService embeddingBackfillExecutor() {
+        return Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "embedding-backfill");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @Bean
+    public EmbeddingBackfillService embeddingBackfillService(HxprService hxprService,
+                                                            EmbeddingService embeddingService,
+                                                            SimpleChunkingService backfillChunkingService,
+                                                            ExecutorService embeddingBackfillExecutor) {
+        return new EmbeddingBackfillService(
+                hxprService,
+                embeddingService,
+                backfillChunkingService::chunk,
+                embeddingBackfillExecutor,
+                Thread::sleep);
     }
 
     @Bean
