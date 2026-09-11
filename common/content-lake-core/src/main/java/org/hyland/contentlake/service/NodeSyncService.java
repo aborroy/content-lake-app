@@ -587,7 +587,15 @@ public class NodeSyncService {
         List<ACE> acl = new ArrayList<>();
 
         for (String authority : authorities) {
-            if (AclFilterBuilder.EVERYONE_AUTHORITY.equals(authority)) {
+            // Both spellings of "everyone" produce the un-namespaced principal: the source-system
+            // authority (GROUP_EVERYONE) and the already-mapped form (__Everyone__), which is what a
+            // source with no ACL model of its own configures directly -- the filesystem connector's
+            // default read principal, and the usual default for a plugin connector. Namespacing that to
+            // __Everyone___#_<sourceId> is silently fatal: the read side matches sys_racl against the
+            // un-namespaced constant, so the document is ingested, embedded, and then invisible to
+            // every caller.
+            if (AclFilterBuilder.EVERYONE_AUTHORITY.equals(authority)
+                    || AclFilterBuilder.EVERYONE_PRINCIPAL.equals(authority)) {
                 acl.add(buildUserAce(AclFilterBuilder.EVERYONE_PRINCIPAL));
             } else if (authority.startsWith(GROUP_PREFIX)) {
                 acl.add(buildGroupAce(AclFilterBuilder.namespace(authority, sourceId)));
