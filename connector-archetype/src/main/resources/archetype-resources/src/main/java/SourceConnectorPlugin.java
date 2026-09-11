@@ -54,6 +54,10 @@ public class SourceConnectorPlugin implements ConnectorPlugin {
      * <p>The host validates this before {@link #createClient} is called, so a missing or malformed setting
      * is reported by name at startup rather than surfacing as a failure on the first request. Mark a
      * credential as {@code secret} and its value stays out of messages, logs and the schema endpoint.</p>
+     *
+     * <p>A setting is supplied either as declared or as an environment variable name, where dots and hyphens
+     * become underscores and the name is upper-cased: a setting {@code cmis.page-size} is set as
+     * {@code CMIS_PAGE_SIZE}. Hyphenated names are therefore fine, and are the convention here.</p>
      */
     @Override
     public ConnectorSchema schema() {

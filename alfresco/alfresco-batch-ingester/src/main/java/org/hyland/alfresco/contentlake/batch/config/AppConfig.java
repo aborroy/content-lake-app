@@ -228,20 +228,6 @@ public class AppConfig {
     // ----------------------------------------------------------------------
 
     // Package-visible for unit testing (see AppConfigTest). Basic auth against the ai-ready-index engine.
-    /**
-     * Publishes this ingester's connector configuration schema at
-     * {@code GET /api/connectors/schema} (#123).
-     *
-     * <p>Registered explicitly rather than component-scanned, because core is scanned by every
-     * application including the RAG service, which carries no connector to describe. Default-deny
-     * security applies to it like any other mapped endpoint.</p>
-     */
-    @Bean
-    public ConnectorSchemaController connectorSchemaController(
-            ObjectProvider<ContentSourceClient> sourceClients,
-            ObjectProvider<ConnectorRegistry> connectorRegistries) {
-        return new ConnectorSchemaController(sourceClients, connectorRegistries);
-    }
 
     static ClientHttpRequestInterceptor hxprAuthInterceptor(HxprProperties props) {
         return (request, body, execution) -> {

@@ -3,6 +3,7 @@ package org.hyland.contentlake.connector;
 import org.hyland.contentlake.spi.ConnectorSchema;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseBody;
@@ -25,14 +26,23 @@ import java.util.List;
  * {@link ConnectorRegistry} rather than from beans, because registering them as beans would make injection
  * by SPI type ambiguous in an ingester that already has its own.</p>
  *
- * <p>Not annotated as a {@code @RestController}: core is component-scanned by every application, so a
- * stereotype here would add these endpoints everywhere, including the RAG service, which has no connector.
- * Each ingester registers it as a {@code @Bean} instead, which also keeps it inside that application's own
- * security rules. Spring maps it regardless of how the bean was registered, because the class carries
- * {@link RequestMapping}.</p>
+ * <p>{@code @Controller} is required, not decorative. Spring Framework 7's
+ * {@code RequestMappingHandlerMapping.isHandler} tests for {@code @Controller} and nothing else; a type-level
+ * {@link RequestMapping} was enough in 6.x and is not any more. Without the stereotype this class is a bean
+ * that maps no request, and both endpoints answer 404 in every application -- which is exactly what they did
+ * until this was corrected.</p>
+ *
+ * <p>Being a stereotype it is component-scanned, so an application gets these endpoints by scanning core
+ * rather than by registering a bean. A per-application {@code @Bean} on top of that would be a second
+ * definition of one handler and fail startup with an ambiguous mapping, so the {@code @Bean} registrations
+ * the ingesters used to carry are gone. An application that should not publish them opts out with a
+ * {@code @ComponentScan} exclude filter, which is what {@code RagServiceApplication} does -- it ingests from
+ * nothing and has no connector to describe. Default-deny security covers these endpoints wherever they are
+ * published.</p>
  *
  * <p>Neither response carries a configured value, so neither can disclose a credential.</p>
  */
+@Controller
 @RequestMapping("/api/connectors")
 @ResponseBody
 public class ConnectorSchemaController {
