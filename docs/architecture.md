@@ -77,6 +77,10 @@ filesystem/
     │       └── service/           FileSystemScopeResolver (impl ScopeResolver)
     └── filesystem-batch-ingester/  Spring Boot app: directory walk + one-shot sync (uses TikaTextExtractor)
         └── org.hyland.filesystem.contentlake.batch
+
+connector/                          No source adapter: its connector arrives as a jar at runtime
+    └── connector-batch-ingester/   Spring Boot app: batch sync driven by a ConnectorRegistry connector
+        └── org.hyland.connector.contentlake.batch
 ```
 
 Sibling runtime projects:
@@ -155,6 +159,7 @@ public interface ContentSourceClient {
     default void writeSyncStatus(String nodeId, String status, String error) {}  // optional sync-status write-back
     default void clearSyncStatus(String nodeId) {}                                // optional sync-status clear
     default ConnectorSchema connectorSchema() { ... }                             // the settings this connector needs
+    default String getRootNodeId() { return null; }                                // where a batch pass starts, or null
 }
 ```
 
@@ -205,7 +210,8 @@ public interface ConnectorPlugin {
 
 Discovered by the JDK `ServiceLoader` from jars in `/opt/content-lake/connectors`
 (`content-lake.connector.plugin-directory`), so a source can be built, shipped and iterated on without a
-Maven module or an edit to the six service Dockerfiles. `connector-archetype/` generates the skeleton.
+Maven module or an edit to the seven service Dockerfiles. `connector-archetype/` generates the skeleton,
+and `connector-archetype/examples/sample-directory-connector` is a working one to read.
 
 A factory rather than the connector itself, because `ServiceLoader` needs a no-argument constructor: the
 plugin declares its configuration, the host validates it and passes back a `ConnectorContext` (property
@@ -223,9 +229,38 @@ failure (unreadable jar, missing class, throwing constructor, source type alread
 the jar and skipped; only a configuration problem can abort startup, under the same
 `content-lake.connector.validation` rule as an in-tree connector.
 
-Consequence worth stating: an ingester whose pipeline is wired to a concrete client -- which is all five of
-them today -- does not ingest from a plugin connector. A plugin is discovered, configured, validated and
-published; driving a sync from one needs a host that resolves its connector from the registry.
+Consequence worth stating: an ingester whose pipeline is wired to a concrete client -- the Alfresco, Nuxeo
+and filesystem ones -- does not ingest from a plugin connector. For them a mounted jar is discovered,
+configured, validated and published, and then inert.
+
+### `connector-batch-ingester` -- the host that does ingest from one
+
+The service that asks the registry for its connector rather than naming a client. `SelectedConnector` picks
+it (`connector.source-type`, or `ConnectorRegistry.single()` when one jar is mounted) and fills in the host's
+defaults: `DefaultScopeResolver` when the plugin supplies no scope rules, the `ExtractionChain` when it
+supplies no extractor. Nothing that came from a plugin becomes a bean of its SPI type, which is both the
+ambiguity rule above and, for the client specifically, a cycle that would not start: core builds
+`ConnectorRegistry` from an `ObjectProvider<ContentSourceClient>`.
+
+An empty registry fails startup. This service has no source of its own, so a jar-less deployment is a
+misconfiguration rather than an idle one, and a container that says so is easier to diagnose than a sync API
+reporting zero documents.
+
+`ConnectorDiscoveryService` walks containers through the SPI alone, and differs from the filesystem walker in
+three ways that all follow from not knowing the source:
+
+- **Node ids are visited once.** CMIS multi-filing puts one document under several folders; without a visited
+  set it is ingested once per parent, and the duplicate work is silent because the pipeline is idempotent per
+  node.
+- **A depth cap** (`connector.max-depth`) terminates a hierarchy that does not bottom out, which the visited
+  set cannot do when a source mints a fresh id for the same container on each listing.
+- **A failed listing costs its subtree, not the pass.** The nodes already found are ingested and the outcome
+  is `DiscoveryOutcome.incomplete`, which is what stops the reconciliation sweep from reading the gap as
+  "deleted at source". A root that cannot be fetched at all propagates and fails the job.
+
+Where the walk starts comes from `connector.roots`, or from `ContentSourceClient.getRootNodeId()` when the
+connector names its own. Neither fails startup: a discovery pass with no entry point would report an empty
+source on every run.
 
 ### `TextExtractor`
 

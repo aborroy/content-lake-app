@@ -81,6 +81,7 @@ public class FileSystemSourceClient implements ContentSourceClient {
     }
 
     /** The configured root as an absolute node id, for discovery to start from. */
+    @Override
     public String getRootNodeId() {
         return Path.of(properties.getRootPath()).toAbsolutePath().normalize().toString();
     }

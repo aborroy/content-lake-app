@@ -1,0 +1,109 @@
+server:
+  port: 9096
+
+spring:
+  application:
+    name: connector-batch-ingester
+
+  ai:
+    openai:
+      # Spring AI 2.0 treats base-url as the FULL API base and appends `/embeddings` directly (no
+      # `/v1`). MODEL_RUNNER_URL is a bare scheme://host:port, so `/v1` must be appended here.
+      base-url: ${MODEL_RUNNER_URL:http://localhost:12434}/v1
+      api-key: ${MODEL_RUNNER_API_KEY:not-needed}
+      embedding:
+        model: ${EMBEDDING_MODEL:ai/mxbai-embed-large}
+      chat:
+        options:
+          model: ${LLM_MODEL:ai/gpt-oss}
+          temperature: ${LLM_TEMPERATURE:0.1}
+
+# The plugin loader, in core. Shared with every other ingester, which is why it is not under
+# `connector.*`: this block says where jars are found, not what this host does with them.
+content-lake:
+  connector:
+    plugin-directory: ${CONNECTOR_PLUGIN_DIRECTORY:/opt/content-lake/connectors}
+    # fail (default) refuses to start when a connector's configuration does not satisfy its own schema.
+    # warn starts anyway and reports the problem on GET /api/connectors.
+    validation: ${CONNECTOR_VALIDATION:fail}
+
+# This host's own settings.
+#
+# A connector's settings are neither this block nor the one above: they are whatever the connector's
+# ConnectorSchema declares, read from this service's environment. GET /api/connectors/schema lists them.
+connector:
+  # Which loaded connector to ingest with. Optional while one jar is mounted; required with several,
+  # because otherwise the corpus would depend on which jar sorted first.
+  source-type: ${CONNECTOR_SOURCE_TYPE:}
+  # Containers to walk, as source-system node ids, comma separated. Empty falls back to the connector's
+  # own ContentSourceClient.getRootNodeId(); a connector that answers neither fails startup.
+  roots: ${CONNECTOR_ROOTS:}
+  page-size: ${CONNECTOR_PAGE_SIZE:100}
+  # Backstop against a source that keeps producing new container ids. The walk already refuses to
+  # revisit a node id, which is what handles multi-filing and ordinary cycles.
+  max-depth: ${CONNECTOR_MAX_DEPTH:50}
+  # Credentials for this ingester's own REST API. No defaults: startup fails when either is unset,
+  # because a default here would be a published credential on an endpoint that triggers a full
+  # re-ingest.
+  security:
+    username: ${CONNECTOR_SYNC_USERNAME:}
+    password: ${CONNECTOR_SYNC_PASSWORD:}
+  # Post-discovery reconciliation sweep. Deletes indexed documents a completed discovery pass did not
+  # see. Off by default, and more cautiously than for the filesystem source: the sweep's scope comes
+  # from the source paths discovery resolved, and a connector whose nodes report `/` as their path
+  # would hand it everything under this source's target path. Check what a run reports as
+  # resolvedRootPaths before turning this on.
+  reconcile:
+    enabled: ${CONNECTOR_BATCH_RECONCILE_ENABLED:false}
+    max-delete-ratio: ${CONNECTOR_BATCH_RECONCILE_MAX_DELETE_RATIO:0.10}
+    max-deletes: ${CONNECTOR_BATCH_RECONCILE_MAX_DELETES:1000}
+    max-seen-ids: ${CONNECTOR_BATCH_RECONCILE_MAX_SEEN_IDS:200000}
+    page-size: ${CONNECTOR_BATCH_RECONCILE_PAGE_SIZE:200}
+  executor:
+    core-size: ${CONNECTOR_BATCH_CORE_SIZE:1}
+    max-size: ${CONNECTOR_BATCH_MAX_SIZE:1}
+    queue-capacity: ${CONNECTOR_BATCH_QUEUE_CAPACITY:1000}
+    await-termination-seconds: ${CONNECTOR_BATCH_AWAIT_TERMINATION_SECONDS:30}
+  embedding:
+    min-chunk-size: ${EMBEDDING_MIN_CHUNK_SIZE:200}
+    chunk-size: ${EMBEDDING_CHUNK_SIZE:1024}
+    chunk-overlap: ${EMBEDDING_CHUNK_OVERLAP:256}
+    similarity-threshold: ${EMBEDDING_SIMILARITY_THRESHOLD:0.75}
+    # Must resolve to the same value in every module: the hxpr embedding type is derived from
+    # it, and two writers deriving different types leave a document with children under both.
+    model-name: ${EMBEDDING_MODEL_NAME:${EMBEDDING_MODEL:ai/mxbai-embed-large}}
+    noise-reduction:
+      enabled: ${NOISE_REDUCTION_ENABLED:true}
+      aggressive: ${NOISE_REDUCTION_AGGRESSIVE:false}
+
+# Extraction for connectors that do not convert their own content, which is most of them. Empty
+# engine-urls leaves extraction on in-process Tika. A connector that returns its own TextExtractor
+# from ConnectorPlugin.createTextExtractor bypasses all of this, and none of it is built.
+#
+# format: plaintext (default) asks for text/plain; auto asks for text/markdown where the engine
+# advertises it, so headings and table rows survive into chunking; markdown behaves like auto but logs
+# each fall back to plaintext. Extraction always degrades rather than failing an ingest.
+extraction:
+  engine-urls: ${EXTRACTION_ENGINE_URLS:}
+  engine-timeout-ms: ${EXTRACTION_ENGINE_TIMEOUT_MS:300000}
+  format: ${EXTRACTION_FORMAT:plaintext}
+
+hxpr:
+  url: ${HXPR_URL:http://localhost:8080}
+  repository-id: ${HXPR_REPOSITORY_ID:default}
+  target-path: ${HXPR_TARGET_PATH:/connector-sync}
+  path-repository-id: ${HXPR_PATH_REPOSITORY_ID:}
+  # HTTP Basic credentials for the ai-ready-index engine (filestore user store).
+  username: ${HXPR_USERNAME:admin}
+  password: ${HXPR_PASSWORD:password}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    org.hyland.contentlake: ${LOG_LEVEL:INFO}
+    org.hyland.connector.contentlake: ${LOG_LEVEL:INFO}

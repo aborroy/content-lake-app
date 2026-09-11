@@ -105,6 +105,7 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 | `nuxeo-live-ingester` | `nuxeo/` | 9094 | Nuxeo audit-stream listener using a persisted watermark |
 | `content-lake-source-filesystem` | `filesystem/` | -- | Filesystem source: local/mounted directory client, scope resolver (glob/extension filters); uses the Tika extractor |
 | `filesystem-batch-ingester` | `filesystem/` | 9095 | Filesystem directory discovery and one-shot sync via `/api/sync/configured` |
+| `connector-batch-ingester` | `connector/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
 
 ## Quick Start
 
@@ -1023,7 +1024,7 @@ curl http://localhost:9092/api/live/status
 
 A source connector can be a jar rather than a module of this build. Every ingester scans
 `/opt/content-lake/connectors` at startup, so a connector needs no Maven module, no entry in an intermediate
-POM and no COPY line in the six service Dockerfiles.
+POM and no COPY line in the seven service Dockerfiles.
 
 ```bash
 # Generate the skeleton (see connector-archetype/README.md for the properties)
@@ -1063,6 +1064,47 @@ looking like it is running.
 Plugin connectors are kept in a registry rather than registered as beans, deliberately: publishing a
 plugin's `TextExtractor` or `ScopeResolver` as a bean would make injection by type ambiguous in an ingester
 that already has one, so mounting a jar would break the ingester it was mounted next to.
+
+A connector's settings are read from the ingester's environment, so a schema field is settable both as
+declared and as an environment variable name: dots and hyphens become underscores and the name is
+upper-cased, which makes `cmis.page-size` reachable as `CMIS_PAGE_SIZE`.
+
+### Ingesting Through A Plugin Connector
+
+Every ingester loads a connector; `connector-batch-ingester` is the one that ingests with it. The Alfresco,
+Nuxeo and filesystem ingesters each drive a client they were compiled against, so for them a mounted jar is
+listed and otherwise inert.
+
+```bash
+# From content-lake-app-deployment, on top of any base profile
+CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
+  docker compose --profile alfresco --profile connector up -d --build connector-batch-ingester
+
+curl -u admin:admin -X POST http://localhost:9096/api/sync/configured
+curl -u admin:admin http://localhost:9096/api/status
+```
+
+It resolves its client, its scope rules and optionally its extractor from `ConnectorRegistry`, filling in a
+permissive default scope and the host extraction chain when the connector supplies neither. Configuration is
+under `connector.*`:
+
+| Setting | Meaning |
+|---|---|
+| `connector.source-type` | Which loaded connector to ingest with. Optional with one jar mounted, required with several |
+| `connector.roots` | Containers to walk. Empty asks the connector, through `ContentSourceClient.getRootNodeId()` |
+| `connector.page-size` | Children fetched per listing |
+| `connector.max-depth` | Depth backstop for a hierarchy that does not bottom out |
+| `connector.security.*` | Credentials for this ingester's own sync API. No defaults; startup fails without both |
+| `connector.reconcile.*` | Post-discovery deletion sweep. Off by default |
+
+Two things about it are deliberate. With no connector loaded it fails to start, because its only source is
+that jar and a sync API reporting zero documents hides the misconfiguration. And the walk visits each node id
+once, because a source with multi-filing (CMIS, for one) reaches a document through several parents and would
+otherwise ingest it repeatedly.
+
+`connector-archetype/examples/sample-directory-connector` is a working connector that ingests a mounted
+directory, and `content-lake-app-deployment/test/test-connector.sh` builds it, mounts it and asserts the
+documents come back out of semantic search.
 
 ### Connector Schema And Startup Validation
 

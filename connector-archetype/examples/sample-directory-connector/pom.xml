@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        Deliberately NOT a module of content-lake-app: it has no parent, it is absent from the root POM,
+        and no Dockerfile mentions it. A connector that needed a place in this build would defeat the
+        point of the plugin mechanism, and an example that was not built the way a real connector is built
+        would not demonstrate anything.
+
+        Build it standalone, with content-lake-spi installed in the local repository:
+
+            mvn -f ../../../pom.xml -pl common/content-lake-spi -am install -DskipTests
+            mvn -f pom.xml package
+    -->
+    <groupId>org.hyland.example</groupId>
+    <artifactId>sample-directory-connector</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>sample-directory-connector</name>
+    <description>Worked example of a Content Lake connector plugin: ingests a mounted directory</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>21</maven.compiler.release>
+        <content-lake.version>1.0.0-SNAPSHOT</content-lake.version>
+        <spring.version>7.0.8</spring.version>
+        <junit.version>5.11.4</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+    </properties>
+
+    <dependencies>
+        <!-- The only thing a connector compiles against. Provided: the ingester supplies it at runtime,
+             and a plugin bundling its own copy would still resolve to the host's classes. -->
+        <dependency>
+            <groupId>org.hyland</groupId>
+            <artifactId>content-lake-spi</artifactId>
+            <version>${content-lake.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ContentSourceClient returns a Spring Resource. Also provided by the ingester. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-core</artifactId>
+            <version>${spring.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

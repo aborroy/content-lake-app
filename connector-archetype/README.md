@@ -35,8 +35,24 @@ The generated project depends on `content-lake-spi` and `spring-core` as `provid
 That is the whole point: a connector is written against the SPI, so it neither compiles against core nor
 carries a second copy of anything the ingester already has.
 
+## A worked example
+
+The generated client is a stub: `getChildren` returns nothing, so the jar loads and discovers zero
+documents. [`examples/sample-directory-connector`](examples/sample-directory-connector) is the same project
+with the TODOs filled in against a directory, which makes it the shortest complete connector there is and
+the one to read for the details that are easy to get wrong (why `downloadContent` must return a copy, why
+`modifiedAt` matters, why `getRootNodeId` is worth implementing).
+
+## Where a connector actually ingests
+
+A jar in an ingester's plugin directory is discovered, validated and listed at `GET /api/connectors` by
+every ingester, but the Alfresco, Nuxeo and filesystem ingesters each drive a client they were compiled
+against and never ask the registry for one. `connector-batch-ingester` is the service that does: it takes
+its client, scope rules and optionally its extractor from the connector, and it is what a plugin connector
+should be pointed at.
+
 ## Why this is not a module of the root POM
 
 Every service Dockerfile enumerates the reactor's modules, so adding this to `<modules>` would mean editing
-six Dockerfiles to ship a tool whose reason for existing is that people should not have to edit six
+seven Dockerfiles to ship a tool whose reason for existing is that people should not have to edit seven
 Dockerfiles. It builds on its own, from this directory.

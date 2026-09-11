@@ -22,6 +22,7 @@
         <module>alfresco</module>
         <module>nuxeo</module>
         <module>filesystem</module>
+        <module>connector</module>
     </modules>
 
     <properties>

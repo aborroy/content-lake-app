@@ -339,6 +339,13 @@ The filesystem source has no live ingester, so a batch sync is the only path tha
 is the only path that ever deletes: without it, a file removed from the mounted directory stays
 searchable indefinitely.
 
+`connector-batch-ingester` has no live path either, but its sweep is off by default and warrants more
+caution than the filesystem one. The sweep's scope comes from the source paths discovery resolved, and a
+plugin connector's `SourceNode.path()` is whatever the connector decided: one reporting `/` would hand the
+sweep everything under that source's target path. Read `resolvedRootPaths` from a completed run before
+enabling it. Its walk also reports an incomplete pass whenever a container could not be listed, which is
+routine rather than exceptional there, and an incomplete pass never deletes.
+
 ## Embedding Storage and the Embedding Type
 
 Embeddings are stored as a Parquet file in a `SysEmbeddings` child document named

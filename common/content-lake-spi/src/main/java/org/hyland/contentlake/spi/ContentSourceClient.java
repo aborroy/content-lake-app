@@ -32,6 +32,23 @@ public interface ContentSourceClient {
     }
 
     /**
+     * The container a batch discovery pass starts from, or {@code null} when the connector does not know.
+     *
+     * <p>Every other method here answers a question about a node the caller already has; this is the one
+     * that says where to begin. A host driving a connector it was not compiled against has no other way to
+     * find out, and the alternative -- requiring the entry point in configuration -- makes a connector that
+     * has exactly one possible root (a mounted directory, a single repository) impossible to configure
+     * wrongly only by luck.</p>
+     *
+     * <p>Defaults to {@code null}, so an adapter written before this is unaffected and a connector with
+     * several equally valid roots, or none it can name, simply does not answer. A host is expected to take
+     * configured roots in preference to this and to refuse to start when it has neither.</p>
+     */
+    default String getRootNodeId() {
+        return null;
+    }
+
+    /**
      * Fetches a single node by its source-system identifier.
      *
      * @param nodeId source-system node identifier
