@@ -241,8 +241,8 @@ public class HxprService {
      *
      * <p>The list is trusted as given. That is safe for the caller it exists for, whose list was read
      * after a job-level index wait: if it is nonetheless stale for the target type, the child create that
-     * follows enforces {@code sys_name} uniqueness and fails with a 409, so the document is reported as
-     * failed rather than ending up with two children.</p>
+     * follows enforces {@code sys_name} uniqueness and is refused with a 409, and the write is then placed
+     * in the existing child rather than producing a second one.</p>
      *
      * @param knownChildren the document's embedding children, or {@code null} to look them up (which
      *                      waits for the index first)
@@ -288,11 +288,26 @@ public class HxprService {
             // 2. Add parent mixin to indicate it has embedding children
             ensureEmbeddingParentMixin(documentId);
 
-            // 3. Delete old embedding child if exists
-            deleteEmbeddingChildren(documentId, embeddingType, knownChildren);
+            List<EmbeddingChild> children =
+                    knownChildren != null ? knownChildren : listEmbeddingChildren(documentId);
+            List<EmbeddingChild> sameType = children.stream()
+                    .filter(child -> embeddingType.equals(child.embeddingType()))
+                    .toList();
 
-            // 4. Create child document with Parquet file
-            createEmbeddingChild(documentId, embeddingType, parquetContent);
+            if (sameType.isEmpty()) {
+                // 3a. Nothing to replace: create the child. A stale list that wrongly says there is no
+                // child still cannot produce two: the create enforces sys_name uniqueness, and the 409
+                // sends this sync's embeddings into the child that already exists.
+                createEmbeddingChild(documentId, embeddingType, parquetContent);
+            } else {
+                // 3b. Replace the existing child's content in place. Deleting it first, which is what
+                // this did until #100, leaves the document with zero embeddings for the length of a
+                // Parquet upload plus a create: a window in which it is indexed, reported INDEXED, and
+                // unretrievable. Two writers hitting that window against one child (the batch and live
+                // ingesters both sync most nodes) can also end with the child deleted and no create, which
+                // is the "0 chunks until a second sync" state #100 reports. An update has no such window.
+                replaceOneEmbeddingChild(documentId, embeddingType, sameType, parquetContent);
+            }
 
             log.info("Successfully stored {} embeddings as Parquet file ({} bytes) for document {}",
                     embeddings.size(), parquetContent.length, documentId);
@@ -494,61 +509,250 @@ public class HxprService {
      * 3. Create SysEmbeddings child document referencing the uploadId
      */
     private void createEmbeddingChild(String documentId, String embeddingType, byte[] parquetContent) {
+        try {
+            postEmbeddingChild(documentId, embeddingType, parquetContent);
+        } catch (Exception e) {
+            if (isDuplicateChildName(e)) {
+                adoptConcurrentlyCreatedChild(documentId, embeddingType, parquetContent, e);
+            } else if (isParentMissingEmbeddingMixin(e)) {
+                retryCreateWithParentMixin(documentId, embeddingType, parquetContent);
+            } else {
+                log.error("Failed to create embedding child for {}: {}", documentId, e.getMessage(), e);
+                throw new RuntimeException("Failed to create embedding child document", e);
+            }
+        }
+    }
+
+    /**
+     * Re-adds the parent mixin and creates the child once more, after hxpr refused the first attempt for
+     * a missing mixin.
+     *
+     * <p>The mixin was checked moments ago and hxpr says it is not there, so another writer removed it in
+     * between: a metadata update merges mixins from the copy it read, and a copy read before this sync
+     * added {@code SysHasEmbeddings} writes it back out without it. Both ingesters sync most nodes, so the
+     * two are routinely in that window together (#100). Adding the mixin unconditionally and retrying once
+     * turns what was a permanently FAILED document -- indexed, no embeddings, unretrievable until some
+     * later sync happened not to race -- into a sync that completes.</p>
+     */
+    private void retryCreateWithParentMixin(String documentId, String embeddingType, byte[] parquetContent) {
+        log.warn("Embedding child create for {} was refused because the parent lost the {} mixin to a "
+                        + "concurrent writer; re-adding it and retrying once",
+                documentId, EMBEDDING_PARENT_MIXIN);
+        try {
+            addEmbeddingParentMixin(documentId);
+            postEmbeddingChild(documentId, embeddingType, parquetContent);
+        } catch (Exception retryFailure) {
+            // The other writer of the race that stripped the mixin can also have created the child in the
+            // meantime, in which case the retry lands on the conflict below instead.
+            if (isDuplicateChildName(retryFailure)) {
+                adoptConcurrentlyCreatedChild(documentId, embeddingType, parquetContent, retryFailure);
+                return;
+            }
+            log.error("Retry of embedding child create for {} failed: {}",
+                    documentId, retryFailure.getMessage(), retryFailure);
+            throw new RuntimeException("Failed to create embedding child document", retryFailure);
+        }
+    }
+
+    /**
+     * Writes this sync's embeddings into a child another writer created after this sync listed the children.
+     *
+     * <p>The mirror image of the missing-mixin retry, and the other direction the same race runs (#100):
+     * there the concurrent writer removed something this sync needed, here it created the very child this
+     * sync was about to create, so {@code enforceSysName=true} refuses the create with a 409. Both writers
+     * hold embeddings for the same node, so the document is not broken -- but abandoning the write reported
+     * the document as FAILED when it was in fact indexed, which is the false failure the issue is about.
+     * Replacing the existing child's content is what the sync would have done had the list been current.</p>
+     *
+     * <p>Listing waits for the index, unlike the caller's list: the child was created seconds ago by another
+     * process and a lookup that does not wait is the reason this path was reached at all. If it is still not
+     * visible the write cannot be placed anywhere, and the sync fails so a later one can carry it.</p>
+     */
+    private void adoptConcurrentlyCreatedChild(String documentId, String embeddingType,
+                                               byte[] parquetContent, Exception conflict) {
+        log.warn("Embedding child {}{} already exists on document {}: another writer created it after this "
+                        + "sync listed the children. Replacing its content in place instead of creating one",
+                EMBEDDING_CHILD_PREFIX, embeddingType, documentId);
+
+        List<EmbeddingChild> sameType = listEmbeddingChildren(documentId).stream()
+                .filter(child -> embeddingType.equals(child.embeddingType()))
+                .toList();
+
+        if (sameType.isEmpty()) {
+            log.error("Embedding child {}{} on document {} was reported as a duplicate but is not visible "
+                            + "in the index, so this sync's embeddings cannot be written",
+                    EMBEDDING_CHILD_PREFIX, embeddingType, documentId);
+            throw new RuntimeException("Embedding child " + EMBEDDING_CHILD_PREFIX + embeddingType
+                    + " of document " + documentId + " exists but could not be listed", conflict);
+        }
+
+        replaceOneEmbeddingChild(documentId, embeddingType, sameType, parquetContent);
+    }
+
+    /**
+     * Replaces the content of the document's child for this embedding type, and drops any duplicate.
+     *
+     * <p>Two children of one type should not exist and none comes from this method, which either replaces
+     * a child or creates the single one {@code enforceSysName=true} allows. Removing the extras restores
+     * the invariant without touching the one just written, so no reader loses its embeddings.</p>
+     *
+     * @param sameType the document's children of this embedding type, never empty
+     */
+    private void replaceOneEmbeddingChild(String documentId, String embeddingType,
+                                          List<EmbeddingChild> sameType, byte[] parquetContent) {
+        replaceEmbeddingChildContent(sameType.getFirst(), parquetContent);
+
+        List<EmbeddingChild> extras = sameType.subList(1, sameType.size());
+        if (!extras.isEmpty()) {
+            log.warn("Document {} had {} extra child(ren) of embedding type {}; removing them",
+                    documentId, extras.size(), embeddingType);
+            deleteEmbeddingChildren(documentId, embeddingType, extras);
+        }
+    }
+
+    /**
+     * Whether a failure is hxpr refusing a {@code SysEmbeddings} child whose parent lacks the mixin.
+     *
+     * <p>Matched on the violation key rather than the status alone, because 422 covers every schema
+     * violation and only this one is worth retrying. Package-private so the match can be asserted without
+     * a live engine.</p>
+     */
+    static boolean isParentMissingEmbeddingMixin(Throwable error) {
+        HttpClientErrorException.UnprocessableContent unprocessable =
+                causeOfType(error, HttpClientErrorException.UnprocessableContent.class);
+        String body = unprocessable == null ? null : unprocessable.getResponseBodyAsString();
+        return body != null && body.contains("SysEmbeddingsViolation.parentMissing");
+    }
+
+    /**
+     * Whether a failure is hxpr refusing a create because the name is already taken in the parent.
+     *
+     * <p>The status alone is enough here, unlike the 422 above: the child create passes
+     * {@code enforceSysName=true} precisely so that a taken name is refused, and that is the only 409 it
+     * has. Reading the message instead would tie the recovery to the engine's wording
+     * ({@code Duplicate name in parent: _e_<type>}) for no extra certainty.</p>
+     */
+    static boolean isDuplicateChildName(Throwable error) {
+        return causeOfType(error, HttpClientErrorException.Conflict.class) != null;
+    }
+
+    /** The first cause of the given type, unwrapping the chain, or {@code null} if there is none. */
+    private static <T extends Throwable> T causeOfType(Throwable error, Class<T> type) {
+        for (Throwable cause = error; cause != null && cause != cause.getCause(); cause = cause.getCause()) {
+            if (type.isInstance(cause)) {
+                return type.cast(cause);
+            }
+        }
+        return null;
+    }
+
+    /** Adds the parent mixin without first checking for it, which is the point on a retry. */
+    private void addEmbeddingParentMixin(String documentId) {
+        HxprDocument doc = documentApi.getById(documentId);
+        List<String> mixins = doc.getSysMixinTypes();
+        List<String> newMixins = mixins != null ? new ArrayList<>(mixins) : new ArrayList<>();
+        if (!newMixins.contains(EMBEDDING_PARENT_MIXIN)) {
+            newMixins.add(EMBEDDING_PARENT_MIXIN);
+        }
+        documentApi.updateById(documentId, Map.of("sys_mixinTypes", newMixins));
+    }
+
+    private void postEmbeddingChild(String documentId, String embeddingType, byte[] parquetContent) {
         // Child document name MUST start with "_e_" prefix per specification
         String childName = EMBEDDING_CHILD_PREFIX + embeddingType;
 
+        String uploadId = uploadParquet(parquetContent);
+
+        Map<String, Object> childDoc = Map.of(
+                "sys_primaryType", "SysEmbeddings",
+                "sys_name", childName,
+                "sys_title", "Embeddings",
+                "sysemb_embeddings", Map.of("uploadId", uploadId)
+        );
+
+        // enforceSysName=true makes hxpr reject a duplicate child name instead of
+        // silently auto-suffixing it (e.g. _e_mxbai-embed-large.<n>), which would
+        // otherwise let a stale child survive alongside the new one after a re-sync.
+        log.info("Creating SysEmbeddings child document: {} with payload: {}", childName, childDoc);
+        restClient.post()
+                .uri("/api/documents/" + documentId + "?enforceSysName=true")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(childDoc)
+                .retrieve()
+                .toBodilessEntity();
+
+        log.info("Successfully created SysEmbeddings child document: {} (uploadId: {})", childName, uploadId);
+    }
+
+    /**
+     * Points an existing embeddings child at freshly uploaded Parquet, leaving the child itself in place.
+     *
+     * <p>This is what keeps a re-sync from making a document briefly unretrievable (#100). A blob swap on a
+     * child that never disappears has no window in which the document has no embeddings, and it cannot
+     * collide on {@code sys_name} the way a create alongside the old child would -- which is why the
+     * original code deleted first.</p>
+     *
+     * <p>The body carries only {@code sysemb_embeddings}: hxpr keeps the child's other fields, verified
+     * against a running engine (the name and type survive, the blob descriptor is replaced).</p>
+     *
+     * <p>A caller-supplied child list that has gone stale the other way -- naming a child something else
+     * has since deleted -- fails here with a 404 rather than silently creating one. That is the same
+     * trade the create path makes for its own staleness case: the document is reported as failed and the
+     * next sync writes it, which is preferable to guessing which of the two states the index is in.</p>
+     */
+    private void replaceEmbeddingChildContent(EmbeddingChild child, byte[] parquetContent) {
         try {
-            // Step 1: Create upload slot (no request body needed)
-            log.info("Creating upload slot for embedding Parquet file");
-            Map<String, String> uploadSlotResponse = restClient.post()
-                    .uri("/api/upload/create")
-                    .retrieve()
-                    .body(new org.springframework.core.ParameterizedTypeReference<Map<String, String>>() {});
+            String uploadId = uploadParquet(parquetContent);
 
-            String uploadId = uploadSlotResponse.get("id");
-            if (uploadId == null) {
-                throw new RuntimeException("Failed to get uploadId from upload/create response");
-            }
-
-            log.info("Created upload slot: {}", uploadId);
-
-            // Step 2: Upload Parquet bytes
-            log.info("Uploading Parquet file ({} bytes) to uploadId: {}", parquetContent.length, uploadId);
-            restClient.post()
-                    .uri("/api/upload?id=" + uploadId +
-                         "&fileName=embeddings.parquet" +
-                         "&mimeType=application/x-parquet")
-                    .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                    .body(parquetContent)
-                    .retrieve()
-                    .toBodilessEntity();
-
-            log.info("Successfully uploaded Parquet file");
-
-            // Step 3: Create SysEmbeddings child document
-            Map<String, Object> childDoc = Map.of(
-                    "sys_primaryType", "SysEmbeddings",
-                    "sys_name", childName,
-                    "sys_title", "Embeddings",
-                    "sysemb_embeddings", Map.of("uploadId", uploadId)
-            );
-
-            // enforceSysName=true makes hxpr reject a duplicate child name instead of
-            // silently auto-suffixing it (e.g. _e_mxbai-embed-large.<n>), which would
-            // otherwise let a stale child survive alongside the new one after a re-sync.
-            log.info("Creating SysEmbeddings child document: {} with payload: {}", childName, childDoc);
-            restClient.post()
-                    .uri("/api/documents/" + documentId + "?enforceSysName=true")
+            log.info("Replacing content of embeddings child {} ({}) with uploadId: {}",
+                    child.sysId(), child.sysName(), uploadId);
+            restClient.put()
+                    .uri("/api/documents/" + child.sysId())
                     .contentType(MediaType.APPLICATION_JSON)
-                    .body(childDoc)
+                    .body(Map.of("sysemb_embeddings", Map.of("uploadId", uploadId)))
                     .retrieve()
                     .toBodilessEntity();
 
-            log.info("Successfully created SysEmbeddings child document: {} (uploadId: {})", childName, uploadId);
+            log.info("Successfully replaced content of embeddings child {} ({} bytes)",
+                    child.sysId(), parquetContent.length);
         } catch (Exception e) {
-            log.error("Failed to create embedding child for {}: {}", documentId, e.getMessage(), e);
-            throw new RuntimeException("Failed to create embedding child document", e);
+            log.error("Failed to replace embeddings child {}: {}", child.sysId(), e.getMessage(), e);
+            throw new RuntimeException("Failed to replace embeddings child " + child.sysId(), e);
         }
+    }
+
+    /**
+     * Creates an upload slot and puts the Parquet bytes in it, returning the slot id.
+     *
+     * @throws RuntimeException when the engine returns no slot id, since the caller would otherwise
+     *                          reference a slot that does not exist
+     */
+    private String uploadParquet(byte[] parquetContent) {
+        log.info("Creating upload slot for embedding Parquet file");
+        Map<String, String> uploadSlotResponse = restClient.post()
+                .uri("/api/upload/create")
+                .retrieve()
+                .body(new org.springframework.core.ParameterizedTypeReference<Map<String, String>>() {});
+
+        String uploadId = uploadSlotResponse == null ? null : uploadSlotResponse.get("id");
+        if (uploadId == null) {
+            throw new RuntimeException("Failed to get uploadId from upload/create response");
+        }
+
+        log.info("Created upload slot: {}", uploadId);
+
+        log.info("Uploading Parquet file ({} bytes) to uploadId: {}", parquetContent.length, uploadId);
+        restClient.post()
+                .uri("/api/upload?id=" + uploadId
+                        + "&fileName=embeddings.parquet"
+                        + "&mimeType=application/x-parquet")
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(parquetContent)
+                .retrieve()
+                .toBodilessEntity();
+
+        log.info("Successfully uploaded Parquet file");
+        return uploadId;
     }
 
     /**
