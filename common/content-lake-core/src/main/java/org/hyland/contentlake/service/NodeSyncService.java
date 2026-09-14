@@ -454,7 +454,26 @@ public class NodeSyncService {
     // Staleness check
     // ──────────────────────────────────────────────────────────────────────
 
+    /**
+     * Whether the stored document already holds this version of the node, so content can be skipped.
+     *
+     * <p>Note the polarity: {@code true} means the Content Lake copy is <em>current</em> and the caller
+     * skips extraction, chunking and embedding.</p>
+     *
+     * <p>A timestamp comparison alone is not enough to conclude that, because a document can carry the
+     * node's {@code source_modifiedAt} while holding none of its content. {@link #updatePermissions}
+     * creates exactly that when a permission event arrives for a node with no document yet: metadata and
+     * ACLs, {@code syncStatus=PENDING}, no text and no embeddings, with {@code source_modifiedAt} copied
+     * from the node. Comparing only timestamps then finds every later sync of an unmodified node
+     * "current" and skips its content forever, so the document stays unretrievable until the node is
+     * next modified -- and because the skip branch refreshes permissions, it looks in the log exactly
+     * like a permission update rather than a lost content pass.</p>
+     */
     private boolean isStale(HxprDocument existing, SourceNode incoming) {
+        if (!hasCompletedContentPass(existing)) {
+            return false;
+        }
+
         if (incoming.modifiedAt() == null) {
             return false;
         }
@@ -465,6 +484,44 @@ public class NodeSyncService {
         }
 
         return !incoming.modifiedAt().isAfter(storedDate);
+    }
+
+    /**
+     * Whether the stored document is evidence that a content pass ran to conclusion for it.
+     *
+     * <p>Two states say it did not, and both are skipped over by a timestamp comparison:</p>
+     * <ul>
+     *   <li>{@code PENDING} -- no content pass has finished. Either one is in flight (the batch
+     *       pipeline's metadata phase writes {@code PENDING} and hands content processing to a worker)
+     *       or none was ever started, which is what {@link #updatePermissions} leaves behind.</li>
+     *   <li>{@code INDEXED} with no extracted-text mirror -- indexed while holding no content, so it is
+     *       invisible to search while looking finished to monitoring. This is the same evidence
+     *       {@link #canReuseContent} requires for the same reason, and an {@code INDEXED} document
+     *       written by {@code processContent} always has the mirror: a blank extraction ends in
+     *       {@code FAILED} before the mirror is written.</li>
+     * </ul>
+     *
+     * <p>{@code FAILED} counts as concluded and stays skippable. Its commonest cause is a document with
+     * no extractable text at all, which is a stable outcome rather than a repairable one, and retrying it
+     * on every pass would pay extraction for every such binary in the corpus forever. A transient failure
+     * is therefore retried when the node next changes, not on the next sweep.</p>
+     *
+     * <p>Reads the status from {@code cin_ingestProperties} rather than {@link HxprDocument#getSyncStatus()}:
+     * that field is {@code @JsonIgnore}, so it is never populated on a document read back from hxpr.</p>
+     */
+    private boolean hasCompletedContentPass(HxprDocument existing) {
+        Map<String, Object> props = existing.getCinIngestProperties();
+        if (props == null) {
+            return false;
+        }
+
+        String status = asText(props.get(P_CL_SYNC_STATUS));
+        if (ContentLakeNodeStatus.Status.PENDING.name().equals(status)) {
+            return false;
+        }
+
+        return !ContentLakeNodeStatus.Status.INDEXED.name().equals(status)
+                || asText(props.get(P_CL_EXTRACTED_TEXT)) != null;
     }
 
     // ──────────────────────────────────────────────────────────────────────
