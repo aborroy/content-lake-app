@@ -453,7 +453,10 @@ class SemanticSearchServiceTest {
 
         verify(embeddingService, times(1)).embedQuery("test");
         verify(hxprService, times(1)).vectorSearch(any(), any(), any(), anyInt());
-        verifyNoInteractions(ragProperties);
+        // No fusion, which is what "one pass" means here. Asserted on the RRF constant the fused branch
+        // reads rather than on the properties object as a whole, because the single-pass path legitimately
+        // reads other configuration (the per-document diversity cap) before it returns.
+        verify(ragProperties, never()).getQueryExpansion();
     }
 
     @Test

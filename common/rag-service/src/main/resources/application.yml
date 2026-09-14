@@ -189,6 +189,15 @@ rag:
       enabled: ${RAG_VERBATIM_IDENTIFIER_ENABLED:false}
       min-length: ${RAG_VERBATIM_IDENTIFIER_MIN_LENGTH:3}
       max-terms: ${RAG_VERBATIM_IDENTIFIER_MAX_TERMS:2}
+    # Caps how much of a result set one document may occupy. topK is a budget of chunks and a document
+    # contributes all of its chunks to the ranking, so a long document can fill the budget alone: measured
+    # on the E2E corpus, topK 10 returned 10 chunks of 2 documents, and a document ranking first on its own
+    # merits was absent from a query quoting it verbatim. Over-fetching gives the cap something to promote.
+    # Off by default until the eval confirms the gain, and hits above the cap are deferred, never dropped.
+    document-diversity:
+      enabled: ${RAG_DOCUMENT_DIVERSITY_ENABLED:false}
+      max-chunks-per-document: ${RAG_DOCUMENT_DIVERSITY_MAX_CHUNKS_PER_DOCUMENT:3}
+      over-fetch-factor: ${RAG_DOCUMENT_DIVERSITY_OVER_FETCH_FACTOR:3}
   # In-app evaluation smoke endpoint. Off by default; content-lake-eval is the authoritative gate.
   evaluation:
     enabled: ${RAG_EVALUATION_ENABLED:false}

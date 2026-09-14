@@ -245,9 +245,12 @@ public class HybridSearchService {
                 ? (perVariant.isEmpty() ? List.<FusedResult>of() : perVariant.get(0))
                 : fuseAcrossVariants(perVariant, ragProperties.getQueryExpansion().getRrfK());
 
-        List<FusedResult> filtered = fused.stream()
-                .limit(maxResults)
-                .toList();
+        // Cap how much of the result set one document may occupy before trimming to maxResults. The
+        // candidate pool is already deeper than maxResults, so there is no separate over-fetch here: a
+        // document's chunks past the cap are deferred behind other documents' best ones, never dropped.
+        // A no-op when the cap is off, which is the default.
+        List<FusedResult> filtered = DocumentDiversityLimiter.cap(
+                fused, maxResults, maxChunksPerDocument(), result -> documentKeyOf(result));
 
         // --- Enrich with document metadata ---
         Map<String, SectionMap> sectionMaps = new ConcurrentHashMap<>();
@@ -1305,6 +1308,32 @@ public class HybridSearchService {
             return NORMALIZATION_MINMAX;
         }
         return NORMALIZATION_MAX;
+    }
+
+    /**
+     * The per-document chunk cap, or 0 when the cap is disabled.
+     *
+     * <p>Both search paths need it: this endpoint is what {@code content-lake-eval} measures and what the
+     * RAG prompt path retrieves through, the semantic endpoint is what the deployment E2E suite asserts
+     * on. Capping one and not the other measures as a no-op on whichever harness queries the other.</p>
+     */
+    private int maxChunksPerDocument() {
+        if (ragProperties == null || ragProperties.getRetrieval() == null) {
+            return 0;
+        }
+        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity =
+                ragProperties.getRetrieval().getDocumentDiversity();
+        return diversity != null && diversity.isEnabled() ? diversity.getMaxChunksPerDocument() : 0;
+    }
+
+    /** The document a fused chunk belongs to; its own key when the document id is missing. */
+    private static String documentKeyOf(FusedResult result) {
+        String docId = result.chunk != null ? result.chunk.docId() : null;
+        if (docId != null && !docId.isBlank()) {
+            return "doc:" + docId;
+        }
+        String key = result.chunk != null ? result.chunk.key() : null;
+        return key != null && !key.isBlank() ? "chunk:" + key : "unkeyed:" + System.identityHashCode(result);
     }
 
     private int resolveCandidateCount(HybridSearchRequest request) {

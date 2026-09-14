@@ -165,6 +165,11 @@ public class SemanticSearchService {
 
         int topK = Math.min(Math.max(request.getTopK(), 1), MAX_TOP_K);
 
+        // The legs retrieve past topK when the per-document cap is on, so the cap has other documents'
+        // chunks to promote: a budget already filled by one document has nothing to swap in. Bounded by
+        // MAX_TOP_K, so this never asks hxpr for more than the endpoint's own maximum.
+        int fetchK = Math.min(topK * Math.max(overFetchFactor(), 1), MAX_TOP_K);
+
         double minScore = resolveMinScore(request);
 
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
@@ -180,18 +185,19 @@ public class SemanticSearchService {
 
         if (variants == null) {
             VariantResult single = searchVariant(
-                    QueryVariant.original(request.getQuery()), request, topK, minScore, hxqlFilter, logUser);
+                    QueryVariant.original(request.getQuery()), request, fetchK, minScore, hxqlFilter, logUser);
+            List<SearchHit> hits = diversify(single.hits(), topK);
             long searchTimeMs = System.currentTimeMillis() - startTime;
             log.info("Semantic search completed: {} results in {}ms for query: \"{}\" (minScore={})",
-                    single.hits().size(), searchTimeMs, request.getQuery(), minScore);
-            return response(request, single.hits(), single.vectorDimension(), single.totalCount(), searchTimeMs);
+                    hits.size(), searchTimeMs, request.getQuery(), minScore);
+            return response(request, hits, single.vectorDimension(), single.totalCount(), searchTimeMs);
         }
 
         List<List<SearchHit>> perVariant = new ArrayList<>(variants.size());
         int vectorDimension = 0;
         long totalCount = 0;
         for (QueryVariant variant : variants) {
-            VariantResult result = searchVariant(variant, request, topK, minScore, hxqlFilter, logUser);
+            VariantResult result = searchVariant(variant, request, fetchK, minScore, hxqlFilter, logUser);
             if (!result.hits().isEmpty()) {
                 perVariant.add(result.hits());
             }
@@ -203,7 +209,10 @@ public class SemanticSearchService {
             totalCount = Math.max(totalCount, result.totalCount());
         }
 
-        List<SearchHit> hits = RrfFusion.fuse(perVariant, ragProperties.getQueryExpansion().getRrfK(), topK);
+        // Fuse over the over-fetched pool, then cap: fusing to topK first would discard the very chunks
+        // the cap needs to promote.
+        List<SearchHit> hits = diversify(
+                RrfFusion.fuse(perVariant, ragProperties.getQueryExpansion().getRrfK(), fetchK), topK);
         long searchTimeMs = System.currentTimeMillis() - startTime;
 
         log.info("Semantic search completed: {} results in {}ms for query: \"{}\" "
@@ -211,6 +220,31 @@ public class SemanticSearchService {
                 hits.size(), searchTimeMs, request.getQuery(), minScore, variants.size(), perVariant.size());
 
         return response(request, hits, vectorDimension, totalCount, searchTimeMs);
+    }
+
+    /**
+     * Trims the retrieved pool to {@code topK}, capping how much of it one document may occupy.
+     *
+     * <p>A no-op beyond the trim when the cap is disabled, which is the default, so the ordering and the
+     * result count are exactly what they were before {@link DocumentDiversityLimiter} existed.</p>
+     */
+    private List<SearchHit> diversify(List<SearchHit> hits, int topK) {
+        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity = documentDiversity();
+        int maxPerDocument = diversity != null && diversity.isEnabled() ? diversity.getMaxChunksPerDocument() : 0;
+        return DocumentDiversityLimiter.limit(hits, topK, maxPerDocument);
+    }
+
+    /** The over-fetch multiple, or 1 when the cap is off and there is nothing to promote. */
+    private int overFetchFactor() {
+        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity = documentDiversity();
+        return diversity != null && diversity.isEnabled() ? diversity.getOverFetchFactor() : 1;
+    }
+
+    private RagProperties.RetrievalProperties.DocumentDiversityProperties documentDiversity() {
+        if (ragProperties == null || ragProperties.getRetrieval() == null) {
+            return null;
+        }
+        return ragProperties.getRetrieval().getDocumentDiversity();
     }
 
     /** Embeds a query, caching the vector (#72) and spanning the embedding call (#73) when enabled. */

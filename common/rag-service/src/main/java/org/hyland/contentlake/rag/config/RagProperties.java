@@ -351,6 +351,43 @@ public class RagProperties {
         /** Verbatim matching for identifier-like queries (#122). */
         private VerbatimIdentifierProperties verbatimIdentifier = new VerbatimIdentifierProperties();
 
+        /** How much of one result set a single document may occupy. */
+        private DocumentDiversityProperties documentDiversity = new DocumentDiversityProperties();
+
+        /**
+         * Stops one document consuming the whole result set.
+         *
+         * <p>{@code topK} is a budget of chunks, and a document contributes every chunk it has to the
+         * ranking, so a long document can fill the budget by itself. Measured on the E2E fixture corpus,
+         * a {@code topK} of 10 came back as 10 chunks of only 2 documents, and a document that ranks 1st
+         * on its own merits was absent from a query quoting it nearly verbatim because another
+         * document's chunks were drawn first. A caller asking for 10 results and getting 2 documents
+         * cannot tell the difference between "not indexed" and "crowded out".</p>
+         */
+        @Data
+        public static class DocumentDiversityProperties {
+
+            /**
+             * Enables the cap. Off by default, like every other retrieval-quality switch here, until
+             * the eval confirms the gain: capping trades a long document's additional chunks for
+             * another document's best one, and only the eval can say whether that helps the answers.
+             */
+            private boolean enabled = false;
+
+            /**
+             * Most chunks one document may contribute before others are preferred. Hits above the cap
+             * are not discarded, only deferred, so the result count never drops because of it.
+             */
+            private int maxChunksPerDocument = 3;
+
+            /**
+             * How far past {@code topK} to retrieve, as a multiple, so there are other documents' chunks
+             * available to promote. Without over-fetching, a budget already filled by one document has
+             * nothing to swap in. Bounded by the endpoint's own maximum.
+             */
+            private int overFetchFactor = 3;
+        }
+
         /**
          * An extra retrieval pass restricted to chunks containing an identifier verbatim.
          *
