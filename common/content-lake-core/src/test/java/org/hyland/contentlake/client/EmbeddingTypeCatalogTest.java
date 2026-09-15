@@ -2,6 +2,7 @@ package org.hyland.contentlake.client;
 
 import org.hyland.contentlake.hxpr.api.model.Embedding;
 import org.hyland.contentlake.hxpr.api.model.VectorSearchResult;
+import org.hyland.contentlake.model.HxprTermsAggregationResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -54,6 +55,32 @@ class EmbeddingTypeCatalogTest {
 
     private EmbeddingTypeCatalog catalog(boolean discoveryEnabled) {
         return new EmbeddingTypeCatalog(hxprService, () -> PROBE, CONFIGURED, discoveryEnabled, TTL, clock);
+    }
+
+    private EmbeddingTypeCatalog catalog(int maxRows, boolean deriveFromChildNames) {
+        return new EmbeddingTypeCatalog(hxprService, () -> PROBE, CONFIGURED, true, TTL, clock,
+                maxRows, deriveFromChildNames);
+    }
+
+    /** The {@code SysEmbeddings} child names the corpus holds, which is what #130 widens from. */
+    private void childNamesInIndex(String... childNames) {
+        HxprTermsAggregationResult aggregation = new HxprTermsAggregationResult();
+        List<HxprTermsAggregationResult.Bucket> buckets = new ArrayList<>();
+        for (String name : childNames) {
+            HxprTermsAggregationResult.Bucket bucket = new HxprTermsAggregationResult.Bucket();
+            bucket.setKey(name);
+            bucket.setDocCount(1L);
+            buckets.add(bucket);
+        }
+        aggregation.setAggregationsBuckets(buckets);
+        when(hxprService.termsAggregation(eq("SELECT * FROM SysEmbeddings"), eq("sys_name"), isNull(),
+                anyInt())).thenReturn(aggregation);
+    }
+
+    /** Whether a type-restricted probe finds any row carrying {@code type}. */
+    private void typeMatchesRows(String type, boolean matches) {
+        when(hxprService.vectorSearch(any(), eq(type), isNull(), isNull(), eq(1), eq(0)))
+                .thenReturn(matches ? rows(1L, type) : rows(0L));
     }
 
     /** One short page of rows, so the scan stops after a single call. */
@@ -266,5 +293,52 @@ class EmbeddingTypeCatalogTest {
         public Clock withZone(java.time.ZoneId zone) {
             return this;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // #130: the row scan is a sample above its ceiling, so widen it from the child names
+    // -----------------------------------------------------------------------
+
+    @Test
+    void widensFromAChildNameOnceTheRowsConfirmTheType() {
+        // The row scan sees only the configured type; the corpus also holds a child written by a model
+        // whose rows the scan never reached.
+        indexHolds(CONFIGURED);
+        childNamesInIndex("_e_" + CONFIGURED, "_e_ai-nomic-embed-text");
+        typeMatchesRows("ai-nomic-embed-text", true);
+
+        assertThat(catalog(10_000, true).activeTypes())
+                .containsExactly(CONFIGURED, "ai-nomic-embed-text");
+    }
+
+    @Test
+    void doesNotQueryAChildNameTypeThatNoRowCarries() {
+        // The sanitized-derivation case: the child is named _e_ai-mxbai-embed-large-v2 while its rows
+        // carry the raw 'ai/mxbai-embed-large-v2'. Querying the name-derived form would match nothing,
+        // so it is dropped rather than added.
+        indexHolds(CONFIGURED);
+        childNamesInIndex("_e_" + CONFIGURED, "_e_ai-mxbai-embed-large-v2");
+        typeMatchesRows("ai-mxbai-embed-large-v2", false);
+
+        assertThat(catalog(10_000, true).activeTypes()).containsExactly(CONFIGURED);
+    }
+
+    @Test
+    void childNameWideningCanBeTurnedOff() {
+        indexHolds(CONFIGURED);
+
+        assertThat(catalog(10_000, false).activeTypes()).containsExactly(CONFIGURED);
+        verify(hxprService, never()).termsAggregation(any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void stopsAtTheConfiguredCeilingAndStillReturnsWhatItFound() {
+        // A ceiling of one row: the page comes back full, so the scan has sampled rather than
+        // enumerated and must not keep paging.
+        when(hxprService.vectorSearch(any(), isNull(), isNull(), isNull(), eq(1), anyInt()))
+                .thenReturn(rows(1L, CONFIGURED));
+
+        assertThat(catalog(1, false).activeTypes()).containsExactly(CONFIGURED);
+        verify(hxprService, times(1)).vectorSearch(any(), isNull(), isNull(), isNull(), eq(1), anyInt());
     }
 }
