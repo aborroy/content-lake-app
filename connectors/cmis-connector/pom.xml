@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        A shipped connector, not a module of content-lake-app: no parent, absent from the root POM, and
+        named in no Dockerfile. That is the point of the plugin mechanism (#124) and what #125 is the
+        first real consumer of. An in-tree cmis/ module group would have meant a COPY line in each of the
+        seven service Dockerfiles, where omitting one breaks a service that has nothing to do with CMIS.
+
+        Build it standalone, with content-lake-spi installed in the local repository:
+
+            mvn -f ../../pom.xml -pl common/content-lake-spi -am install -DskipTests
+            mvn -f pom.xml package
+
+        The result is target/cmis-connector-1.0.0.jar, to be dropped into the deployment's connectors/
+        directory and run on connector-batch-ingester.
+    -->
+    <groupId>org.hyland.contentlake</groupId>
+    <artifactId>cmis-connector</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>cmis-connector</name>
+    <description>Content Lake connector plugin for any CMIS 1.1 repository</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>21</maven.compiler.release>
+        <content-lake.version>1.0.0-SNAPSHOT</content-lake.version>
+        <spring.version>7.0.8</spring.version>
+        <opencmis.version>1.1.0</opencmis.version>
+        <junit.version>5.11.4</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+        <mockito.version>5.14.2</mockito.version>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>alfresco-public</id>
+            <url>https://artifacts.alfresco.com/nexus/content/groups/public</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- Provided by the ingester at runtime. The plugin classloader delegates to its parent first,
+             so a bundled copy would resolve to the host's classes anyway. -->
+        <dependency>
+            <groupId>org.hyland</groupId>
+            <artifactId>content-lake-spi</artifactId>
+            <version>${content-lake.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ContentSourceClient returns a Spring Resource. Also the host's. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-core</artifactId>
+            <version>${spring.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Bundled into the jar by the shade plugin below: nothing in the host provides CMIS. The
+             browser binding needs the client bindings at runtime even though nothing compiles against
+             them, which is why it is a plain compile-scope dependency rather than optional. -->
+        <dependency>
+            <groupId>org.apache.chemistry.opencmis</groupId>
+            <artifactId>chemistry-opencmis-client-impl</artifactId>
+            <version>${opencmis.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>cmis-connector-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+
+            <!--
+                One self-contained jar, because ConnectorPluginLoader puts the directory's jars on a
+                URLClassLoader and resolves nothing else: a connector's own dependencies have to travel
+                with it. The SPI and Spring are `provided` and therefore not shaded, which is required
+                rather than an optimisation. A second copy of the SPI types would not be the same
+                classes the host loaded, and the plugin would fail to cast.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <!-- Signatures do not survive shading, and a module descriptor
+                                             from a dependency would claim this jar is that module. -->
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <transformers>
+                                <!-- OpenCMIS ships service files of its own; concatenating them keeps
+                                     its binding lookup working, and keeps ours from being replaced. -->
+                                <transformer
+                                    implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

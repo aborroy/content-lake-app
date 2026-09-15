@@ -1106,6 +1106,55 @@ otherwise ingest it repeatedly.
 directory, and `content-lake-app-deployment/test/test-connector.sh` builds it, mounts it and asserts the
 documents come back out of semantic search.
 
+### The CMIS Connector
+
+`connectors/cmis-connector/` is a shipped connector rather than an example: one jar that ingests any CMIS 1.1
+repository, which is how a repository with no adapter of its own becomes a source. It is built standalone,
+like any connector, and its OpenCMIS dependency travels inside the jar.
+
+```bash
+mvn -pl common/content-lake-spi -am install -DskipTests
+mvn -f connectors/cmis-connector/pom.xml package
+cp connectors/cmis-connector/target/cmis-connector-1.0.0.jar \
+   ../content-lake-app-deployment/connectors/
+```
+
+```bash
+# Against the Alfresco in this stack, over its own CMIS endpoint
+CMIS_URL=http://alfresco:8080/alfresco/api/-default-/public/cmis/versions/1.1/browser \
+CMIS_USERNAME=admin CMIS_PASSWORD=admin CMIS_ROOT_PATH=/Sites \
+CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
+  docker compose --profile alfresco --profile connector up -d connector-batch-ingester
+```
+
+| Setting | Meaning |
+|---|---|
+| `cmis.url` | Service endpoint. Required |
+| `cmis.binding` | `browser` (default) or `atompub` |
+| `cmis.repository-id` | Optional; resolved automatically when the endpoint exposes exactly one |
+| `cmis.username` / `cmis.password` | Account to authenticate as. Required, and never printed |
+| `cmis.root-path` | Folder a batch pass starts from. Defaults to the repository root |
+| `cmis.include-paths` / `cmis.exclude-paths` | Path scope. Excludes are applied after includes and win |
+| `cmis.include-mime-types` / `cmis.exclude-mime-types` | MIME scope, `text/*` wildcards allowed |
+| `cmis.acl-fallback` | `fail-closed` (default), `sync-account` or `public`; see below |
+
+Three limits, stated because they are properties of CMIS rather than of this implementation:
+
+- **Batch only.** CMIS exposes no change feed this connector uses, so there is no live counterpart. A
+  re-ingest is another batch pass, and unchanged content is skipped by the host's content-reuse check.
+- **No aspect-based scope.** There is no CMIS equivalent of `cl:indexed`, so scope is the path and MIME
+  patterns above rather than a decision an editor makes in the repository.
+- **ACL support is repository-dependent.** CMIS makes ACL access an optional capability. Where the
+  repository reports one, permissions are read per document, mapped through the basic CMIS permissions and
+  stored as read principals. Where it reports none, the connector refuses to run rather than guessing:
+  `cmis.acl-fallback` is what an operator sets to proceed deliberately, either restricting every document to
+  the sync account or, for an already-public corpus, to everyone. A repository whose permissions cannot be
+  read must not silently produce world-readable documents.
+
+`content-lake-app-deployment/test/test-cmis.sh` is the end-to-end check: it ingests the same Alfresco folder
+twice, once through the native adapter and once over CMIS, compares the document sets, and asserts that a
+document restricted in Alfresco is not retrievable by a user the ACL excludes.
+
 ### Connector Schema And Startup Validation
 
 Each source connector publishes the settings it needs, and every ingester checks its configuration

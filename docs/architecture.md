@@ -83,6 +83,12 @@ connector/                          No source adapter: its connector arrives as 
         └── org.hyland.connector.contentlake.batch
 ```
 
+Outside the reactor, and deliberately so: `connectors/` holds connectors shipped as jars. They have no
+parent POM, appear in no intermediate POM and are named in no Dockerfile, which is the whole point of the
+plugin mechanism. `connectors/cmis-connector/` is the first one (#125), a CMIS 1.1 source in
+`org.hyland.contentlake.connector.cmis`, built standalone against `content-lake-spi` with OpenCMIS shaded
+into its jar. `connector-archetype/examples/sample-directory-connector/` is the worked example alongside it.
+
 Sibling runtime projects:
 
 ```
@@ -261,6 +267,17 @@ three ways that all follow from not knowing the source:
 Where the walk starts comes from `connector.roots`, or from `ContentSourceClient.getRootNodeId()` when the
 connector names its own. Neither fails startup: a discovery pass with no entry point would report an empty
 source on every run.
+
+#### What a plugin connector's documents are readable by
+
+`rag-service` discovers the sources to build permission clauses for from the index itself, so a connector's
+documents are retrievable as soon as they are ingested and need no configuration (#133). What it cannot do is
+expand a *group* on such a source: it holds a group directory client for Alfresco and for Nuxeo and has no way
+to ask a third source. A plugin connector's clause is therefore the caller's own authorities, which retrieves
+documents carrying `__Everyone__` and documents granted to the caller by name, and not documents granted to a
+group. A connector whose ACLs are group-based needs a resolver in `rag-service`, which is a code change; a
+connector whose permissions cannot be read at all must emit no `__Everyone__` at all, because a document that
+should be restricted and is marked public is the one failure mode worth designing against.
 
 ### `TextExtractor`
 
