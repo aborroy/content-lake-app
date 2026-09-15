@@ -15,7 +15,7 @@
     <name>Content Lake Core</name>
 
     <dependencies>
-        <!-- SPI interfaces — zero external deps -->
+        <!-- SPI interfaces: zero external deps -->
         <dependency>
             <groupId>org.hyland</groupId>
             <artifactId>content-lake-spi</artifactId>
@@ -121,7 +121,7 @@
                             <generatorName>java</generatorName>
                             <library>native</library>
 
-                            <!-- Models only — no API classes -->
+                            <!-- Models only: no API classes -->
                             <generateApis>false</generateApis>
                             <generateModels>true</generateModels>
                             <generateModelTests>false</generateModelTests>

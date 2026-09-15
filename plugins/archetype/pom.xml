@@ -14,9 +14,10 @@
         Generates a source connector for Content Lake: an SPI implementation, its service declaration and a
         test, ready to build into a jar and drop into an ingester's plugin directory.
 
-        Deliberately NOT a module of the root POM. Every service Dockerfile enumerates the reactor's
-        modules, so adding one here would mean editing six Dockerfiles to ship a tool that exists to stop
-        people having to edit six Dockerfiles.
+        Deliberately NOT a module of the root POM, and it lives under plugins/ with everything else the
+        reactor does not build. Every service Dockerfile in the deployment repository enumerates the
+        reactor's modules, so adding one here would mean editing all of them to ship a tool that exists to
+        stop people having to edit all of them.
     </description>
 
     <build>

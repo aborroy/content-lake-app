@@ -7,8 +7,13 @@
     <!--
         A shipped connector, not a module of content-lake-app: no parent, absent from the root POM, and
         named in no Dockerfile. That is the point of the plugin mechanism (#124) and what #125 is the
-        first real consumer of. An in-tree cmis/ module group would have meant a COPY line in each of the
-        seven service Dockerfiles, where omitting one breaks a service that has nothing to do with CMIS.
+        first real consumer of. An in-tree cmis/ module group would have meant a COPY line in every
+        service Dockerfile in the deployment repository, where omitting one breaks a service that has
+        nothing to do with CMIS.
+
+        maven.compiler.release stays at 21 while the reactor targets 25 on purpose: this jar is dropped
+        into whatever ingester a deployment happens to run, so it targets the oldest host still supported
+        rather than the version this repository builds with.
 
         Build it standalone, with content-lake-spi installed in the local repository:
 

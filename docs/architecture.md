@@ -15,91 +15,139 @@ storage, RAG) remains source-agnostic.
 ## Module Layout
 
 ```
-content-lake-app/
-├── common/
-│   ├── content-lake-repo-model/   Alfresco content model XML (cl:indexed, cl:excludeFromLake)
-│   │                              Deployed to Alfresco only. Do not modify.
-│   ├── content-lake-spi/          Source-agnostic interfaces only (zero external deps)
-│   │   └── org.hyland.contentlake.spi
-│   │       ├── ContentSourceClient
-│   │       ├── ScopeResolver
-│   │       ├── SourceNode
-│   │       ├── SecurityConfig / PermissionRule   (OIS-aligned structured ACL)
-│   │       ├── TextExtractor
-│   │       └── ExtractedText / TextFormat        (PLAIN | MARKDOWN)
-│   ├── content-lake-core/         Shared pipeline -- no source-specific SDK imports
-│   │   └── org.hyland.contentlake
-│   │       ├── client/            HxprService, HxprDocumentApi, HxprQueryApi
-│   │       ├── config/            HxprProperties
-│   │       ├── extractor/         TikaTextExtractor (source-agnostic, Tika-based)
-│   │       │                       TransformEngineTextExtractor (/transform protocol, any source)
-│   │       │                       ChainingTextExtractor (ordered fallback, degrades to Tika)
-│   │       │                       ExtractionChain (multi-service chain from config)
-│   │       │                       ExtractionBackend / TransformCoreBackend (pluggable protocols)
-│   │       │                       MarkdownToPlainText, ExtractionFormat
-│   │       ├── model/             HxprDocument, HxprEmbedding, Chunk, ContentLakeNodeStatus
-│   │       └── service/           ContentSyncService, EmbeddingService, Chunker, chunking strategies
-│   └── rag-service/               Semantic search + RAG Spring Boot app
-│       └── org.hyland.contentlake.rag
-│
-├── alfresco/
-│   ├── content-lake-source-alfresco/  Alfresco adapter
-│   │   └── org.hyland.alfresco.contentlake
-│   │       ├── client/            AlfrescoClient (impl ContentSourceClient), TransformClient
-│   │       ├── config/            TransformProperties
-│   │       ├── security/          SecurityConfig, AlfrescoAuthenticationProvider, *TicketAuth*
-│   │       ├── adapter/           AlfrescoSourceNodeAdapter
-│   │       └── service/           ContentLakeScopeResolver (impl ScopeResolver)
-│   ├── alfresco-batch-ingester/   Spring Boot app: full-batch Alfresco sync
-│   │   └── org.hyland.alfresco.contentlake.batch
-│   └── alfresco-live-ingester/    Spring Boot app: Alfresco ActiveMQ event listener
-│       └── org.hyland.alfresco.contentlake.live
-│
-└── nuxeo/
-    ├── content-lake-source-nuxeo/  Nuxeo adapter
-    │   └── org.hyland.nuxeo.contentlake
-    │       ├── client/            NuxeoClient (impl ContentSourceClient), NuxeoConversionClient
-    │       ├── auth/              BasicNuxeoAuthentication, NuxeoAuthentication
-    │       ├── config/            NuxeoProperties
-    │       ├── adapter/           NuxeoSourceNodeAdapter
-    │       ├── model/             NuxeoDocument
-    │       └── service/           NuxeoScopeResolver (impl ScopeResolver)
-    ├── nuxeo-batch-ingester/       Spring Boot app: full-batch Nuxeo sync via NXQL
-    │   └── org.hyland.nuxeo.contentlake.batch
-    └── nuxeo-live-ingester/        Spring Boot app: audit-driven Nuxeo sync
-        └── org.hyland.nuxeo.contentlake.live
+content-lake-app/                   Reactor: five module groups, thirteen leaf modules
+    common/
+        content-lake-repo-model/    Alfresco content model XML (cl:indexed, cl:excludeFromLake)
+                                    Deployed to Alfresco only. Do not modify.
+        content-lake-spi/           Source-agnostic interfaces only (zero external deps)
+            org.hyland.contentlake.spi
+                ContentSourceClient
+                ScopeResolver
+                SourceNode
+                SecurityConfig / PermissionRule   (OIS-aligned structured ACL)
+                TextExtractor
+                ExtractedText / TextFormat        (PLAIN | MARKDOWN)
+        content-lake-core/          Shared pipeline -- no source-specific SDK imports
+            org.hyland.contentlake
+                client/             HxprService, HxprDocumentApi, HxprQueryApi
+                config/             HxprProperties
+                extractor/          TikaTextExtractor (source-agnostic, Tika-based)
+                                    TransformEngineTextExtractor (/transform protocol, any source)
+                                    ChainingTextExtractor (ordered fallback, degrades to Tika)
+                                    ExtractionChain (multi-service chain from config)
+                                    ExtractionBackend / TransformCoreBackend (pluggable protocols)
+                                    MarkdownToPlainText, ExtractionFormat
+                model/              HxprDocument, HxprEmbedding, Chunk, ContentLakeNodeStatus
+                service/            ContentSyncService, EmbeddingService, Chunker, chunking strategies
+        rag-service/                Semantic search + RAG Spring Boot app
+            org.hyland.contentlake.rag
 
-filesystem/
-    ├── content-lake-source-filesystem/  Filesystem adapter
-    │   └── org.hyland.filesystem.contentlake
-    │       ├── client/            FileSystemSourceClient (impl ContentSourceClient)
-    │       ├── config/            FileSystemProperties
-    │       └── service/           FileSystemScopeResolver (impl ScopeResolver)
-    └── filesystem-batch-ingester/  Spring Boot app: directory walk + one-shot sync (uses TikaTextExtractor)
-        └── org.hyland.filesystem.contentlake.batch
+    alfresco/
+        content-lake-source-alfresco/   Alfresco adapter
+            org.hyland.alfresco.contentlake
+                client/             AlfrescoClient (impl ContentSourceClient), TransformClient
+                config/             TransformProperties
+                security/           SecurityConfig, AlfrescoAuthenticationProvider, *TicketAuth*
+                adapter/            AlfrescoSourceNodeAdapter
+                service/            ContentLakeScopeResolver (impl ScopeResolver)
+        alfresco-batch-ingester/    Spring Boot app: full-batch Alfresco sync
+            org.hyland.alfresco.contentlake.batch
+        alfresco-live-ingester/     Spring Boot app: Alfresco ActiveMQ event listener
+            org.hyland.alfresco.contentlake.live
 
-connector/                          No source adapter: its connector arrives as a jar at runtime
-    └── connector-batch-ingester/   Spring Boot app: batch sync driven by a ConnectorRegistry connector
-        └── org.hyland.connector.contentlake.batch
+    nuxeo/
+        content-lake-source-nuxeo/  Nuxeo adapter
+            org.hyland.nuxeo.contentlake
+                client/             NuxeoClient (impl ContentSourceClient), NuxeoConversionClient
+                auth/               BasicNuxeoAuthentication, NuxeoAuthentication
+                config/             NuxeoProperties
+                adapter/            NuxeoSourceNodeAdapter
+                model/              NuxeoDocument
+                service/            NuxeoScopeResolver (impl ScopeResolver)
+        nuxeo-batch-ingester/       Spring Boot app: full-batch Nuxeo sync via NXQL
+            org.hyland.nuxeo.contentlake.batch
+        nuxeo-live-ingester/        Spring Boot app: audit-driven Nuxeo sync
+            org.hyland.nuxeo.contentlake.live
+
+    filesystem/
+        content-lake-source-filesystem/  Filesystem adapter
+            org.hyland.filesystem.contentlake
+                client/             FileSystemSourceClient (impl ContentSourceClient)
+                config/             FileSystemProperties
+                service/            FileSystemScopeResolver (impl ScopeResolver)
+        filesystem-batch-ingester/  Spring Boot app: directory walk + one-shot sync (uses TikaTextExtractor)
+            org.hyland.filesystem.contentlake.batch
+
+    connector/                      No source adapter: its connector arrives as a jar at runtime
+        connector-batch-ingester/   Spring Boot app: batch sync driven by a ConnectorRegistry connector
+            org.hyland.connector.contentlake.batch
 ```
 
-Outside the reactor, and deliberately so: `connectors/` holds connectors shipped as jars. They have no
-parent POM, appear in no intermediate POM and are named in no Dockerfile, which is the whole point of the
-plugin mechanism. `connectors/cmis-connector/` is the first one (#125), a CMIS 1.1 source in
-`org.hyland.contentlake.connector.cmis`, built standalone against `content-lake-spi` with OpenCMIS shaded
-into its jar. `connector-archetype/examples/sample-directory-connector/` is the worked example alongside it.
+Everything the reactor builds is above. Everything below is deliberately outside it, in one place:
+
+```
+content-lake-app/
+    plugins/                        Not built by the reactor. Never add it to the root <modules>
+        archetype/                  Maven archetype (packaging maven-archetype) generating a
+                                    connector skeleton, plus the templated project under
+                                    src/main/resources/archetype-resources/
+        cmis-connector/             Shipped connector (#125): a CMIS 1.1 source in
+                                    org.hyland.contentlake.connector.cmis, built standalone against
+                                    content-lake-spi with OpenCMIS shaded into its jar
+        examples/
+            sample-directory-connector/   Worked example: ingests a mounted directory
+```
+
+The three directories under `plugins/` sit at three different points in one lifecycle: `archetype/`
+generates a connector, `examples/sample-directory-connector/` is one to read, and `cmis-connector/`
+is one that ships. None has a parent POM, none appears in any intermediate POM, and none is named in
+any Dockerfile, which is the whole point of the plugin mechanism.
+
+Do not confuse `connector/` with `plugins/`. `connector/` is the reactor module group holding the
+host application that loads plugins at runtime; `plugins/` holds the plugins themselves and is never
+built by the reactor. A third `connectors/` directory exists only in the deployment repository, where
+it is the runtime drop directory that built jars are copied into.
 
 Sibling runtime projects:
 
 ```
-nuxeo-deployment/       Runnable local Nuxeo + PostgreSQL stack
+nuxeo-deployment/           Runnable local Nuxeo + PostgreSQL stack
 alfresco-content-lake-ui/
-└── ext-rag/            ADF extension source (Angular)
+    ext-rag/                ADF extension source (Angular)
 alfresco-content-app/
-└── projects/ext-rag/   Real ACA workspace for build/test validation
+    projects/ext-rag/       Real ACA workspace for build/test validation
 ```
 
----
+## Adding a Maven Module
+
+Before adding one, check whether the work belongs in a module at all. A new **source** should not need
+any of this: ship it as a connector jar under `plugins/` and run it on `connector-batch-ingester`. That
+is what the plugin mechanism is for, and it is why `plugins/` exists.
+
+If a module is genuinely required:
+
+1. Create the directory under `common/`, `alfresco/`, `nuxeo/`, `filesystem/` or `connector/`.
+2. Add its `pom.xml` with `<parent>` pointing at the **root** POM. Every leaf module in this build
+   parents directly to the root; the group POMs aggregate but contribute no inheritance. Set
+   `<relativePath>../../pom.xml</relativePath>`.
+3. Register it in the group's aggregator POM (`common/pom.xml`, `alfresco/pom.xml`, `nuxeo/pom.xml`,
+   `filesystem/pom.xml` or `connector/pom.xml`).
+4. Update **every** service Dockerfile in the `content-lake-app-deployment` repository, under
+   `dockerfiles/`. Each one enumerates the reactor's modules explicitly in two places: a
+   `COPY --from=code <group>/<module>/pom.xml ...` line before `dependency:go-offline`, and a
+   `COPY --from=code <group>/<module>/src ...` line before the build. The POM section lists **all**
+   modules; the `src` section lists only the ones that service actually builds. Omitting a POM line
+   breaks the image build at the `mvn ... -am package` step, including for services unrelated to the
+   new module.
+5. If the module is deployed into Alfresco rather than run as a service, also update
+   `acs/alfresco/Dockerfile` in the deployment repository, which builds the repository model
+   separately and names its module path twice.
+
+`compose.content-lake.yaml` holds no per-service build blocks for these images, so adding a module
+does not touch it. Only adding a new *service* would.
+
+Nothing under `plugins/` takes part in any of this, and none of it may be added to the root
+`<modules>` list.
 
 ## Dependency Graph
 
@@ -216,8 +264,8 @@ public interface ConnectorPlugin {
 
 Discovered by the JDK `ServiceLoader` from jars in `/opt/content-lake/connectors`
 (`content-lake.connector.plugin-directory`), so a source can be built, shipped and iterated on without a
-Maven module or an edit to the seven service Dockerfiles. `connector-archetype/` generates the skeleton,
-and `connector-archetype/examples/sample-directory-connector` is a working one to read.
+Maven module or an edit to the deployment repository's service Dockerfiles. `plugins/archetype/` generates
+the skeleton, and `plugins/examples/sample-directory-connector` is a working one to read.
 
 A factory rather than the connector itself, because `ServiceLoader` needs a no-argument constructor: the
 plugin declares its configuration, the host validates it and passes back a `ConnectorContext` (property

@@ -13,7 +13,7 @@
 
     <artifactId>content-lake-nuxeo</artifactId>
     <packaging>pom</packaging>
-    <name>Content Lake — Nuxeo</name>
+    <name>Content Lake - Nuxeo</name>
 
     <modules>
         <module>content-lake-source-nuxeo</module>

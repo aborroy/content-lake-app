@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        A convenience aggregator, and nothing more. It exists so the plugin projects can be built in one
+        command:
+
+            mvn -pl common/content-lake-spi -am install -DskipTests   (from the repository root)
+            mvn -f plugins/pom.xml package
+
+        Deliberately NOT referenced by the root POM's <modules>. The whole point of plugins/ is that the
+        reactor does not build it: every service Dockerfile in the deployment repository enumerates the
+        reactor's modules, and a connector that needed a place in that build would defeat the plugin
+        mechanism. Adding this file to the root POM would undo that.
+
+        It aggregates without inheriting: the projects below keep their own coordinates and versions, and
+        none of them declares this file as a parent. A plugin is released on its own cadence, against the
+        SPI it was compiled with, so it does not track the reactor's version.
+    -->
+    <groupId>org.hyland</groupId>
+    <artifactId>content-lake-plugins</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>Content Lake - Plugins</name>
+    <description>Connectors shipped as jars, the archetype that generates them, and a worked example</description>
+
+    <modules>
+        <module>archetype</module>
+        <module>cmis-connector</module>
+        <module>examples/sample-directory-connector</module>
+    </modules>
+</project>

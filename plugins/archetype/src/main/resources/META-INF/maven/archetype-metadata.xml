@@ -18,7 +18,7 @@
 
         <!-- Spring version supplying the Resource type ContentSourceClient returns. -->
         <requiredProperty key="springVersion">
-            <defaultValue>7.0.2</defaultValue>
+            <defaultValue>7.0.8</defaultValue>
         </requiredProperty>
     </requiredProperties>
 

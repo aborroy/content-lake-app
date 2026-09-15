@@ -15,7 +15,7 @@
     <name>Content Lake SPI</name>
 
     <dependencies>
-        <!-- Spring Core for Resource — the only external type in the SPI -->
+        <!-- Spring Core for Resource: the only external type in the SPI -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-core</artifactId>

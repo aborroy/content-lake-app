@@ -13,7 +13,7 @@
 
     <artifactId>content-lake-alfresco</artifactId>
     <packaging>pom</packaging>
-    <name>Content Lake — Alfresco</name>
+    <name>Content Lake - Alfresco</name>
 
     <modules>
         <module>content-lake-source-alfresco</module>

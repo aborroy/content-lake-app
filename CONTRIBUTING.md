@@ -39,8 +39,12 @@ imports. This is enforced at compile time. Do not add source-specific imports to
 
 ## Adding a Maven Module
 
-See [docs/architecture.md](docs/architecture.md) for the checklist (includes required changes to
-`compose.content-lake.yaml` in the deployment repo).
+See [Adding a Maven Module](docs/architecture.md#adding-a-maven-module) for the checklist. It includes
+the required changes to every service Dockerfile in the deployment repository, which are easy to miss
+and break unrelated images when omitted.
+
+A new **source** usually needs none of it: ship it as a connector jar under `plugins/` instead. See
+[plugins/README.md](plugins/README.md).
 
 ## Commit Messages
 

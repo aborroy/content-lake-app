@@ -29,7 +29,7 @@ cd cmis-connector && mvn test
 |---|---|---|
 | `sourceType` | Prefix of `cin_sourceId` for this connector's documents. `alfresco`, `nuxeo` and `filesystem` are taken; an ingester refuses a plugin that claims one it already has | `mysource` |
 | `contentLakeVersion` | Version of `content-lake-spi` to compile against | `1.0.0-SNAPSHOT` |
-| `springVersion` | Supplies the `Resource` type `ContentSourceClient` returns | `7.0.2` |
+| `springVersion` | Supplies the `Resource` type `ContentSourceClient` returns | `7.0.8` |
 
 The generated project depends on `content-lake-spi` and `spring-core` as `provided`, and on nothing else.
 That is the whole point: a connector is written against the SPI, so it neither compiles against core nor
@@ -53,6 +53,9 @@ should be pointed at.
 
 ## Why this is not a module of the root POM
 
-Every service Dockerfile enumerates the reactor's modules, so adding this to `<modules>` would mean editing
-seven Dockerfiles to ship a tool whose reason for existing is that people should not have to edit seven
-Dockerfiles. It builds on its own, from this directory.
+Every service Dockerfile in the deployment repository enumerates the reactor's modules, so adding this to
+`<modules>` would mean editing all of them to ship a tool whose reason for existing is that people should
+not have to edit any of them. It builds on its own, from this directory.
+
+This is why it sits under `plugins/`, alongside `cmis-connector/` and `examples/`: that directory is the
+one place in the repository that the reactor never builds.

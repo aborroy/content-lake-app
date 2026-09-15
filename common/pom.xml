@@ -13,7 +13,7 @@
 
     <artifactId>content-lake-common</artifactId>
     <packaging>pom</packaging>
-    <name>Content Lake — Common</name>
+    <name>Content Lake - Common</name>
 
     <modules>
         <module>content-lake-repo-model</module>

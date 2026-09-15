@@ -27,9 +27,12 @@ Part of the **Content Lake** ecosystem -- a PoC for ingesting Alfresco and Nuxeo
 
 | Doc | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Module layout, SPI interfaces, dependency graph, data model, design decisions |
+| [docs/architecture.md](docs/architecture.md) | Module layout, adding a module, SPI interfaces, dependency graph, data model, design decisions |
+| [docs/api.md](docs/api.md) | Every REST endpoint with request and response examples: batch ingester, RAG service, health checks, live ingester |
+| [docs/configuration.md](docs/configuration.md) | Every setting: connector plugins, the CMIS connector, ingestion, live ingestion, RAG |
 | [docs/security-model.md](docs/security-model.md) | Where read permissions are enforced, what the model does not do, rejected alternatives, deployment hardening checklist |
 | [docs/sync-pipeline.md](docs/sync-pipeline.md) | Full/live sync flows, metadata-only path, path structure, idempotency, scope resolution |
+| [plugins/README.md](plugins/README.md) | Connectors shipped as jars, the archetype, and why they sit outside the reactor |
 
 ## Overview
 
@@ -58,35 +61,40 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 
 ## Architecture
 
-```text
-  ┌────────────────────────────────────┐   ┌────────────────────────────────────┐
-  │ Alfresco Repository + Event2       │   │ Nuxeo + Audit Stream               │
-  │ REST API + ActiveMQ topic          │   │ REST API + audit log watermark     │
-  └────────────────────────────────────┘   └────────────────────────────────────┘
-         │                   │                    │                   │
-         ▼                   ▼                    ▼                   ▼
-  ┌────────────┐    ┌──────────────┐    ┌──────────────────┐  ┌──────────────────┐
-  │ alfresco-  │    │ alfresco-    │    │ nuxeo-batch-     │  │ nuxeo-live-      │
-  │ batch-     │    │ live-        │    │ ingester         │  │ ingester         │
-  │ ingester   │    │ ingester     │    │ NXQL Discovery   │  │ Audit Watermark  │
-  └────────────┘    └──────────────┘    └──────────────────┘  └──────────────────┘
-         │                   │                    │                   │
-         └───────────────────┴────────────────────┴───────────────────┘
-                                          ▼
-                    ┌──────────────────────────────────────────┐
-                    │ content-lake-core                        │
-                    │ Node sync, Transform, Chunk, Embed, ACL  │
-                    │ source_modifiedAt idempotency guard      │
-                    └──────────────────────────────────────────┘
-                                          ▼
-                    ┌──────────────────────────────────────────┐
-                    │ hxpr Content Lake                        │
-                    └──────────────────────────────────────────┘
-                                          ▼
-                    ┌──────────────────────────────────────────┐
-                    │ rag-service                              │
-                    │ Query → Embed → Search → Augment → LLM   │
-                    └──────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    ALF["Alfresco Repository + Event2<br/>REST API + ActiveMQ topic"]
+    NX["Nuxeo + Audit Stream<br/>REST API + audit log watermark"]
+    FS["Filesystem<br/>local or mounted directory"]
+    PLG["Any source via connector plugin<br/>jar in the plugin directory"]
+
+    ALFB["alfresco-batch-ingester<br/>:9090"]
+    ALFL["alfresco-live-ingester<br/>:9092"]
+    NXB["nuxeo-batch-ingester<br/>NXQL discovery, :9093"]
+    NXL["nuxeo-live-ingester<br/>audit watermark, :9094"]
+    FSB["filesystem-batch-ingester<br/>:9095"]
+    CONB["connector-batch-ingester<br/>:9096"]
+
+    CORE["content-lake-core<br/>Node sync, Transform, Chunk, Embed, ACL<br/>source_modifiedAt idempotency guard"]
+    HXPR["hxpr Content Lake"]
+    RAG["rag-service :9091<br/>Query -> Embed -> Search -> Augment -> LLM"]
+
+    ALF --> ALFB
+    ALF --> ALFL
+    NX --> NXB
+    NX --> NXL
+    FS --> FSB
+    PLG --> CONB
+
+    ALFB --> CORE
+    ALFL --> CORE
+    NXB --> CORE
+    NXL --> CORE
+    FSB --> CORE
+    CONB --> CORE
+
+    CORE --> HXPR
+    HXPR --> RAG
 ```
 
 ### Modules
@@ -106,6 +114,23 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 | `content-lake-source-filesystem` | `filesystem/` | -- | Filesystem source: local/mounted directory client, scope resolver (glob/extension filters); uses the Tika extractor |
 | `filesystem-batch-ingester` | `filesystem/` | 9095 | Filesystem directory discovery and one-shot sync via `/api/sync/configured` |
 | `connector-batch-ingester` | `connector/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
+
+Thirteen modules in five groups, all built by `mvn clean package` at the root.
+
+### Plugins
+
+`plugins/` holds what the reactor does **not** build: connectors shipped as jars and the tooling that
+makes them. Each builds on its own, and none may be added to the root POM's `<modules>` list. See
+[plugins/README.md](plugins/README.md).
+
+| Project | Path | Description |
+|---------|------|-------------|
+| `content-lake-connector-archetype` | `plugins/archetype/` | Maven archetype generating a connector skeleton |
+| `cmis-connector` | `plugins/cmis-connector/` | Shipped connector: any CMIS 1.1 repository as a source, with OpenCMIS shaded in |
+| `sample-directory-connector` | `plugins/examples/sample-directory-connector/` | Worked example: ingests a mounted directory. Not a supported source |
+
+Do not confuse `plugins/` with the reactor group `connector/`, which holds the host application that
+loads them at runtime.
 
 ## Quick Start
 
@@ -260,29 +285,25 @@ export EMBEDDING_CHUNK_OVERLAP=120
 
 ## Nuxeo Backfill And Live Sync
 
-`compose.nuxeo.yaml` starts both the `nuxeo-batch-ingester` and the
-`nuxeo-live-ingester`. The Nuxeo server itself is provided by the
-[nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) companion
-project, which must be running before you start this stack.
-
-**Step 1 -- start Nuxeo** (in a separate terminal, from the sibling
-`nuxeo-deployment/` directory):
+The Nuxeo stack is deployed from the
+[content-lake-app-deployment](https://github.com/aborroy/content-lake-app-deployment) companion
+project, which owns every compose file for this project. It starts both the `nuxeo-batch-ingester`
+and the `nuxeo-live-ingester`, and brings up the Nuxeo server and its database from
+[nuxeo-deployment](https://github.com/aborroy/nuxeo-deployment) automatically.
 
 ```bash
-git clone https://github.com/aborroy/nuxeo-deployment.git ../nuxeo-deployment
-cd ../nuxeo-deployment
-docker compose up --build
+cd ../content-lake-app-deployment
+make up-nuxeo
 ```
 
-Nuxeo will be available at `http://localhost:8081/nuxeo` once healthy.
-
-**Step 2 -- start the Nuxeo ingesters** (from this directory):
+To build the ingesters from your local checkout of this repository rather than from GitHub, override
+the build context:
 
 ```bash
-docker compose -f compose.nuxeo.yaml up --build
+CONTENT_LAKE_GIT_CONTEXT=../content-lake-app make up-nuxeo
 ```
 
-This starts:
+Nuxeo is available at `http://localhost:8081/nuxeo` once healthy. The stack starts:
 
 - `nuxeo-batch-ingester` on `http://localhost:9093` for one-shot backfills
 - `nuxeo-live-ingester` on `http://localhost:9094` for audit-driven incremental sync
@@ -413,942 +434,13 @@ curl -X POST "http://localhost:9090/api/sync/configured?alf_ticket=$TICKET"
 
 ## API Usage
 
-### Batch Ingester (port 9090)
-
-#### Start Synchronization
-
-```bash
-# Sync configured folders
-curl -X POST http://localhost:9090/api/sync/configured -u admin:admin
-
-# Sync specific folder
-curl -X POST http://localhost:9090/api/sync/batch \
-  -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"folders": ["node-id"], "recursive": true, "types": ["cm:content"]}'
-```
-
-#### Monitor Progress
-
-```bash
-# Overall status
-curl http://localhost:9090/api/sync/status -u admin:admin
-
-# Job-specific status
-curl http://localhost:9090/api/sync/status/{jobId} -u admin:admin
-```
-
-#### Reconcile Alfresco Permissions
-
-Use this after an Alfresco permission change when you want to force reconciliation manually. It
-updates hxpr ACLs without re-running text extraction or embeddings.
-
-```bash
-# Reconcile a single file ACL
-curl -X POST http://localhost:9090/api/sync/permissions \
-  -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"nodeIds":["file-node-id"],"recursive":true}'
-
-# Reconcile a folder ACL across its descendant files
-curl -X POST http://localhost:9090/api/sync/permissions \
-  -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"nodeIds":["folder-node-id"],"recursive":true}'
-```
-
-#### Query Node Status
-
-```bash
-# Single node
-curl http://localhost:9090/api/content-lake/nodes/{nodeId}/status -u admin:admin
-
-# Bulk node list
-curl -X POST http://localhost:9090/api/content-lake/nodes/status \
-  -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"nodeIds":["node-id-1","node-id-2"]}'
-
-# Optional: include aggregated subtree status for folders
-curl -X POST http://localhost:9090/api/content-lake/nodes/status \
-  -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"nodeIds":["folder-id"],"includeFolderAggregate":true}'
-
-# Optional: same aggregation for single-folder lookup
-curl "http://localhost:9090/api/content-lake/nodes/{folderId}/status?includeFolderAggregate=true" \
-  -u admin:admin
-```
-
-#### Prove a Node Is Retrievable
-
-`status` reports a claim: it is read from the node's own `cl:syncStatusValue`, and a document can hold
-that value while holding no embeddings, in which case it is invisible to semantic and hybrid search but
-looks finished to monitoring. `index-proof` measures instead, by counting the document's chunks on the
-embeddings index:
-
-```bash
-curl "http://localhost:9090/api/content-lake/nodes/{nodeId}/index-proof" -u admin:admin
-
-# Include more sampled chunks (bounded; the response size does not grow with the document)
-curl "http://localhost:9090/api/content-lake/nodes/{nodeId}/index-proof?sampleSize=10" -u admin:admin
-```
-
-The response separates what was counted from what was claimed, and reduces to one `verdict`:
-
-| Verdict | Meaning |
-|---|---|
-| `INDEXED_WITH_EMBEDDINGS` | the document exists and the embeddings index holds chunks for it |
-| `METADATA_ONLY` | the document exists with zero chunks, so it cannot be retrieved |
-| `ABSENT` | no document exists for this node |
-
-`measured.embeddingTypes` lists every type the document has an embedding child for, so a child left
-behind by a previously configured embedding model is visible. `claimed.sectionMapChunks` is the chunk
-count ingestion believed it produced: a non-zero value against a measured `chunkCount` of zero is the
-signature of an embedding phase that never completed. A `null` verdict with a populated `error` means a
-measurement could not be taken, and is deliberately not a guess.
-
-### RAG Service (port 9091)
-
-#### RAG Prompt
-
-Ask a question and get an LLM-generated answer grounded in your indexed Alfresco and Nuxeo documents:
-
-```bash
-curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{ "question": "What are the key findings in the Q4 report?" }'
-```
-
-With options:
-
-```bash
-curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "Summarize the budget proposal",
-    "sourceType": "nuxeo",
-    "topK": 10,
-    "minScore": 0.6,
-    "includeContext": true
-  }'
-```
-
-Multi-turn conversation (same `sessionId`):
-
-```bash
-# Turn 1
-curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "demo-session-1",
-    "question": "Summarize the Q4 report highlights"
-  }'
-
-# Turn 2 (follow-up resolved with history)
-curl -X POST http://localhost:9091/api/rag/prompt -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sessionId": "demo-session-1",
-    "question": "Can you expand on the second point?"
-  }'
-```
-
-Response:
-
-```json
-{
-  "answer": "The Q4 report highlights a 12% revenue increase...",
-  "question": "What are the key findings in the Q4 report?",
-  "sessionId": "demo-session-1",
-  "retrievalQuery": "what are the key findings in the q4 report",
-  "historyTurnsUsed": 2,
-  "model": "ai/gpt-oss",
-  "tokenCount": 672,
-  "searchTimeMs": 245,
-  "generationTimeMs": 1830,
-  "totalTimeMs": 2075,
-  "sourcesUsed": 3,
-  "sources": [
-    {
-      "documentId": "abc-123",
-      "sourceId": "nuxeo:nuxeo-demo",
-      "sourceType": "nuxeo",
-      "nodeId": "e4f5a6b7-...",
-      "name": "Q4-Financial-Report.pdf",
-      "path": "/default-domain/workspaces/finance",
-      "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4-Financial-Report.pdf",
-      "chunkText": "Revenue for Q4 increased by 12%...",
-      "score": 0.87
-    }
-  ]
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `question` | String | *required* | Natural-language question |
-| `sessionId` | String | user-scoped default | Conversation session id for multi-turn context |
-| `resetSession` | boolean | false | Clear conversation history for the target session before this prompt |
-| `topK` | int | server default (`rag.default-top-k`, 15) | Number of chunks to retrieve for context |
-| `minScore` | double | server default (`rag.default-min-score`, 0.01) | Minimum similarity threshold |
-| `filter` | String | -- | Additional HXQL filter |
-| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
-| `embeddingType` | String | model default | Embedding type to match |
-| `systemPrompt` | String | -- | Override the default LLM system prompt |
-| `includeContext` | boolean | false | Include retrieved chunks in response |
-| `inferFilters` | boolean | false | Let the service infer metadata filters from the question intent |
-
-| Response Field | Type | Description |
-|---------------|------|-------------|
-| `sessionId` | String | Effective session id used by server |
-| `retrievalQuery` | String | Query actually sent to retrieval (may be reformulated) |
-| `historyTurnsUsed` | Integer | Number of prior turns included in this generation |
-| `tokenCount` | Integer | Total token usage (prompt + completion) when provider reports it |
-| `sources[].sourceType` | String | Source type for each cited document |
-| `sources[].openInSourceUrl` | String | Native-source deep link (Share for Alfresco, Web UI for Nuxeo) |
-| `sources[].chunkType` | String | Chunk classification `PROSE`/`TABLE` (from the section map); omitted when unknown |
-| `currentSummary` | String | Persistent running conversation summary when `rag.conversation.summary.enabled=true`; otherwise null |
-| `verified` | Boolean | Citation-faithfulness result when `rag.citation.verify.enabled=true`; otherwise null |
-| `unsupportedClaims` | String[] | Answer claims not grounded in the cited sources (citation verification only) |
-
-#### Chat Stream (SSE)
-
-Streaming responses are available with Server-Sent Events (SSE).
-
-- Canonical endpoint: `GET /api/rag/chat/stream`
-- Backward-compatible endpoint: `POST /api/rag/chat/stream` (same JSON body as `/api/rag/prompt`)
-- Content type: `text/event-stream`
-- Authentication: same as other `/api/rag/**` endpoints (Basic Auth or Alfresco ticket)
-
-`GET` example:
-
-```bash
-curl -N -G http://localhost:9091/api/rag/chat/stream -u admin:admin \
-  --data-urlencode "question=What changed in Q4?" \
-  --data-urlencode "sessionId=demo-session-1" \
-  --data-urlencode "resetSession=false" \
-  --data-urlencode "topK=5" \
-  --data-urlencode "minScore=0.5"
-```
-
-Compatibility `POST` example:
-
-```bash
-curl -N -X POST http://localhost:9091/api/rag/chat/stream -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What changed in Q4?",
-    "sessionId": "demo-session-1",
-    "topK": 5,
-    "minScore": 0.5
-  }'
-```
-
-Query params for `GET`:
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `question` | String | *required* | Natural-language question |
-| `sessionId` | String | user-scoped default | Conversation session id for multi-turn context |
-| `resetSession` | boolean | false | Clear conversation history before this prompt |
-| `topK` | int | 5 | Number of chunks to retrieve for context |
-| `minScore` | double | 0.5 | Minimum similarity threshold |
-| `filter` | String | -- | Additional HXQL filter |
-| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
-| `embeddingType` | String | model default | Embedding type to match |
-| `systemPrompt` | String | -- | Override the default LLM system prompt |
-| `includeContext` | boolean | false | Include retrieved chunks in final metadata |
-
-SSE events:
-
-- `event: token` incremental token payload (`{"token":"..."}`)
-- `event: metadata` final payload with `RagPromptResponse` fields including `sources`, timing fields, `model`, and `tokenCount`
-- `event: done` terminal success event
-- `event: error` terminal failure event with error message
-
-Example stream:
-
-```text
-event: token
-data: {"token":"Revenue "}
-
-event: token
-data: {"token":"grew 12% in Q4."}
-
-event: metadata
-data: {"answer":"Revenue grew 12% in Q4.","question":"What changed in Q4?","model":"ai/gpt-oss","tokenCount":672,"searchTimeMs":245,"generationTimeMs":1830,"totalTimeMs":2075,"sourcesUsed":3,"sources":[{"documentId":"abc-123","sourceId":"nuxeo:nuxeo-demo","sourceType":"nuxeo","nodeId":"e4f5a6b7-...","name":"Q4-Financial-Report.pdf","path":"/default-domain/workspaces/finance","openInSourceUrl":"http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Q4-Financial-Report.pdf","chunkText":"Revenue for Q4 increased by 12%...","score":0.87}]}
-
-event: done
-data: {"status":"ok"}
-```
-
-Error stream example:
-
-```text
-event: error
-data: {"message":"Failed to prepare RAG stream: ..."}
-```
-
-#### Semantic Search
-
-Search directly against the embedded chunks without LLM generation:
-
-```bash
-curl -X POST http://localhost:9091/api/rag/search/semantic -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{ "query": "contract renewal terms", "topK": 5, "minScore": 0.6 }'
-```
-
-Semantic search applies a minimum similarity score to suppress low-quality vector matches when no strong semantic relation exists.
-
-Results can include both Alfresco and Nuxeo hits in the same response. Each hit now includes `sourceType` and `openInSourceUrl` so clients can label and open the native source system directly.
-
-```json
-{
-  "query": "contract renewal terms",
-  "resultCount": 2,
-  "results": [
-    {
-      "rank": 1,
-      "score": 0.91,
-      "chunkText": "The renewal clause starts on page 3...",
-      "sourceDocument": {
-        "documentId": "doc-alf-1",
-        "sourceId": "alfresco:repo-main",
-        "sourceType": "alfresco",
-        "nodeId": "550e8400-e29b-41d4-a716-446655440000",
-        "name": "Vendor Contract.pdf",
-        "path": "/Company Home/Sites/legal/documentLibrary",
-        "mimeType": "application/pdf",
-        "openInSourceUrl": "http://localhost:80/share/page/document-details?nodeRef=workspace://SpacesStore/550e8400-e29b-41d4-a716-446655440000"
-      }
-    },
-    {
-      "rank": 2,
-      "score": 0.88,
-      "chunkText": "Renewal requires 30 days notice...",
-      "sourceDocument": {
-        "documentId": "doc-nux-1",
-        "sourceId": "nuxeo:nuxeo-demo",
-        "sourceType": "nuxeo",
-        "nodeId": "660e8400-e29b-41d4-a716-446655440000",
-        "name": "Supplier Agreement.docx",
-        "path": "/default-domain/workspaces/legal",
-        "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/legal/Supplier%20Agreement.docx"
-      }
-    }
-  ]
-}
-```
-
-* Default value: `0.2` (`semantic-search.default-min-score`)
-* Applied server-side after vector retrieval
-* Can be overridden per request
-
-#### Hybrid Search
-
-Run vector + keyword retrieval and fuse results with `rrf` (default) or `weighted` scoring:
-
-```bash
-curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "budget approval process",
-    "strategy": "rrf",
-    "candidateCount": 20,
-    "maxResults": 5,
-    "metadata": {
-      "mimeType": "application/pdf",
-      "pathPrefix": "/Company Home/Sites/finance/documentLibrary",
-      "modifiedAfter": "2026-01-01T00:00:00Z",
-      "modifiedBefore": "2026-12-31T23:59:59Z",
-      "properties": {
-        "cm:title": "Budget"
-      }
-    }
-  }'
-```
-
-Structured metadata filters are optional. You can still pass a raw HXQL `filter` for advanced cases.
-Use `sourceType` when you want to restrict the request to a single source system without writing raw HXQL.
-
-Response example:
-
-```json
-{
-  "query": "budget approval process",
-  "strategy": "weighted",
-  "normalization": "max",
-  "model": "ai/mxbai-embed-large",
-  "resultCount": 2,
-  "vectorCandidates": 20,
-  "keywordCandidates": 18,
-  "searchTimeMs": 143,
-  "results": [
-    {
-      "rank": 1,
-      "score": 0.0325,
-      "chunkText": "The budget approval workflow starts with...",
-      "sourceDocument": {
-        "documentId": "doc-nux-1",
-        "sourceId": "nuxeo:nuxeo-demo",
-        "sourceType": "nuxeo",
-        "nodeId": "660e8400-e29b-41d4-a716-446655440000",
-        "name": "Budget Policy.pdf",
-        "path": "/default-domain/workspaces/finance",
-        "mimeType": "application/pdf",
-        "openInSourceUrl": "http://localhost:8081/nuxeo/ui/#!/browse/default-domain/workspaces/finance/Budget%20Policy.pdf"
-      },
-      "vectorScore": 0.87,
-      "keywordScore": 1.0,
-      "vectorRank": 2,
-      "keywordRank": 1
-    }
-  ]
-}
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `query` | String | *required* | Query for both vector and keyword legs |
-| `strategy` | String | `rrf` | Fusion strategy: `rrf` or `weighted` |
-| `normalization` | String | `max` | Weighted score normalization: `max` or `minmax` |
-| `candidateCount` | int | `20` | Candidates retrieved from each leg before fusion |
-| `maxResults` | int | `5` | Final fused result limit |
-| `vectorWeight` | double | `0.7` | Weight when `strategy=weighted` |
-| `textWeight` | double | `0.3` | Weight when `strategy=weighted` |
-| `filter` | String | -- | Additional raw HXQL filter |
-| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
-| `metadata.mimeType` | String | -- | MIME type filter (for example `application/pdf`) |
-| `metadata.pathPrefix` | String | -- | Path prefix filter (starts-with match) |
-| `metadata.modifiedAfter` | String | -- | Inclusive lower bound for `source_modifiedAt` |
-| `metadata.modifiedBefore` | String | -- | Inclusive upper bound for `source_modifiedAt` |
-| `metadata.properties` | Map<String,String> | -- | Exact-match filters on `cin_ingestProperties.<key>` |
-
-| Response Field | Type | Description |
-|---------------|------|-------------|
-| `query` | String | Original query |
-| `strategy` | String | Effective fusion strategy used |
-| `normalization` | String | Normalization mode used when `strategy=weighted` |
-| `model` | String | Embedding model used for vector search |
-| `resultCount` | int | Number of fused results returned |
-| `vectorCandidates` | int | Number of vector candidates retrieved |
-| `keywordCandidates` | int | Number of keyword candidates retrieved |
-| `searchTimeMs` | long | Total hybrid search execution time |
-| `results[].score` | double | Fused score (RRF or weighted) |
-| `results[].vectorScore` | Double | Raw vector score, if available |
-| `results[].keywordScore` | Double | Raw keyword score, if available |
-| `results[].sourceDocument` | object | Source document metadata |
-| `results[].chunkMetadata` | object | Chunk position/type metadata |
-
-##### Integration Smoke Test (local hxpr)
-
-Use this checklist to validate issue #14 end-to-end:
-
-1. Ensure at least one folder is ingested into hxpr via batch/live ingesters.
-2. Call hybrid search without metadata constraints and verify `resultCount > 0`.
-3. Call hybrid search with a restrictive metadata filter (for example `mimeType: application/pdf`) and confirm results narrow.
-4. Switch strategy to `weighted` and confirm response field `strategy` is `weighted`.
-5. Confirm Nuxeo hits expose `openInSourceUrl` values that open in Nuxeo Web UI.
-
-Example smoke-test requests:
-
-```bash
-# Baseline
-curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"query":"budget approval process","strategy":"rrf","candidateCount":20,"maxResults":5}'
-
-# Restrictive metadata
-curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"query":"budget approval process","strategy":"rrf","sourceType":"nuxeo","metadata":{"mimeType":"application/pdf"}}'
-
-# Weighted strategy
-curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{"query":"budget approval process","strategy":"weighted","normalization":"minmax","vectorWeight":0.7,"textWeight":0.3}'
-```
-
-#### Faceted Search
-
-Discover the indexed values of a property (with counts) so clients can build informed filters.
-Buckets are scoped to the caller's document permissions.
-
-```bash
-curl -X POST http://localhost:9091/api/rag/search/facets -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '{ "property": "source_mimeType", "topN": 10, "sourceType": "alfresco" }'
-```
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `property` | String | *required* | Property to aggregate on (400 when blank) |
-| `filter` | String | -- | Additional raw HXQL filter |
-| `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
-| `searchTerm` | String | -- | Restrict buckets to values matching a term |
-| `topN` | int | service default | Maximum number of buckets to return |
-
-The response is `{ "property": "...", "buckets": [ { "value": "...", "count": N }, ... ] }`.
-
-#### Named Queries
-
-List the hxpr named-query definitions registered server-side, to offer them as saved-search filters.
-Apply one by passing `namedQuery` on a search request (an alternative to an inline `filter`).
-
-```bash
-curl http://localhost:9091/api/rag/named-queries -u admin:admin
-# -> ["recent-contracts","hr-policies"]
-```
-
-#### Session Summary
-
-Return the persistent running conversation summary for a session (also returned inline on
-`/api/rag/prompt` as `currentSummary`). Returns 404 when `rag.conversation.summary.enabled=false`.
-
-```bash
-curl http://localhost:9091/api/rag/sessions/user:alice/summary -u admin:admin
-# -> {"sessionId":"user:alice","summary":"..."}   (summary null when none yet)
-```
-
-#### In-App Evaluation (smoke)
-
-Runs a small caller-supplied sample set through the live pipeline and returns coarse retrieval-hit
-and faithfulness signals - a quick sanity check, not the authoritative quality gate
-(`content-lake-eval` remains that). Disabled by default; enable with `rag.evaluation.enabled=true`
-(returns 403 when disabled).
-
-```bash
-curl -X POST http://localhost:9091/api/rag/evaluate -u admin:admin \
-  -H "Content-Type: application/json" \
-  -d '[
-    {
-      "question": "What are the key findings in the Q4 report?",
-      "expectedAnswer": "Revenue grew 12%.",
-      "expectedSourceIds": ["nuxeo:nuxeo-demo"]
-    }
-  ]'
-```
-
-The response reports `totalSamples`, `retrievalHits`, and `retrievalHitRate` across the sample set.
-
-### Health Checks
-
-Every service publishes `/actuator/health` and `/actuator/info` without credentials, so a container
-orchestrator can probe them. Everything else on every service, `/actuator/metrics` included, requires
-authentication.
-
-```bash
-# Batch ingester (no auth required)
-curl http://localhost:9090/actuator/health
-
-# Live ingester (no auth required)
-curl http://localhost:9092/actuator/health
-
-# RAG service (no auth required)
-curl http://localhost:9091/actuator/health
-
-# RAG service detailed health (auth required)
-curl http://localhost:9091/api/rag/health -u admin:admin
-
-# Metrics on any service (auth required)
-curl http://localhost:9091/actuator/metrics -u admin:admin
-```
-
-#### Ingest Metrics
-
-Every ingester publishes how much re-embedding the content fingerprint avoided, tagged with the source
-type. Embedding is the pipeline's bottleneck, so this is the number that says what the fingerprint is
-worth, and a value that stops growing is the signal that something started perturbing the fingerprint
-inputs.
-
-| Metric | Meaning |
-|---|---|
-| `contentlake.ingest.content.shortcircuits` | Documents whose chunking and embedding were skipped because the content had not changed |
-| `contentlake.ingest.content.reprocesses` | Documents that were chunked and embedded |
-
-```bash
-curl http://localhost:9092/actuator/metrics/contentlake.ingest.content.shortcircuits -u admin:admin
-```
-
-Both are per-process and start at zero on restart, as any counter does. Expect the live ingesters to
-dominate the short-circuit count: a batch sync skips content entirely for an unchanged
-`source_modifiedAt` before the fingerprint is reached, so most batch passes never get as far as the short
-circuit.
-
-### Live Ingester (port 9092)
-
-The live ingester consumes Alfresco Event2 messages from ActiveMQ using Alfresco Java SDK handler interfaces such as `OnNodeUpdatedEventHandler` and `OnPermissionUpdatedEventHandler`.
-
-It reuses the same shared ingestion pipeline as the batch ingester:
-
-- Fetch the current node snapshot from Alfresco REST API
-- Apply scope and exclusion rules
-- Sync metadata to hxpr
-- Extract text with Transform Service
-- Chunk and embed with Spring AI
-- Update permissions or delete when nodes move out of scope
-
-Permission reconciliation is separate from content updates:
-
-- Content and scope changes are handled through Event2 live ingestion.
-- Alfresco permission changes should be reconciled through `POST /api/sync/permissions` in `alfresco-batch-ingester` because the repository does not reliably emit permission update events.
-- In production, the `content-lake-repo-model` addon inside Alfresco Repository should detect ACL changes after commit and publish a persistent ActiveMQ queue message. `alfresco-batch-ingester` consumes that queue and runs the same ACL reconciliation path.
-- If a permission event is emitted, the live ingester can still process it, but that path is best-effort rather than the primary contract.
-
-When the live ingester does receive a permission-related event, it distinguishes between file and folder targets:
-
-- **File-level event**: the ACL is updated only for that file (`updatePermissions`) -- no content re-extraction or embedding regeneration.
-- **Folder-level event**: the live ingester walks the full descendant subtree and applies an ACL-only update to every indexed file beneath the folder. This covers three event types that can signal a folder ACL change: `PERMISSION_UPDATED`, `PEER_ASSOC_CREATED`, and `PEER_ASSOC_DELETED`. A fourth handler (`FolderPermissionFallbackHandler`) catches `NODE_UPDATED` events on folders where only the ACL changed (no structural diff), providing a safety net for sources that do not emit a dedicated permission event.
-
-Folder-level propagation behaviour:
-
-- Descendant files with `isInheritanceEnabled: false` keep their locally-set ACL unchanged -- the folder's new permissions are not pushed down to them.
-- Descendant files with inheritance enabled receive a recomputed ACL derived from the folder's current Alfresco permissions snapshot.
-- Files that fall outside scope after the change are deleted from hxpr rather than updated.
-- The propagation never re-ingests content; it is strictly an ACL patch.
-
-The live path is guarded by the same `alfresco_modifiedAt` staleness check used by batch ingestion, so batch and live runs can coexist safely.
-
-Status endpoint:
-
-```bash
-curl http://localhost:9092/api/live/status
-```
+Every endpoint, with request and response examples, is in **[docs/api.md](docs/api.md)**: the batch
+ingester (9090), the RAG service (9091), health checks, and the live ingester (9092).
 
 ## Configuration
 
-### Connector Plugins
-
-A source connector can be a jar rather than a module of this build. Every ingester scans
-`/opt/content-lake/connectors` at startup, so a connector needs no Maven module, no entry in an intermediate
-POM and no COPY line in the seven service Dockerfiles.
-
-```bash
-# Generate the skeleton (see connector-archetype/README.md for the properties)
-mvn archetype:generate -DarchetypeGroupId=org.hyland \
-  -DarchetypeArtifactId=content-lake-connector-archetype -DarchetypeVersion=1.0.0-SNAPSHOT \
-  -DgroupId=com.example -DartifactId=cmis-connector -Dpackage=com.example.cmis \
-  -DsourceType=cmis -DinteractiveMode=false
-
-cd cmis-connector && mvn package
-cp target/cmis-connector-1.0.0-SNAPSHOT.jar ../content-lake-app-deployment/connectors/
-```
-
-A connector implements `ConnectorPlugin` from `content-lake-spi` and declares itself in
-`META-INF/services/org.hyland.contentlake.spi.ConnectorPlugin`. The host validates its schema, hands it a
-`ConnectorContext` to read settings from, and then asks it for a client, a scope resolver and, optionally,
-its own text extractor.
-
-```bash
-curl http://localhost:9090/api/connectors -u admin:admin
-```
-
-```json
-{ "connectors": [
-    { "sourceType": "alfresco", "origin": "in-tree", "implementation": "...AlfrescoClient", "settings": 6 },
-    { "sourceType": "cmis", "origin": "cmis-connector-1.0.0-SNAPSHOT.jar",
-      "implementation": "com.example.cmis.SourceConnectorClient", "settings": 4 } ],
-  "problems": [] }
-```
-
-Failure is per connector and never fatal: a jar that cannot be read, a service entry naming a class that is
-not there, a plugin whose constructor throws, or one claiming a source type another connector already has is
-reported in `problems` and skipped. An ingester with one broken plugin and three working ones has three
-working connectors. The exception is configuration: a plugin whose settings do not satisfy its own schema is
-refused, and in the default `fail` mode that aborts startup rather than leaving a connector that cannot work
-looking like it is running.
-
-Plugin connectors are kept in a registry rather than registered as beans, deliberately: publishing a
-plugin's `TextExtractor` or `ScopeResolver` as a bean would make injection by type ambiguous in an ingester
-that already has one, so mounting a jar would break the ingester it was mounted next to.
-
-A connector's settings are read from the ingester's environment, so a schema field is settable both as
-declared and as an environment variable name: dots and hyphens become underscores and the name is
-upper-cased, which makes `cmis.page-size` reachable as `CMIS_PAGE_SIZE`.
-
-### Ingesting Through A Plugin Connector
-
-Every ingester loads a connector; `connector-batch-ingester` is the one that ingests with it. The Alfresco,
-Nuxeo and filesystem ingesters each drive a client they were compiled against, so for them a mounted jar is
-listed and otherwise inert.
-
-```bash
-# From content-lake-app-deployment, on top of any base profile
-CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
-  docker compose --profile alfresco --profile connector up -d --build connector-batch-ingester
-
-curl -u admin:admin -X POST http://localhost:9096/api/sync/configured
-curl -u admin:admin http://localhost:9096/api/status
-```
-
-It resolves its client, its scope rules and optionally its extractor from `ConnectorRegistry`, filling in a
-permissive default scope and the host extraction chain when the connector supplies neither. Configuration is
-under `connector.*`:
-
-| Setting | Meaning |
-|---|---|
-| `connector.source-type` | Which loaded connector to ingest with. Optional with one jar mounted, required with several |
-| `connector.roots` | Containers to walk. Empty asks the connector, through `ContentSourceClient.getRootNodeId()` |
-| `connector.page-size` | Children fetched per listing |
-| `connector.max-depth` | Depth backstop for a hierarchy that does not bottom out |
-| `connector.security.*` | Credentials for this ingester's own sync API. No defaults; startup fails without both |
-| `connector.reconcile.*` | Post-discovery deletion sweep. Off by default |
-
-Two things about it are deliberate. With no connector loaded it fails to start, because its only source is
-that jar and a sync API reporting zero documents hides the misconfiguration. And the walk visits each node id
-once, because a source with multi-filing (CMIS, for one) reaches a document through several parents and would
-otherwise ingest it repeatedly.
-
-`connector-archetype/examples/sample-directory-connector` is a working connector that ingests a mounted
-directory, and `content-lake-app-deployment/test/test-connector.sh` builds it, mounts it and asserts the
-documents come back out of semantic search.
-
-### The CMIS Connector
-
-`connectors/cmis-connector/` is a shipped connector rather than an example: one jar that ingests any CMIS 1.1
-repository, which is how a repository with no adapter of its own becomes a source. It is built standalone,
-like any connector, and its OpenCMIS dependency travels inside the jar.
-
-```bash
-mvn -pl common/content-lake-spi -am install -DskipTests
-mvn -f connectors/cmis-connector/pom.xml package
-cp connectors/cmis-connector/target/cmis-connector-1.0.0.jar \
-   ../content-lake-app-deployment/connectors/
-```
-
-```bash
-# Against the Alfresco in this stack, over its own CMIS endpoint
-CMIS_URL=http://alfresco:8080/alfresco/api/-default-/public/cmis/versions/1.1/browser \
-CMIS_USERNAME=admin CMIS_PASSWORD=admin CMIS_ROOT_PATH=/Sites \
-CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
-  docker compose --profile alfresco --profile connector up -d connector-batch-ingester
-```
-
-| Setting | Meaning |
-|---|---|
-| `cmis.url` | Service endpoint. Required |
-| `cmis.binding` | `browser` (default) or `atompub` |
-| `cmis.repository-id` | Optional; resolved automatically when the endpoint exposes exactly one |
-| `cmis.username` / `cmis.password` | Account to authenticate as. Required, and never printed |
-| `cmis.root-path` | Folder a batch pass starts from. Defaults to the repository root |
-| `cmis.include-paths` / `cmis.exclude-paths` | Path scope. Excludes are applied after includes and win |
-| `cmis.include-mime-types` / `cmis.exclude-mime-types` | MIME scope, `text/*` wildcards allowed |
-| `cmis.acl-fallback` | `fail-closed` (default), `sync-account` or `public`; see below |
-
-Three limits, stated because they are properties of CMIS rather than of this implementation:
-
-- **Batch only.** CMIS exposes no change feed this connector uses, so there is no live counterpart. A
-  re-ingest is another batch pass, and unchanged content is skipped by the host's content-reuse check.
-- **No aspect-based scope.** There is no CMIS equivalent of `cl:indexed`, so scope is the path and MIME
-  patterns above rather than a decision an editor makes in the repository.
-- **ACL support is repository-dependent.** CMIS makes ACL access an optional capability. Where the
-  repository reports one, permissions are read per document, mapped through the basic CMIS permissions and
-  stored as read principals. Where it reports none, the connector refuses to run rather than guessing:
-  `cmis.acl-fallback` is what an operator sets to proceed deliberately, either restricting every document to
-  the sync account or, for an already-public corpus, to everyone. A repository whose permissions cannot be
-  read must not silently produce world-readable documents.
-
-`content-lake-app-deployment/test/test-cmis.sh` is the end-to-end check: it ingests the same Alfresco folder
-twice, once through the native adapter and once over CMIS, compares the document sets, and asserts that a
-document restricted in Alfresco is not retrievable by a user the ACL excludes.
-
-### Connector Schema And Startup Validation
-
-Each source connector publishes the settings it needs, and every ingester checks its configuration
-against that schema before it starts serving. A missing or malformed setting is reported by name instead
-of surfacing later as a downstream symptom, such as a filesystem ingester that finds no documents because
-its root path was never mounted.
-
-```bash
-curl http://localhost:9095/api/connectors/schema -u sync-user:sync-secret
-```
-
-```json
-[ { "sourceType": "filesystem",
-    "fields": [ { "name": "filesystem.root-path", "type": "DIRECTORY",
-                  "description": "Absolute directory to ingest from, a local path or a mounted volume",
-                  "required": true, "secret": false, "allowedValues": [] } ] } ]
-```
-
-The response carries field descriptors and never values, so it cannot disclose a credential; `secret`
-tells tooling to mask its own input, and keeps the value out of validation messages and logs. The
-endpoint is authenticated like every other API path.
-
-Validation covers the connector's own connection and scope settings. Shared pipeline configuration (hxpr,
-embedding model, chunking, extraction engines) and per-ingester scheduling are not part of a connector
-schema.
-
-| Setting | Values | Effect |
-|---|---|---|
-| `content-lake.connector.validation` | `fail` (default) | Startup aborts, listing every setting at fault |
-| | `warn` | Problems are logged and the service starts, for a deployment whose mount or endpoint appears late |
-| | `off` | No check |
-
-### Ingestion
-
-Edit `alfresco/alfresco-batch-ingester/src/main/resources/application.yml`:
-
-```yaml
-ingestion:
-  sources:
-    - folder: your-folder-node-id
-      recursive: true
-      types: [cm:content]
-  exclude:
-    paths: ["*/surf-config/*", "*/thumbnails/*"]
-    aspects: [cm:workingcopy]
-```
-
-### Live Ingestion
-
-Edit `alfresco/alfresco-live-ingester/src/main/resources/application.yml`:
-
-```yaml
-spring:
-  activemq:
-    broker-url: ${ACTIVEMQ_URL:tcp://localhost:61616}
-    user: ${ACTIVEMQ_USER:admin}
-    password: ${ACTIVEMQ_PASSWORD:admin}
-  jms:
-    cache:
-      enabled: false
-
-alfresco:
-  events:
-    topic-name: ${ALFRESCO_EVENT_TOPIC:alfresco.repo.event2}
-    enable-handlers: true
-    enable-spring-integration: false
-
-live-ingester:
-  filter:
-    exclude-paths: ["*/surf-config/*", "*/thumbnails/*"]
-    exclude-aspects: [cm:workingcopy]
-  scope:
-    include-paths: []
-    required-aspects: []
-  dedup:
-    window: ${LIVE_INGESTER_DEDUP_WINDOW:PT2M}
-    max-entries: ${LIVE_INGESTER_DEDUP_MAX_ENTRIES:10000}
-```
-
-Notes:
-
-- `spring.jms.cache.enabled=false` is required so the Alfresco Java SDK can use the native ActiveMQ connection factory.
-- By default, the live ingester behaves as an exclude-only listener. Set `include-paths` or `required-aspects` to narrow the scope.
-- Transform Service receives the original Alfresco filename when available, improving binary format detection during text extraction.
-
-### RAG
-
-Edit `common/rag-service/src/main/resources/application.yml`:
-
-```yaml
-spring:
-  ai:
-    openai:
-      chat:
-        options:
-          model: ${LLM_MODEL:ai/gpt-oss}
-          temperature: ${LLM_TEMPERATURE:0.3}
-          maxTokens: ${LLM_MAX_TOKENS:2048}
-
-rag:
-  default-top-k: ${RAG_DEFAULT_TOP_K:15}
-  default-min-score: ${RAG_DEFAULT_MIN_SCORE:0.01}
-  max-context-length: ${RAG_MAX_CONTEXT_LENGTH:20000}
-  use-hybrid-search: ${RAG_USE_HYBRID_SEARCH:true}
-  default-system-prompt: >
-    You are a document assistant that answers questions based strictly on
-    the provided context. (See application.yml for the full prompt text.)
-  conversation:
-    enabled: ${RAG_CONVERSATION_ENABLED:true}
-    max-history-turns: ${RAG_CONVERSATION_MAX_HISTORY_TURNS:10}
-    session-ttl-minutes: ${RAG_CONVERSATION_SESSION_TTL_MINUTES:30}
-    query-reformulation: ${RAG_CONVERSATION_QUERY_REFORMULATION:true}
-    # Persistent running summary stored in hxpr. Off until the sessions folder is provisioned.
-    summary:
-      enabled: ${RAG_CONVERSATION_SUMMARY_ENABLED:false}
-      base-path: ${RAG_CONVERSATION_SUMMARY_BASE_PATH:/_sessions}
-
-semantic-search:
-  default-min-score: ${SEMANTIC_SEARCH_MIN_SCORE:0.2}
-
-search:
-  hybrid:
-    enabled: ${SEARCH_HYBRID_ENABLED:true}
-    strategy: ${SEARCH_HYBRID_STRATEGY:rrf}            # rrf or weighted
-    normalization: ${SEARCH_HYBRID_NORMALIZATION:max}  # max or minmax (weighted strategy)
-    vector-weight: ${SEARCH_HYBRID_VECTOR_WEIGHT:0.7}
-    text-weight: ${SEARCH_HYBRID_TEXT_WEIGHT:0.3}
-    initial-candidates: ${SEARCH_HYBRID_INITIAL_CANDIDATES:75}
-    final-results: ${SEARCH_HYBRID_FINAL_RESULTS:20}
-    rrf-k: ${SEARCH_HYBRID_RRF_K:60}
-    default-min-score: ${SEARCH_HYBRID_MIN_SCORE:0.01}
-```
-
-#### Optional Retrieval and Generation Features
-
-These stages are **off by default**: with every flag unset, retrieval and generation behave as the
-baseline pipeline. Enable them individually to trade latency or extra LLM calls for quality. They are
-configured under `rag.*` in `common/rag-service/src/main/resources/application.yml`.
-
-```yaml
-rag:
-  # Cross-encoder / LLM re-ranking of retrieved candidates
-  reranker:
-    enabled: ${RAG_RERANKER_ENABLED:false}
-    url: ${RAG_RERANKER_URL:}
-    top-n: ${RAG_RERANKER_TOP_N:8}
-  # Maximal Marginal Relevance diversification
-  mmr:
-    enabled: ${RAG_MMR_ENABLED:false}
-    lambda: ${RAG_MMR_LAMBDA:0.5}
-    pool-size: ${RAG_MMR_POOL_SIZE:30}
-  # Query expansion (shared variant budget for multi-query, HyDE and decomposition)
-  query-expansion:
-    max-variants: ${RAG_QUERY_EXPANSION_MAX_VARIANTS:6}
-    rrf-k: ${RAG_QUERY_EXPANSION_RRF_K:60}
-  multi-query:
-    enabled: ${RAG_MULTI_QUERY_ENABLED:false}
-    variants: ${RAG_MULTI_QUERY_VARIANTS:3}
-  hyde:
-    enabled: ${RAG_HYDE_ENABLED:false}
-    max-chars: ${RAG_HYDE_MAX_CHARS:1000}
-  query-decomposition:
-    enabled: ${RAG_QUERY_DECOMPOSITION_ENABLED:false}
-    max-sub-questions: ${RAG_QUERY_DECOMPOSITION_MAX_SUB_QUESTIONS:4}
-  # Self-RAG relevance gate applied before generation
-  retrieval-grading:
-    enabled: ${RAG_RETRIEVAL_GRADING_ENABLED:false}
-    min-score: ${RAG_RETRIEVAL_GRADING_MIN_SCORE:0.0}
-    min-hits: ${RAG_RETRIEVAL_GRADING_MIN_HITS:1}
-    broaden: ${RAG_RETRIEVAL_GRADING_BROADEN:true}
-  # Intent-aware filter inference (opt in per request via inferFilters)
-  filter-inference:
-    category-property: ${RAG_FILTER_INFERENCE_CATEGORY_PROPERTY:}
-  # Post-generation citation faithfulness check (adds one LLM call per answer)
-  citation:
-    verify:
-      enabled: ${RAG_CITATION_VERIFY_ENABLED:false}
-  # Small-to-big retrieval: expand each hit to its parent section for LLM context
-  retrieval:
-    small-to-big:
-      enabled: ${RAG_RETRIEVAL_SMALL_TO_BIG_ENABLED:false}
-      max-section-chars: ${RAG_RETRIEVAL_SMALL_TO_BIG_MAX_SECTION_CHARS:4000}
-  # In-app evaluation smoke endpoint (content-lake-eval remains the authoritative gate)
-  evaluation:
-    enabled: ${RAG_EVALUATION_ENABLED:false}
-```
-
-Ingestion has a matching opt-in flag, `content-lake.ingest.keyword-context-enrichment-enabled`
-(default `false`), which prepends document-level context to each chunk's keyword-search text.
-
-Conversation memory storage:
-
-- Default implementation is in-memory.
-- To use Redis or a database, provide a custom Spring bean implementing `ConversationMemoryStore`; the default in-memory store is only created when no other `ConversationMemoryStore` bean exists.
+Every setting, including connector plugins and the CMIS connector, is in
+**[docs/configuration.md](docs/configuration.md)**.
 
 ## Roadmap
 
@@ -1412,6 +504,16 @@ java -jar nuxeo/nuxeo-batch-ingester/target/nuxeo-batch-ingester-1.0.0-SNAPSHOT.
 mvn spring-boot:run -pl nuxeo/nuxeo-live-ingester -am
 # or
 java -jar nuxeo/nuxeo-live-ingester/target/nuxeo-live-ingester-1.0.0-SNAPSHOT.jar
+
+# Filesystem Batch Ingester
+mvn spring-boot:run -pl filesystem/filesystem-batch-ingester -am
+# or
+java -jar filesystem/filesystem-batch-ingester/target/filesystem-batch-ingester-1.0.0-SNAPSHOT.jar
+
+# Connector Batch Ingester (refuses to start without a connector jar in its plugin directory)
+mvn spring-boot:run -pl connector/connector-batch-ingester -am
+# or
+java -jar connector/connector-batch-ingester/target/connector-batch-ingester-1.0.0-SNAPSHOT.jar
 
 # RAG Service
 mvn spring-boot:run -pl common/rag-service -am
