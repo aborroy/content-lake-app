@@ -175,6 +175,33 @@ public class RagProperties {
              * and it changes only when a model is introduced or retired.
              */
             private long ttlSeconds = 300;
+
+            /**
+             * Ceiling on the embedding rows the type scan reads before it stops (#130).
+             *
+             * <p>There is no aggregation endpoint over the embeddings index, so the scan is a paged
+             * wildcard vector query and its rows come back nearest-first to an arbitrary probe rather
+             * than as a representative sample. A scan that stops here has sampled rather than
+             * enumerated, and says so at WARN. Raising it costs one call per 200 further rows and buys
+             * a smaller chance of missing a type that holds a small share of a large corpus; the
+             * certain answer is to name the types in {@code rag.embedding.additional-models}.</p>
+             *
+             * <p>Zero or less means no ceiling, which reads the whole index however large it is.</p>
+             */
+            private int maxScanRows = 10_000;
+
+            /**
+             * Whether to widen the discovered set with types derived from the {@code SysEmbeddings}
+             * child names (#130).
+             *
+             * <p>Child names are enumerable in one terms aggregation, so this sees the whole corpus
+             * whatever the row ceiling. It cannot replace the row scan: a child name is always the
+             * sanitized derivation of the model name, so a corpus written before the two were
+             * reconciled carries the raw form in its rows and a name-derived type may match nothing.
+             * Each candidate is therefore verified against the rows before it is queried, and only
+             * types that provably match rows are added.</p>
+             */
+            private boolean deriveFromChildNames = true;
         }
 
         @Data
@@ -368,17 +395,29 @@ public class RagProperties {
         public static class DocumentDiversityProperties {
 
             /**
-             * Enables the cap. Off by default, like every other retrieval-quality switch here, until
-             * the eval confirms the gain: capping trades a long document's additional chunks for
-             * another document's best one, and only the eval can say whether that helps the answers.
+             * Enables the cap, on the search endpoints only.
+             *
+             * <p>On by default since the eval measured it, which took two rounds and a design change.
+             * Capping every retrieval, including the RAG pipeline's, raises document recall
+             * ({@code recall@10} 0.8429 to 0.8714, {@code hit_rate@10} 0.8571 to 0.8857) and lowers
+             * answer quality at the same time ({@code faithfulness} 0.806 to 0.762,
+             * {@code citation_accuracy} 0.808 to 0.779, {@code unsupported_claim_rate} 0.194 to 0.238),
+             * because a long document that <em>is</em> the answer loses the chunks supporting it. So the
+             * cap now applies to what a caller browses and not to what the generator reads
+             * ({@code applyDocumentDiversity} on the request), which is the distinction that makes it
+             * safe to default on.</p>
              */
-            private boolean enabled = false;
+            private boolean enabled = true;
 
             /**
              * Most chunks one document may contribute before others are preferred. Hits above the cap
              * are not discarded, only deferred, so the result count never drops because of it.
+             *
+             * <p>Two rather than three: on the eval corpus a cap of 3 leaves every gated metric identical
+             * to four decimal places, so it buys a caller nothing there, while 2 is what moves recall.
+             * Both bind on the deployment E2E corpus, where one document took 7 of 10 slots.</p>
              */
-            private int maxChunksPerDocument = 3;
+            private int maxChunksPerDocument = 2;
 
             /**
              * How far past {@code topK} to retrieve, as a multiple, so there are other documents' chunks

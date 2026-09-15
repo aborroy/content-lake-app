@@ -121,6 +121,11 @@ rag:
     type-discovery:
       enabled: ${RAG_EMBEDDING_TYPE_DISCOVERY_ENABLED:true}
       ttl-seconds: ${RAG_EMBEDDING_TYPE_DISCOVERY_TTL_SECONDS:300}
+      # The row scan has no aggregation endpoint to use, so above this ceiling it is a sample and says
+      # so at WARN (#130). Zero or less reads the whole index. The child-name pass below covers the
+      # common case regardless, since child names are enumerable in one call.
+      max-scan-rows: ${RAG_EMBEDDING_TYPE_DISCOVERY_MAX_SCAN_ROWS:10000}
+      derive-from-child-names: ${RAG_EMBEDDING_TYPE_DISCOVERY_DERIVE_FROM_CHILD_NAMES:true}
     # Re-embeds the corpus into the configured type while the previous one keeps serving queries. Off
     # by default, and operator-gated: it writes to every document and spends embedding throughput.
     backfill:
@@ -194,9 +199,11 @@ rag:
     # on the E2E corpus, topK 10 returned 10 chunks of 2 documents, and a document ranking first on its own
     # merits was absent from a query quoting it verbatim. Over-fetching gives the cap something to promote.
     # Off by default until the eval confirms the gain, and hits above the cap are deferred, never dropped.
+    # On by default, and only on the search endpoints: the RAG pipeline opts out per request, because
+    # capping its context measurably costs faithfulness and citation accuracy (#134).
     document-diversity:
-      enabled: ${RAG_DOCUMENT_DIVERSITY_ENABLED:false}
-      max-chunks-per-document: ${RAG_DOCUMENT_DIVERSITY_MAX_CHUNKS_PER_DOCUMENT:3}
+      enabled: ${RAG_DOCUMENT_DIVERSITY_ENABLED:true}
+      max-chunks-per-document: ${RAG_DOCUMENT_DIVERSITY_MAX_CHUNKS_PER_DOCUMENT:2}
       over-fetch-factor: ${RAG_DOCUMENT_DIVERSITY_OVER_FETCH_FACTOR:3}
   # In-app evaluation smoke endpoint. Off by default; content-lake-eval is the authoritative gate.
   evaluation:

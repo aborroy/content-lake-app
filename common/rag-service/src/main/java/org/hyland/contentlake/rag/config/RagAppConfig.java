@@ -146,7 +146,9 @@ public class RagAppConfig {
                 hxprService.getEmbeddingType(),
                 discovery.isEnabled(),
                 Duration.ofSeconds(discovery.getTtlSeconds()),
-                clock);
+                clock,
+                discovery.getMaxScanRows(),
+                discovery.isDeriveFromChildNames());
     }
 
     @Bean
