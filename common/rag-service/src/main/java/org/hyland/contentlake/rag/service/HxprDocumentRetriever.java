@@ -92,6 +92,12 @@ public class HxprDocumentRetriever implements DocumentRetriever {
                     .sourceType(sourceType)
                     .embeddingType(embeddingType)
                     .metadata(metadataFilter)
+                    // The per-document cap is for a caller browsing results, not for the generator
+                    // (#134). Measured on the 78-question golden set, capping this path costs
+                    // faithfulness (0.806 -> 0.762 at a cap of 2, 0.710 at 3) and citation accuracy
+                    // (0.808 -> 0.779, 0.695), because a long document that IS the answer loses the
+                    // chunks that supported it while other documents' best chunks take the slots.
+                    .skipDocumentDiversity(true)
                     .build();
             HybridSearchResponse response = hybridSearchService.search(hybridRequest);
             hits = mapHybridHits(response.getResults());
@@ -106,6 +112,9 @@ public class HxprDocumentRetriever implements DocumentRetriever {
                     .filter(filter)
                     .sourceType(sourceType)
                     .embeddingType(embeddingType)
+                    // See the hybrid branch above: the cap belongs to the endpoints, not to retrieval
+                    // for generation.
+                    .skipDocumentDiversity(true)
                     .build();
             SemanticSearchResponse response = semanticSearchService.search(searchRequest);
             hits = response.getResults() != null ? response.getResults() : List.of();

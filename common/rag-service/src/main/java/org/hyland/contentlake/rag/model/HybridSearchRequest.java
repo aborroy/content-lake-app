@@ -96,4 +96,12 @@ public class HybridSearchRequest {
         /** Optional exact-match filters against cin_ingestProperties keys. */
         private Map<String, String> properties;
     }
+
+    /**
+     * Opts this search out of the per-document cap (#134). Not part of the wire format; see
+     * {@link SemanticSearchRequest#isSkipDocumentDiversity()} for why the RAG pipeline opts out while an
+     * endpoint caller does not, and why the flag is negative rather than positive.
+     */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    private boolean skipDocumentDiversity;
 }

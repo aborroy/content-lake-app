@@ -1,6 +1,7 @@
 package org.hyland.contentlake.rag.service;
 
 import org.hyland.contentlake.client.HxprService;
+import org.hyland.contentlake.model.HxprTermsAggregationResult;
 import org.hyland.contentlake.hxpr.api.model.Embedding;
 import org.hyland.contentlake.hxpr.api.model.VectorSearchResult;
 import org.hyland.contentlake.model.HxprDocument;
@@ -31,6 +32,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -567,6 +569,56 @@ class HybridSearchServiceTest {
     @Nested
     class PermissionFilter {
 
+        /**
+         * Stubs the source discovery both search paths run: one terms aggregation over
+         * {@code cin_sourceId}, whose bucket keys are the stored {@code <sourceType>:<sourceId>} values.
+         */
+        private void stubIndexedSources(String... qualifiedSourceIds) {
+            HxprTermsAggregationResult aggregation = new HxprTermsAggregationResult();
+            aggregation.setAggregationsBuckets(java.util.Arrays.stream(qualifiedSourceIds).map(key -> {
+                HxprTermsAggregationResult.Bucket bucket = new HxprTermsAggregationResult.Bucket();
+                bucket.setKey(key);
+                bucket.setDocCount(1L);
+                return bucket;
+            }).toList());
+            when(hxprService.termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt()))
+                    .thenReturn(aggregation);
+        }
+
+        @Test
+        void buildPermissionFilter_thirdSourceInTheIndex_getsAClauseWithoutAPin() {
+            // #133: the hybrid path carried the same two-source assumption, and capping or fixing one
+            // path alone leaves whichever harness queries the other measuring no change.
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
+            stubIndexedSources("sample-directory:sample-directory");
+            doReturn(List.of("alice", "GROUP_EVERYONE"))
+                    .when(svc).getUserAuthorities("alice", "sample-directory");
+
+            String filter = svc.buildPermissionFilter("alice", null);
+
+            assertThat(filter).doesNotContain("__unresolved_permission_source__");
+            assertThat(filter).contains("sys_racl = '__Everyone__'");
+            assertThat(filter).contains("sys_racl = 'u:alice_#_sample-directory'");
+        }
+
+        @Test
+        void buildPermissionFilter_thirdSource_isNotGivenAnAlfrescoAdminBypass() {
+            HybridSearchService svc = spy(service);
+            ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
+            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
+            stubIndexedSources("cmis:docbase-1");
+            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
+                    .when(svc).getUserAuthorities("admin", "docbase-1");
+
+            String filter = svc.buildPermissionFilter("admin", null);
+
+            // The bypass is Alfresco's policy and must not follow the group onto another source.
+            assertThat(filter).doesNotContain("cin_sourceId = 'cmis:docbase-1'");
+            assertThat(filter).doesNotContain("cin_sourceId = 'docbase-1'");
+            assertThat(filter).contains("sys_racl = 'u:admin_#_docbase-1'");
+        }
+
         @Test
         void buildPermissionFilter_includesEveryoneAndUser() {
             HybridSearchService svc = spy(service);
@@ -681,17 +733,12 @@ class HybridSearchServiceTest {
         }
 
         @Test
-        void buildPermissionFilter_discoversAlfrescoSourceIdFromHxprDocuments() {
+        void buildPermissionFilter_discoversAlfrescoSourceIdFromTheIndex() {
             HybridSearchService svc = spy(service);
             ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
             ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
 
-            HxprDocument doc = new HxprDocument();
-            doc.setCinSourceId("alfresco:discovered-repo");
-            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-            result.setDocuments(List.of(doc));
-
-            when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+            stubIndexedSources("alfresco:discovered-repo");
             doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
                     .when(svc).getUserAuthorities("admin", "discovered-repo");
 
@@ -708,21 +755,18 @@ class HybridSearchServiceTest {
             service.logPermissionSourceIdConfiguration();
 
             verify(hxprService, never()).query(anyString(), anyInt(), anyInt());
+            verify(hxprService, never()).termsAggregation(any(), any(), any(), anyInt());
         }
 
         @Test
         void logPermissionSourceIdConfiguration_pinnedAndCovers_doesNotMisreport() {
             ReflectionTestUtils.setField(service, "permissionSourceIds", "covered-repo");
 
-            HxprDocument doc = new HxprDocument();
-            doc.setCinSourceId("alfresco:covered-repo");
-            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-            result.setDocuments(List.of(doc));
-            when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+            stubIndexedSources("alfresco:covered-repo");
 
             service.logPermissionSourceIdConfiguration();
 
-            verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+            verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
         }
 
         @Test
@@ -730,15 +774,11 @@ class HybridSearchServiceTest {
             // Mirrors the incident: pinned "default,local" misses the real Alfresco repo UUID.
             ReflectionTestUtils.setField(service, "permissionSourceIds", "default,local");
 
-            HxprDocument doc = new HxprDocument();
-            doc.setCinSourceId("alfresco:de0b9044-4790-4006-8b90-44479030061f");
-            HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-            result.setDocuments(List.of(doc));
-            when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+            stubIndexedSources("alfresco:de0b9044-4790-4006-8b90-44479030061f");
 
             service.logPermissionSourceIdConfiguration();
 
-            verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+            verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
         }
 
         @Test

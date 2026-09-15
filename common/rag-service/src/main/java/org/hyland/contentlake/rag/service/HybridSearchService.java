@@ -32,6 +32,8 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -85,8 +87,8 @@ public class HybridSearchService {
             "may", "not", "the", "that", "this", "was", "were", "what", "when", "which", "who",
             "why", "with", "you", "your", "from", "into", "than", "them", "then", "they", "will");
     private static final Pattern CUSTOM_PROP_KEY_PATTERN = Pattern.compile("[A-Za-z0-9_:-]+");
-    private static final Pattern SOURCE_ID_EQUALS_PATTERN = Pattern.compile("cin_sourceId\\s*=\\s*'([^']+)'");
-    private static final int SOURCE_DISCOVERY_LIMIT = 25;
+    /** See {@link SemanticSearchService} for why the discovered sources are reused for this long. */
+    private static final Duration SOURCE_DISCOVERY_TTL = Duration.ofSeconds(30);
 
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
@@ -144,7 +146,11 @@ public class HybridSearchService {
     @Value("${content.service.security.basicAuth.password}")
     private String serviceAccountPassword;
 
-    private volatile List<String> cachedAlfrescoSourceIds;
+    /** Built on first use by {@link #sourceCatalog()}; see that method for why it is not injected. */
+    private volatile PermissionSourceCatalog sourceCatalog;
+
+    /** Sources whose authorities could not be resolved, so the warning is logged once each. */
+    private final Set<String> unresolvableAuthoritySources = ConcurrentHashMap.newKeySet();
 
     /**
      * Executes a hybrid search: runs vector and keyword legs in sequence, then fuses the results
@@ -250,7 +256,7 @@ public class HybridSearchService {
         // document's chunks past the cap are deferred behind other documents' best ones, never dropped.
         // A no-op when the cap is off, which is the default.
         List<FusedResult> filtered = DocumentDiversityLimiter.cap(
-                fused, maxResults, maxChunksPerDocument(), result -> documentKeyOf(result));
+                fused, maxResults, maxChunksPerDocument(request), result -> documentKeyOf(result));
 
         // --- Enrich with document metadata ---
         Map<String, SectionMap> sectionMaps = new ConcurrentHashMap<>();
@@ -1255,6 +1261,8 @@ public class HybridSearchService {
                 authorities.addAll(fetchAlfrescoGroups(username));
             } else if (isNuxeoSource(sourceId)) {
                 authorities.addAll(fetchNuxeoGroups(username));
+            } else {
+                warnUnresolvableAuthorities(sourceId);
             }
         } catch (Exception e) {
             return onGroupResolutionFailure(username, sourceId, e);
@@ -1311,13 +1319,21 @@ public class HybridSearchService {
     }
 
     /**
-     * The per-document chunk cap, or 0 when the cap is disabled.
+     * The per-document chunk cap for this request, or 0 when it does not apply.
      *
-     * <p>Both search paths need it: this endpoint is what {@code content-lake-eval} measures and what the
-     * RAG prompt path retrieves through, the semantic endpoint is what the deployment E2E suite asserts
-     * on. Capping one and not the other measures as a no-op on whichever harness queries the other.</p>
+     * <p>Both search paths need the cap: this endpoint is what {@code content-lake-eval} measures its
+     * retrieval metrics through, the semantic endpoint is what the deployment E2E suite asserts on, and
+     * capping one alone measures as a no-op on whichever harness queries the other.</p>
+     *
+     * <p>The RAG pipeline retrieves through this endpoint too, and it opts out
+     * ({@link HybridSearchRequest#isSkipDocumentDiversity()}): a cap that helps a caller browsing
+     * results takes supporting chunks away from the document that is the answer, which was measured as
+     * a fall in {@code faithfulness} and {@code citation_accuracy} on the golden set.</p>
      */
-    private int maxChunksPerDocument() {
+    private int maxChunksPerDocument(HybridSearchRequest request) {
+        if (request != null && request.isSkipDocumentDiversity()) {
+            return 0;
+        }
         if (ragProperties == null || ragProperties.getRetrieval() == null) {
             return 0;
         }
@@ -1355,7 +1371,7 @@ public class HybridSearchService {
     }
 
     private String buildSourceTypeFilter(String sourceType) {
-        String normalized = normalizeSourceType(sourceType);
+        String normalized = PermissionSourceCatalog.normalizeType(sourceType);
         if (normalized == null) {
             return null;
         }
@@ -1375,156 +1391,74 @@ public class HybridSearchService {
     }
 
     private String formatSourceId(String sourceId) {
-        if (isAlfrescoSource(sourceId)) {
-            return "alfresco:" + sourceId;
-        }
-        if (isNuxeoSource(sourceId)) {
-            return "nuxeo:" + sourceId;
-        }
-        return sourceId;
+        return sourceCatalog().qualify(configuredSources(), sourceId);
     }
 
     /**
-     * Logs the resolved permission-source-id configuration once at startup and, when
-     * {@code rag.permission.source-ids} is pinned, warns if it fails to cover the source ids
-     * actually present in the index. A pinned value that misses an indexed source id silently
-     * hides that source's group/user-restricted documents (public {@code __Everyone__} docs still
-     * pass), so this turns an invisible ACL failure into a visible diagnostic.
+     * Startup diagnostic for the pinned permission sources, over every source type. See
+     * {@link SemanticSearchService#logPermissionSourceIdConfiguration()}, which logs the same thing for
+     * the semantic path; both are kept because either service can be the only one a deployment calls.
      */
     @PostConstruct
     void logPermissionSourceIdConfiguration() {
         if (permissionSourceIds == null || permissionSourceIds.isBlank()) {
-            log.info("rag.permission.source-ids is not set; permission filter uses auto-discovered "
-                    + "Alfresco source ids plus configured Nuxeo source id");
+            log.info("rag.permission.source-ids is not set; the hybrid permission filter covers every "
+                    + "source discovered in the index plus the configured Alfresco and Nuxeo source ids");
             return;
         }
 
-        LinkedHashSet<String> configured = new LinkedHashSet<>();
-        for (String candidate : permissionSourceIds.split(",")) {
-            addSourceId(configured, candidate);
-        }
-        log.info("rag.permission.source-ids is pinned to {}; auto-discovery disabled", configured);
+        List<String> configured = PermissionSourceCatalog.parsePinned(permissionSourceIds);
+        log.info("rag.permission.source-ids is pinned to {}; discovery disabled", configured);
 
-        List<String> indexedAlfresco = discoverSourceIdsByType("alfresco");
-        List<String> uncovered = indexedAlfresco.stream()
-                .filter(id -> !configured.contains(id))
+        Map<String, String> indexed = sourceCatalog().indexedSources();
+        List<String> uncovered = indexed.entrySet().stream()
+                .filter(entry -> !configured.contains(entry.getKey()))
+                .map(entry -> (entry.getValue() == null ? "" : entry.getValue() + ":") + entry.getKey())
                 .toList();
         if (!uncovered.isEmpty()) {
-            log.warn("rag.permission.source-ids {} does not cover indexed Alfresco source ids {}; "
-                            + "group/user-restricted documents from the missing source(s) will be hidden "
-                            + "from search results (leave the property unset to auto-discover)",
+            log.warn("rag.permission.source-ids {} does not cover indexed sources {}; documents from the "
+                            + "missing source(s) will be hidden from search results (leave the property "
+                            + "unset to discover them)",
                     configured, uncovered);
         }
     }
 
     private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {
-        LinkedHashSet<String> sourceIds = new LinkedHashSet<>();
-
-        if (additionalFilter != null && !additionalFilter.isBlank()) {
-            var matcher = SOURCE_ID_EQUALS_PATTERN.matcher(additionalFilter);
-            while (matcher.find()) {
-                addSourceId(sourceIds, matcher.group(1));
-            }
-        }
-
-        if (!sourceIds.isEmpty()) {
-            return List.copyOf(sourceIds);
-        }
-
-        addSourceIdsForType(sourceIds, sourceType);
-        if (!sourceIds.isEmpty()) {
-            return List.copyOf(sourceIds);
-        }
-
-        if (permissionSourceIds != null && !permissionSourceIds.isBlank()) {
-            for (String candidate : permissionSourceIds.split(",")) {
-                addSourceId(sourceIds, candidate);
-            }
-        } else {
-            addAlfrescoSourceIds(sourceIds);
-            addSourceId(sourceIds, nuxeoSourceId);
-        }
-
-        return List.copyOf(sourceIds);
+        return sourceCatalog().resolve(configuredSources(), sourceType, additionalFilter);
     }
 
-    private void addSourceIdsForType(Set<String> sourceIds, String sourceType) {
-        String normalized = normalizeSourceType(sourceType);
-        if ("alfresco".equals(normalized)) {
-            addAlfrescoSourceIds(sourceIds);
-        } else if ("nuxeo".equals(normalized)) {
-            addSourceId(sourceIds, nuxeoSourceId);
+    /**
+     * The catalogue of sources to filter on, built lazily so it is available to a unit test that never
+     * runs {@code @PostConstruct}. Its own instance rather than one shared with
+     * {@link SemanticSearchService}: the two services hold their configuration separately, and a cache
+     * of what the index holds is cheap enough to keep twice.
+     */
+    private PermissionSourceCatalog sourceCatalog() {
+        PermissionSourceCatalog current = sourceCatalog;
+        if (current == null) {
+            current = new PermissionSourceCatalog(hxprService, SOURCE_DISCOVERY_TTL, Clock.systemUTC());
+            sourceCatalog = current;
         }
+        return current;
     }
 
-    private void addAlfrescoSourceIds(Set<String> sourceIds) {
-        resolveAlfrescoSourceIds().forEach(sourceId -> addSourceId(sourceIds, sourceId));
+    private PermissionSourceCatalog.Configured configuredSources() {
+        return new PermissionSourceCatalog.Configured(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
     }
 
-    private List<String> resolveAlfrescoSourceIds() {
-        LinkedHashSet<String> sourceIds = new LinkedHashSet<>();
-        addSourceId(sourceIds, alfrescoSourceId);
-        if (!sourceIds.isEmpty()) {
-            return List.copyOf(sourceIds);
-        }
-
-        List<String> cached = cachedAlfrescoSourceIds;
-        if (cached != null && !cached.isEmpty()) {
-            return cached;
-        }
-
-        List<String> discovered = discoverSourceIdsByType("alfresco");
-        if (!discovered.isEmpty()) {
-            cachedAlfrescoSourceIds = discovered;
-        }
-        return discovered;
-    }
-
-    private List<String> discoverSourceIdsByType(String sourceType) {
-        try {
-            String hxql = "SELECT * FROM SysContent WHERE cin_ingestProperties."
-                    + ContentLakeIngestProperties.SOURCE_TYPE
-                    + " = '" + AclFilterBuilder.escapeLiteral(sourceType) + "'";
-            HxprDocument.QueryResult result = hxprService.query(hxql, SOURCE_DISCOVERY_LIMIT, 0);
-            if (result == null || result.getDocuments() == null) {
-                return List.of();
-            }
-
-            LinkedHashSet<String> sourceIds = new LinkedHashSet<>();
-            for (HxprDocument doc : result.getDocuments()) {
-                addSourceId(sourceIds, doc.getCinSourceId());
-            }
-
-            if (!sourceIds.isEmpty()) {
-                log.debug("Discovered permission source ids for {}: {}", sourceType, sourceIds);
-            }
-            return List.copyOf(sourceIds);
-        } catch (Exception e) {
-            log.warn("Failed to discover permission source ids for {}: {}", sourceType, e.getMessage());
-            return List.of();
-        }
-    }
-
-    private String normalizeSourceType(String sourceType) {
-        if (sourceType == null) {
-            return null;
-        }
-        String trimmed = sourceType.trim().toLowerCase(Locale.ROOT);
-        return trimmed.isBlank() ? null : trimmed;
-    }
-
-    private static void addSourceId(Set<String> sourceIds, String candidate) {
-        if (candidate == null) {
+    /**
+     * Says once per source that its groups cannot be expanded. See
+     * {@link SemanticSearchService#warnUnresolvableAuthorities(String)} for what it costs a caller.
+     */
+    private void warnUnresolvableAuthorities(String sourceId) {
+        if (sourceId == null || sourceId.isBlank() || !unresolvableAuthoritySources.add(sourceId)) {
             return;
         }
-        String trimmed = candidate.trim();
-        if (trimmed.isBlank()) {
-            return;
-        }
-        int separator = trimmed.indexOf(':');
-        sourceIds.add(separator >= 0 && separator < trimmed.length() - 1
-                ? trimmed.substring(separator + 1)
-                : trimmed);
+        log.warn("Source {} has no group resolver in rag-service, so its permission clause carries only "
+                        + "the caller's own authorities: public documents and documents granted to the user "
+                        + "by name are retrievable, group-granted documents are not. See "
+                        + "docs/deployment-rag.md",
+                sourceId);
     }
 
     @SuppressWarnings("unchecked")
@@ -1607,11 +1541,11 @@ public class HybridSearchService {
     }
 
     private boolean isAlfrescoSource(String sourceId) {
-        return sourceId != null && resolveAlfrescoSourceIds().contains(sourceId);
+        return sourceCatalog().isAlfresco(configuredSources(), sourceId);
     }
 
     private boolean isNuxeoSource(String sourceId) {
-        return sourceId != null && !sourceId.isBlank() && sourceId.equals(nuxeoSourceId);
+        return sourceCatalog().isNuxeo(configuredSources(), sourceId);
     }
 
     private String buildNuxeoApiUrl() {

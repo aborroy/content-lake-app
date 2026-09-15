@@ -4,6 +4,7 @@ import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.hxpr.api.model.Embedding;
 import org.hyland.contentlake.hxpr.api.model.VectorSearchResult;
 import org.hyland.contentlake.model.HxprDocument;
+import org.hyland.contentlake.model.HxprTermsAggregationResult;
 import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
@@ -17,6 +18,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -25,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -53,6 +56,22 @@ class SemanticSearchServiceTest {
         ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
         ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
         ReflectionTestUtils.setField(service, "defaultMinScore", 0.5d);
+    }
+
+    /**
+     * Stubs the source discovery the permission filter runs: one terms aggregation over
+     * {@code cin_sourceId}, whose bucket keys are the stored {@code <sourceType>:<sourceId>} values.
+     */
+    private void stubIndexedSources(String... qualifiedSourceIds) {
+        HxprTermsAggregationResult aggregation = new HxprTermsAggregationResult();
+        aggregation.setAggregationsBuckets(Arrays.stream(qualifiedSourceIds).map(key -> {
+            HxprTermsAggregationResult.Bucket bucket = new HxprTermsAggregationResult.Bucket();
+            bucket.setKey(key);
+            bucket.setDocCount(1L);
+            return bucket;
+        }).toList());
+        when(hxprService.termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt()))
+                .thenReturn(aggregation);
     }
 
     // -----------------------------------------------------------------------
@@ -167,17 +186,12 @@ class SemanticSearchServiceTest {
     }
 
     @Test
-    void buildPermissionFilter_discoversAlfrescoSourceIdFromHxprDocuments() {
+    void buildPermissionFilter_discoversAlfrescoSourceIdFromTheIndex() {
         SemanticSearchService svc = spy(service);
         ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
         ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
 
-        HxprDocument doc = new HxprDocument();
-        doc.setCinSourceId("alfresco:discovered-repo");
-        HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-        result.setDocuments(List.of(doc));
-
-        when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+        stubIndexedSources("alfresco:discovered-repo");
         doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
                 .when(svc).getUserAuthorities("admin", "discovered-repo");
 
@@ -185,6 +199,53 @@ class SemanticSearchServiceTest {
 
         assertThat(filter).contains("cin_sourceId = 'alfresco:discovered-repo'");
         assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
+    }
+
+    // -----------------------------------------------------------------------
+    // A source rag-service was not compiled against (#133)
+    // -----------------------------------------------------------------------
+
+    @Test
+    void buildPermissionFilter_thirdSourceInTheIndex_getsAClauseWithoutAPin() {
+        SemanticSearchService svc = spy(service);
+        ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
+        stubIndexedSources("sample-directory:sample-directory");
+        doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice", "sample-directory");
+
+        String filter = svc.buildPermissionFilter("alice", null);
+
+        // Before #133 nothing named this source, so the filter was unresolvedSourceClause() and every
+        // query returned nothing at all.
+        assertThat(filter).doesNotContain("__unresolved_permission_source__");
+        assertThat(filter).contains("sys_racl = '__Everyone__'");
+        assertThat(filter).contains("sys_racl = 'u:alice_#_sample-directory'");
+    }
+
+    @Test
+    void buildPermissionFilter_thirdSourceWithAdminBypass_qualifiesTheSourceIdWithItsOwnType() {
+        SemanticSearchService svc = spy(service);
+        ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
+        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
+        stubIndexedSources("cmis:docbase-1");
+        // The bypass group is Alfresco's and grants nothing here, so this asserts the qualified form
+        // rather than the bypass: a bare id could never match a stored '<type>:<id>'.
+        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
+                .when(svc).getUserAuthorities("admin", "docbase-1");
+
+        String filter = svc.buildPermissionFilter("admin", null);
+
+        assertThat(filter).doesNotContain("cin_sourceId = 'docbase-1'");
+        assertThat(filter).contains("sys_racl = 'u:admin_#_docbase-1'");
+        assertThat(filter).contains("sys_racl = 'g:GROUP_ALFRESCO_ADMINISTRATORS_#_docbase-1'");
+    }
+
+    @Test
+    void getUserAuthorities_thirdSource_resolvesDefaultsOnlyAndDoesNotCallADirectory() {
+        // No group resolver exists for such a source, so the caller gets themselves and Everyone: its
+        // public documents are retrievable and its group-granted ones stay hidden. alfrescoUrl points at
+        // a closed port, so a directory call would have thrown and failed closed instead.
+        assertThat(service.getUserAuthorities("alice", "sample-directory"))
+                .containsExactly("alice", "GROUP_EVERYONE");
     }
 
     // -----------------------------------------------------------------------
@@ -265,24 +326,21 @@ class SemanticSearchServiceTest {
 
         service.logPermissionSourceIdConfiguration();
 
-        // Auto-discovery path: no validation probe against the index at startup.
+        // Discovery path: no validation probe against the index at startup, by either route.
         verify(hxprService, never()).query(anyString(), anyInt(), anyInt());
+        verify(hxprService, never()).termsAggregation(any(), any(), any(), anyInt());
     }
 
     @Test
     void logPermissionSourceIdConfiguration_pinnedAndCovers_doesNotMisreport() {
         ReflectionTestUtils.setField(service, "permissionSourceIds", "covered-repo");
 
-        HxprDocument doc = new HxprDocument();
-        doc.setCinSourceId("alfresco:covered-repo");
-        HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-        result.setDocuments(List.of(doc));
-        when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+        stubIndexedSources("alfresco:covered-repo");
 
         // Should validate against the index without throwing; configured id covers the indexed one.
         service.logPermissionSourceIdConfiguration();
 
-        verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+        verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
     }
 
     @Test
@@ -290,16 +348,12 @@ class SemanticSearchServiceTest {
         // Mirrors the incident: pinned "default,local" misses the real Alfresco repo UUID.
         ReflectionTestUtils.setField(service, "permissionSourceIds", "default,local");
 
-        HxprDocument doc = new HxprDocument();
-        doc.setCinSourceId("alfresco:de0b9044-4790-4006-8b90-44479030061f");
-        HxprDocument.QueryResult result = new HxprDocument.QueryResult();
-        result.setDocuments(List.of(doc));
-        when(hxprService.query(contains("source_type = 'alfresco'"), eq(25), eq(0))).thenReturn(result);
+        stubIndexedSources("alfresco:de0b9044-4790-4006-8b90-44479030061f");
 
         // Does not throw; the uncovered indexed source id triggers the WARN diagnostic.
         service.logPermissionSourceIdConfiguration();
 
-        verify(hxprService).query(contains("source_type = 'alfresco'"), eq(25), eq(0));
+        verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
     }
 
     @Test
