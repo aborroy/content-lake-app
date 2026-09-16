@@ -510,9 +510,10 @@ class SemanticSearchServiceTest {
         when(highScore.getSysembedType()).thenReturn("mxbai");
         when(highScore.getSysembedLocation()).thenReturn(null);
 
+        // Its docId is deliberately not stubbed: a candidate below the threshold is dropped before
+        // enrichment, so nothing asks which document it belonged to (#135).
         Embedding lowScore = mock(Embedding.class);
         when(lowScore.getSysembedScore()).thenReturn(0.2d);
-        when(lowScore.getSysembedDocId()).thenReturn(null);
 
         VectorSearchResult vectorResult = mock(VectorSearchResult.class);
         when(vectorResult.getEmbeddings()).thenReturn(List.of(highScore, lowScore));
@@ -530,6 +531,305 @@ class SemanticSearchServiceTest {
         assertThat(response.getResults()).hasSize(1);
         assertThat(response.getResults().get(0).getScore()).isEqualTo(0.8d);
         assertThat(response.getResults().get(0).getChunkText()).isEqualTo("relevant chunk");
+    }
+
+    /**
+     * Enrichment runs over the retained candidates, not the retrieved pool (#135).
+     *
+     * <p>{@code fetchDocumentMetadata} issues one {@code SysContent} point query per distinct document, so
+     * enriching before thresholding paid for documents whose only chunks were about to be dropped. That
+     * cost scales with the over-fetched pool, which is what a document budget has to enlarge, so the order
+     * is asserted rather than left to be re-derived from reading the method.</p>
+     */
+    @Test
+    void search_enrichesOnlyTheDocumentsOfRetainedCandidates() {
+        SemanticSearchService svc = spy(service);
+        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
+
+        when(securityContextService.getCurrentUsername()).thenReturn("user");
+        when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
+        when(embeddingService.getModelName()).thenReturn("test-model");
+
+        String keptDoc = "11111111-1111-1111-1111-111111111111";
+        String droppedDoc = "22222222-2222-2222-2222-222222222222";
+
+        Embedding kept = mock(Embedding.class);
+        when(kept.getSysembedScore()).thenReturn(0.8d);
+        when(kept.getSysembedText()).thenReturn("relevant chunk");
+        when(kept.getSysembedDocId()).thenReturn(keptDoc);
+        when(kept.getSysembedId()).thenReturn("emb-1");
+        when(kept.getSysembedType()).thenReturn("mxbai");
+        when(kept.getSysembedLocation()).thenReturn(null);
+
+        Embedding dropped = mock(Embedding.class);
+        when(dropped.getSysembedScore()).thenReturn(0.2d);
+
+        VectorSearchResult vectorResult = mock(VectorSearchResult.class);
+        when(vectorResult.getEmbeddings()).thenReturn(List.of(kept, dropped));
+        when(vectorResult.getTotalCount()).thenReturn(2L);
+        when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
+
+        svc.search(SemanticSearchRequest.builder().query("test").minScore(0.5d).build());
+
+        verify(hxprService, times(1)).query(contains(keptDoc), eq(1), eq(0));
+        verify(hxprService, never()).query(contains(droppedDoc), anyInt(), anyInt());
+    }
+
+    // -----------------------------------------------------------------------
+    // Document budget (#135)
+    // -----------------------------------------------------------------------
+
+    /** The point of the feature: a caller asking for documents gets documents, not chunks. */
+    @Test
+    void search_withTopDocuments_returnsChunksOfThatManyDistinctDocuments() {
+        SemanticSearchService svc = budgetService();
+
+        List<Embedding> pool = new java.util.ArrayList<>();
+        pool.addAll(retainedChunks(DOC_A, 4));
+        pool.addAll(retainedChunks(DOC_B, 4));
+        pool.addAll(retainedChunks(DOC_C, 4));
+        // Built up front: nesting a when(...) inside another when(...) leaves Mockito mid-stubbing.
+        VectorSearchResult result = vectorResultOf(pool);
+        // topDocuments=3, chunksPerDocument=1 -> chunkLimit 3, fetchK 6.
+        when(hxprService.vectorSearch(any(), any(), any(), eq(6))).thenReturn(result);
+
+        SemanticSearchResponse response = svc.search(SemanticSearchRequest.builder()
+                .query("test")
+                .topDocuments(3)
+                .chunksPerDocument(1)
+                .minScore(0.1d)
+                .build());
+
+        assertThat(response.getResults()).hasSize(3);
+        assertThat(response.getResults())
+                .extracting(hit -> hit.getSourceDocument().getDocumentId())
+                .containsExactly(DOC_A, DOC_B, DOC_C);
+        assertThat(response.getDocumentCount()).isEqualTo(3);
+        assertThat(response.getAppliedTopDocuments()).isEqualTo(3);
+        assertThat(response.getAppliedChunksPerDocument()).isEqualTo(1);
+    }
+
+    /**
+     * A document budget has to be able to out-fetch the response ceiling. While MAX_TOP_K bounded both, the
+     * pool was capped at the same number as the answer, so N distinct documents could not be guaranteed.
+     */
+    @Test
+    void search_withTopDocuments_asksHxprPastTheResponseCeiling() {
+        SemanticSearchService svc = budgetService();
+        when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(null);
+
+        svc.search(SemanticSearchRequest.builder()
+                .query("test")
+                .topDocuments(50)
+                .chunksPerDocument(10)
+                .build());
+
+        // 50 x 10 clamps to the 200-chunk answer ceiling, doubled to a 400-row probe.
+        verify(hxprService).vectorSearch(any(), any(), any(), eq(400));
+    }
+
+    /** Without a document budget the fetch bound is exactly what it was. */
+    @Test
+    void search_withoutTopDocuments_asksHxprForNoMoreThanTheResponseCeiling() {
+        SemanticSearchService svc = budgetService();
+        when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(null);
+
+        svc.search(SemanticSearchRequest.builder().query("test").topK(50).build());
+
+        verify(hxprService).vectorSearch(any(), any(), any(), eq(50));
+    }
+
+    /**
+     * A pool that is all one document starves the budget, and the only remedy is more rows. The first
+     * result is discarded rather than merged: a kNN result at a larger limit is a superset in rank order.
+     */
+    @Test
+    void search_whenTheDocumentBudgetIsStarved_requeriesAtADoubledLimit() {
+        SemanticSearchService svc = budgetService();
+
+        List<Embedding> deeperPool = new java.util.ArrayList<>();
+        deeperPool.addAll(retainedChunks(DOC_A, 4));
+        deeperPool.addAll(retainedChunks(DOC_B, 4));
+        VectorSearchResult starved = discardedResultOf(countedChunks(DOC_A, 4));
+        VectorSearchResult deeper = vectorResultOf(deeperPool);
+
+        // topDocuments=2, chunksPerDocument=1 -> chunkLimit 2, fetchK 4.
+        when(hxprService.vectorSearch(any(), any(), any(), eq(4))).thenReturn(starved);
+        when(hxprService.vectorSearch(any(), any(), any(), eq(8))).thenReturn(deeper);
+
+        SemanticSearchResponse response = svc.search(twoDocumentRequest());
+
+        verify(hxprService).vectorSearch(any(), any(), any(), eq(4));
+        verify(hxprService).vectorSearch(any(), any(), any(), eq(8));
+        verify(hxprService, never()).vectorSearch(any(), any(), any(), eq(16));
+        assertThat(response.getDocumentCount()).isEqualTo(2);
+    }
+
+    /**
+     * Fewer rows than asked means the filtered index is exhausted, so a deeper probe cannot find another
+     * document. Probing anyway would cost a full kNN call per query on any small or tightly filtered corpus.
+     */
+    @Test
+    void search_whenHxprReturnsFewerRowsThanAsked_doesNotProbeAgain() {
+        SemanticSearchService svc = budgetService();
+
+        VectorSearchResult exhausted = vectorResultOf(retainedChunks(DOC_A, 3));
+        when(hxprService.vectorSearch(any(), any(), any(), eq(4))).thenReturn(exhausted);
+
+        SemanticSearchResponse response = svc.search(twoDocumentRequest());
+
+        verify(hxprService, times(1)).vectorSearch(any(), any(), any(), anyInt());
+        // One document was all there was, and the response says so rather than looking like a shortfall.
+        assertThat(response.getResults()).hasSize(1);
+        assertThat(response.getDocumentCount()).isEqualTo(1);
+    }
+
+    /** Deepening is bounded, so a permanently starved budget cannot turn one slow query into many. */
+    @Test
+    void search_deepeningStopsAtThreeProbes() {
+        SemanticSearchService svc = budgetService();
+
+        VectorSearchResult probe1 = discardedResultOf(countedChunks(DOC_A, 4));
+        VectorSearchResult probe2 = discardedResultOf(countedChunks(DOC_A, 8));
+        VectorSearchResult probe3 = vectorResultOf(retainedChunks(DOC_A, 16));
+
+        when(hxprService.vectorSearch(any(), any(), any(), eq(4))).thenReturn(probe1);
+        when(hxprService.vectorSearch(any(), any(), any(), eq(8))).thenReturn(probe2);
+        when(hxprService.vectorSearch(any(), any(), any(), eq(16))).thenReturn(probe3);
+
+        svc.search(twoDocumentRequest());
+
+        verify(hxprService, times(3)).vectorSearch(any(), any(), any(), anyInt());
+        verify(hxprService, never()).vectorSearch(any(), any(), any(), eq(32));
+    }
+
+    /** A chunk-oriented request never deepens, however skewed the pool it got back. */
+    @Test
+    void search_withoutTopDocuments_neverProbesTwice() {
+        SemanticSearchService svc = budgetService();
+
+        VectorSearchResult skewed = vectorResultOf(retainedChunks(DOC_A, 5));
+        when(hxprService.vectorSearch(any(), any(), any(), eq(5))).thenReturn(skewed);
+
+        svc.search(SemanticSearchRequest.builder().query("test").minScore(0.1d).build());
+
+        verify(hxprService, times(1)).vectorSearch(any(), any(), any(), anyInt());
+    }
+
+    /**
+     * documentCount is reported whatever the caller asked in, and the applied budget only when one was.
+     * A chunk-oriented caller otherwise recomputes it by grouping the hits itself.
+     */
+    @Test
+    void search_withoutTopDocuments_stillReportsDocumentCountAndNoAppliedBudget() {
+        SemanticSearchService svc = budgetService();
+
+        List<Embedding> pool = new java.util.ArrayList<>();
+        pool.addAll(retainedChunks(DOC_A, 3));
+        pool.addAll(retainedChunks(DOC_B, 2));
+        VectorSearchResult result = vectorResultOf(pool);
+        when(hxprService.vectorSearch(any(), any(), any(), eq(5))).thenReturn(result);
+
+        SemanticSearchResponse response = svc.search(
+                SemanticSearchRequest.builder().query("test").minScore(0.1d).build());
+
+        assertThat(response.getResultCount()).isEqualTo(5);
+        assertThat(response.getDocumentCount()).isEqualTo(2);
+        assertThat(response.getAppliedTopDocuments()).isNull();
+        assertThat(response.getAppliedChunksPerDocument()).isNull();
+    }
+
+    /**
+     * Both budgets are part of the cache key. Without them the same query asked with and asked without
+     * topDocuments returns whichever of the two ran first, which is the one way this feature could
+     * silently return the wrong shape to a caller who asked correctly.
+     */
+    @Test
+    void theDocumentBudgetIsPartOfTheCacheKey() {
+        String chunkOriented = cacheKey(SemanticSearchRequest.builder().query("test").build());
+        String documentOriented = cacheKey(
+                SemanticSearchRequest.builder().query("test").topDocuments(10).build());
+        String otherPerDocument = cacheKey(SemanticSearchRequest.builder()
+                .query("test").topDocuments(10).chunksPerDocument(2).build());
+
+        assertThat(chunkOriented).isNotEqualTo(documentOriented);
+        assertThat(documentOriented).isNotEqualTo(otherPerDocument);
+    }
+
+    private String cacheKey(SemanticSearchRequest request) {
+        return ReflectionTestUtils.invokeMethod(service, "buildCacheKey", request);
+    }
+
+    private static final String DOC_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    private static final String DOC_B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    private static final String DOC_C = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+
+    /** A service whose permission filter and embedding are stubbed, so only retrieval is under test. */
+    private SemanticSearchService budgetService() {
+        SemanticSearchService svc = spy(service);
+        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
+        when(securityContextService.getCurrentUsername()).thenReturn("user");
+        when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
+        when(embeddingService.getModelName()).thenReturn("test-model");
+        return svc;
+    }
+
+    private static SemanticSearchRequest twoDocumentRequest() {
+        return SemanticSearchRequest.builder()
+                .query("test")
+                .topDocuments(2)
+                .chunksPerDocument(1)
+                .minScore(0.1d)
+                .build();
+    }
+
+    /** Chunks of one document, fully stubbed because these reach hit building. */
+    private static List<Embedding> retainedChunks(String docId, int count) {
+        List<Embedding> embeddings = new java.util.ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            Embedding embedding = mock(Embedding.class);
+            when(embedding.getSysembedScore()).thenReturn(0.9d - (i * 0.01d));
+            when(embedding.getSysembedText()).thenReturn(docId + " chunk " + i);
+            when(embedding.getSysembedDocId()).thenReturn(docId);
+            when(embedding.getSysembedId()).thenReturn(docId + "-emb-" + i);
+            when(embedding.getSysembedType()).thenReturn("mxbai");
+            when(embedding.getSysembedLocation()).thenReturn(null);
+            embeddings.add(embedding);
+        }
+        return embeddings;
+    }
+
+    /**
+     * Chunks of one document for a probe whose result is discarded, so only the score and the document are
+     * ever read. Stubbing the rest would leave unused stubs, which is itself the assertion that a discarded
+     * probe is not enriched.
+     */
+    private static List<Embedding> countedChunks(String docId, int count) {
+        List<Embedding> embeddings = new java.util.ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            Embedding embedding = mock(Embedding.class);
+            when(embedding.getSysembedScore()).thenReturn(0.9d);
+            when(embedding.getSysembedDocId()).thenReturn(docId);
+            embeddings.add(embedding);
+        }
+        return embeddings;
+    }
+
+    private static VectorSearchResult vectorResultOf(List<Embedding> embeddings) {
+        VectorSearchResult result = mock(VectorSearchResult.class);
+        when(result.getEmbeddings()).thenReturn(embeddings);
+        when(result.getTotalCount()).thenReturn((long) embeddings.size());
+        return result;
+    }
+
+    /**
+     * A probe result that a deeper probe replaces. Its total count is deliberately not stubbed: a discarded
+     * result is only counted and measured, so anything more would be an unused stub.
+     */
+    private static VectorSearchResult discardedResultOf(List<Embedding> embeddings) {
+        VectorSearchResult result = mock(VectorSearchResult.class);
+        when(result.getEmbeddings()).thenReturn(embeddings);
+        return result;
     }
 
     // -----------------------------------------------------------------------

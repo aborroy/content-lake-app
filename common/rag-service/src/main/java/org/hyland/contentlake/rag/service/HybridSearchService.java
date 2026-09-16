@@ -56,7 +56,27 @@ public class HybridSearchService {
     static final String NORMALIZATION_MAX = "max";
     static final String NORMALIZATION_MINMAX = "minmax";
 
+    /** Caller-visible ceiling on {@code candidateCount} and {@code maxResults}. Part of the published contract. */
     private static final int MAX_CANDIDATE_COUNT = 100;
+
+    /** Caller-visible ceiling on {@code topDocuments}, matching the semantic endpoint's. */
+    private static final int MAX_TOP_DOCUMENTS = 50;
+
+    /** Caller-visible ceiling on {@code chunksPerDocument}. */
+    private static final int MAX_CHUNKS_PER_DOCUMENT = 10;
+
+    /** Ceiling on the chunks a document budget may return, whatever its two factors multiply to. */
+    private static final int MAX_CHUNK_LIMIT = 200;
+
+    /**
+     * Internal ceiling on the candidate pool, deliberately far above {@link #MAX_CANDIDATE_COUNT}.
+     *
+     * <p>A document budget is unsatisfiable out of a pool capped at the same number as the answer, so a
+     * request that names one raises the candidates the legs retrieve. This bounds retrieval only; what a
+     * caller may ask for, and what the response may carry, is unchanged.</p>
+     */
+    private static final int MAX_CANDIDATE_FETCH = 500;
+
     private static final String INGEST_PROP_PREFIX = "cin_ingestProperties.";
     private static final String SOURCE_MIME_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_MIME_TYPE;
     private static final String SOURCE_PATH_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_PATH;
@@ -170,6 +190,8 @@ public class HybridSearchService {
                 + ' ' + request.getTextWeight()
                 + ' ' + request.getCandidateCount()
                 + ' ' + request.getMaxResults()
+                + ' ' + request.getTopDocuments()
+                + ' ' + request.getChunksPerDocument()
                 + ' ' + request.getMinScore()
                 + ' ' + buildMetadataFilter(request.getMetadata());
     }
@@ -188,8 +210,8 @@ public class HybridSearchService {
         String logUser = auth != null ? auth.getName() : "anonymous";
         String permissionFilter = buildCurrentUserPermissionFilter(request.getSourceType(), additionalFilter);
 
-        int candidateCount = resolveCandidateCount(request);
-        int maxResults = resolveMaxResults(request);
+        ResultBudget budget = resolveBudget(request);
+        int candidateCount = budget.candidateCount();
         String strategy = resolveStrategy(request);
         String normalization = STRATEGY_WEIGHTED.equals(strategy) ? resolveNormalization(request) : null;
         // An explicit 0.0 means "no threshold" and must survive; only an absent value falls back.
@@ -227,12 +249,19 @@ public class HybridSearchService {
                 ? (perVariant.isEmpty() ? List.<FusedResult>of() : perVariant.get(0))
                 : fuseAcrossVariants(perVariant, ragProperties.getQueryExpansion().getRrfK());
 
-        // Cap how much of the result set one document may occupy before trimming to maxResults. The
-        // candidate pool is already deeper than maxResults, so there is no separate over-fetch here: a
-        // document's chunks past the cap are deferred behind other documents' best ones, never dropped.
-        // A no-op when the cap is off, which is the default.
-        List<FusedResult> filtered = DocumentDiversityLimiter.cap(
-                fused, maxResults, maxChunksPerDocument(request), result -> documentKeyOf(result));
+        // Apply whichever budget the caller asked in. With a document budget the answer is whole documents
+        // and may be shorter than the chunk budget allows; without one, cap how much of the result set a
+        // single document may occupy before trimming to maxResults. The candidate pool is already deeper
+        // than the answer, so there is no separate over-fetch here: under the cap a document's chunks past
+        // it are deferred behind other documents' best ones, never dropped. A no-op when the cap is off,
+        // which is the default.
+        List<FusedResult> filtered = budget.documentBudget()
+                ? DocumentGroupSelector.selectGroups(
+                        fused, budget.topDocuments(), budget.chunksPerDocument(),
+                        HybridSearchService::documentKeyOf)
+                : DocumentDiversityLimiter.cap(
+                        fused, budget.chunkLimit(), maxChunksPerDocument(request),
+                        HybridSearchService::documentKeyOf);
 
         // --- Enrich with document metadata ---
         Map<String, SectionMap> sectionMaps = new ConcurrentHashMap<>();
@@ -254,6 +283,9 @@ public class HybridSearchService {
                 .vectorCandidates(vectorCandidates)
                 .keywordCandidates(keywordCandidates)
                 .queryVariants(passes.size() > 1 ? passes.size() : null)
+                .documentCount(DocumentGroupSelector.distinctGroups(filtered, HybridSearchService::documentKeyOf))
+                .appliedTopDocuments(budget.topDocuments())
+                .appliedChunksPerDocument(budget.documentBudget() ? budget.chunksPerDocument() : null)
                 .searchTimeMs(searchTimeMs)
                 .results(hits)
                 .build();
@@ -1277,12 +1309,7 @@ public class HybridSearchService {
         if (request != null && request.isSkipDocumentDiversity()) {
             return 0;
         }
-        if (ragProperties == null || ragProperties.getRetrieval() == null) {
-            return 0;
-        }
-        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity =
-                ragProperties.getRetrieval().getDocumentDiversity();
-        return diversity != null && diversity.isEnabled() ? diversity.getMaxChunksPerDocument() : 0;
+        return configuredChunksPerDocument();
     }
 
     /** The document a fused chunk belongs to; its own key when the document id is missing. */
@@ -1303,6 +1330,65 @@ public class HybridSearchService {
     private int resolveMaxResults(HybridSearchRequest request) {
         int max = request.getMaxResults() > 0 ? request.getMaxResults() : properties.getMaxResults();
         return Math.min(Math.max(max, 1), MAX_CANDIDATE_COUNT);
+    }
+
+    /**
+     * How much to retrieve and how much to return, from either budget the caller may have asked in.
+     *
+     * <p>With no {@code topDocuments} this is the pre-#135 arithmetic unchanged: {@code candidateCount} and
+     * {@code maxResults} as the caller or the deployment set them. With one, the answer becomes a product of
+     * two request-visible numbers and the candidate pool is raised to at least twice it, bounded by
+     * {@link #MAX_CANDIDATE_FETCH}: unlike the semantic path, deepening here happens once and up front,
+     * because re-querying would have to re-run the keyword leg as well as the vector one.</p>
+     */
+    private ResultBudget resolveBudget(HybridSearchRequest request) {
+        Integer requestedDocuments = request.getTopDocuments();
+        if (requestedDocuments == null) {
+            return new ResultBudget(null, 0, resolveMaxResults(request), resolveCandidateCount(request));
+        }
+
+        int documents = clamp(requestedDocuments, 1, MAX_TOP_DOCUMENTS);
+        // Falls back to the configured cap rather than to "unlimited", because a document budget with no
+        // per-document bound has no defined size: one document could fill the whole answer.
+        int perDocument = request.getChunksPerDocument() != null
+                ? clamp(request.getChunksPerDocument(), 1, MAX_CHUNKS_PER_DOCUMENT)
+                : Math.max(configuredChunksPerDocument(), 1);
+
+        int chunkLimit = Math.min(documents * perDocument, MAX_CHUNK_LIMIT);
+        // At least doubled: the selection needs chunks of documents it will not keep to choose between.
+        int candidateCount = Math.min(
+                Math.max(resolveCandidateCount(request), chunkLimit * 2), MAX_CANDIDATE_FETCH);
+
+        return new ResultBudget(documents, perDocument, chunkLimit, candidateCount);
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.min(Math.max(value, min), max);
+    }
+
+    /** The configured per-document cap, or 0 when document diversity is disabled. */
+    private int configuredChunksPerDocument() {
+        if (ragProperties == null || ragProperties.getRetrieval() == null) {
+            return 0;
+        }
+        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity =
+                ragProperties.getRetrieval().getDocumentDiversity();
+        return diversity != null && diversity.isEnabled() ? diversity.getMaxChunksPerDocument() : 0;
+    }
+
+    /**
+     * What to retrieve and what to return for one request.
+     *
+     * @param topDocuments      the clamped document budget, or null when the caller asked in chunks
+     * @param chunksPerDocument chunks one document may contribute; meaningless without {@code topDocuments}
+     * @param chunkLimit        chunks the response may carry
+     * @param candidateCount    candidates each leg retrieves per variant
+     */
+    private record ResultBudget(Integer topDocuments, int chunksPerDocument, int chunkLimit, int candidateCount) {
+
+        boolean documentBudget() {
+            return topDocuments != null;
+        }
     }
 
     // ---------------------------------------------------------------

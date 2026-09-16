@@ -24,9 +24,25 @@ public class HybridSearchRequest {
     /** Free-text query used for both vector embedding and keyword matching. */
     private String query;
 
-    /** Maximum number of fused results to return (default from config). */
+    /** Maximum number of fused chunks to return (default from config). */
     @Builder.Default
     private int maxResults = 0;
+
+    /**
+     * Distinct source documents to return chunks from (max 50), or {@code null} for chunk-oriented paging.
+     *
+     * <p>See {@link SemanticSearchRequest#getTopDocuments()}: same field, same precedence over
+     * {@link #maxResults} that it has over {@code topK}, and same reason for being nullable.</p>
+     */
+    private Integer topDocuments;
+
+    /**
+     * Most chunks to take from any one document (max 10), or {@code null} to use
+     * {@code rag.retrieval.document-diversity.max-chunks-per-document}.
+     *
+     * <p>See {@link SemanticSearchRequest#getChunksPerDocument()}.</p>
+     */
+    private Integer chunksPerDocument;
 
     /** Number of candidates to retrieve from each source before fusion (default from config). */
     @Builder.Default

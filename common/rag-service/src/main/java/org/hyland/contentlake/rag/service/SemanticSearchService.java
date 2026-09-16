@@ -50,7 +50,34 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SemanticSearchService {
 
+    /** Caller-visible ceiling on {@code topK} and on {@code topDocuments}. Part of the published contract. */
     private static final int MAX_TOP_K = 50;
+
+    /** Caller-visible ceiling on {@code chunksPerDocument}. */
+    private static final int MAX_CHUNKS_PER_DOCUMENT = 10;
+
+    /** Ceiling on the chunks a document budget may return, whatever its two factors multiply to. */
+    private static final int MAX_CHUNK_LIMIT = 200;
+
+    /**
+     * Internal ceiling on what is asked of hxpr, deliberately far above {@link #MAX_TOP_K}.
+     *
+     * <p>The two used to be the same constant, which made {@code topDocuments} unsatisfiable: you cannot
+     * guarantee N distinct documents out of a candidate pool capped at the same number as the answer, and
+     * over-fetch saturated at {@code topK >= 17} and vanished at 50. This bounds retrieval only; the
+     * response ceiling is unchanged.</p>
+     */
+    private static final int MAX_FETCH_K = 500;
+
+    /**
+     * Most kNN calls one variant may make, counting the first.
+     *
+     * <p>A document budget can be starved by a pool that is all one document, and the only remedy is to ask
+     * for more rows. Bounded because each probe is a full kNN call: two deepenings take a 10-document
+     * budget from 40 rows to 160, which covers a realistically skewed pool, and an unbounded loop would
+     * turn one slow query into several.</p>
+     */
+    private static final int MAX_VECTOR_PROBES = 3;
 
     private static final double FALLBACK_MIN_SCORE = 0.5d;
 
@@ -132,6 +159,10 @@ public class SemanticSearchService {
         return "sem" + ' ' + RagQueryCache.principalScope(auth)
                 + ' ' + RagQueryCache.normalize(request.getQuery())
                 + ' ' + request.getTopK()
+                // Both budgets belong in the key: without them the same query asked with and asked without
+                // topDocuments returns whichever of the two ran first.
+                + ' ' + request.getTopDocuments()
+                + ' ' + request.getChunksPerDocument()
                 + ' ' + request.getMinScore()
                 + ' ' + request.getFilter()
                 + ' ' + request.getSourceType()
@@ -142,13 +173,7 @@ public class SemanticSearchService {
     private SemanticSearchResponse executeSearch(SemanticSearchRequest request) {
         long startTime = System.currentTimeMillis();
 
-        int topK = Math.min(Math.max(request.getTopK(), 1), MAX_TOP_K);
-
-        // The legs retrieve past topK when the per-document cap is on, so the cap has other documents'
-        // chunks to promote: a budget already filled by one document has nothing to swap in. Bounded by
-        // MAX_TOP_K, so this never asks hxpr for more than the endpoint's own maximum.
-        int fetchK = Math.min(topK * Math.max(overFetchFactor(request), 1), MAX_TOP_K);
-
+        ResultBudget budget = resolveBudget(request);
         double minScore = resolveMinScore(request);
 
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
@@ -164,19 +189,19 @@ public class SemanticSearchService {
 
         if (variants == null) {
             VariantResult single = searchVariant(
-                    QueryVariant.original(request.getQuery()), request, fetchK, minScore, hxqlFilter, logUser);
-            List<SearchHit> hits = diversify(single.hits(), topK, request);
+                    QueryVariant.original(request.getQuery()), request, budget, minScore, hxqlFilter, logUser);
+            List<SearchHit> hits = applyBudget(single.hits(), budget, request);
             long searchTimeMs = System.currentTimeMillis() - startTime;
             log.info("Semantic search completed: {} results in {}ms for query: \"{}\" (minScore={})",
                     hits.size(), searchTimeMs, request.getQuery(), minScore);
-            return response(request, hits, single.vectorDimension(), single.totalCount(), searchTimeMs);
+            return response(request, hits, budget, single.vectorDimension(), single.totalCount(), searchTimeMs);
         }
 
         List<List<SearchHit>> perVariant = new ArrayList<>(variants.size());
         int vectorDimension = 0;
         long totalCount = 0;
         for (QueryVariant variant : variants) {
-            VariantResult result = searchVariant(variant, request, fetchK, minScore, hxqlFilter, logUser);
+            VariantResult result = searchVariant(variant, request, budget, minScore, hxqlFilter, logUser);
             if (!result.hits().isEmpty()) {
                 perVariant.add(result.hits());
             }
@@ -188,27 +213,90 @@ public class SemanticSearchService {
             totalCount = Math.max(totalCount, result.totalCount());
         }
 
-        // Fuse over the over-fetched pool, then cap: fusing to topK first would discard the very chunks
-        // the cap needs to promote.
-        List<SearchHit> hits = diversify(
-                RrfFusion.fuse(perVariant, ragProperties.getQueryExpansion().getRrfK(), fetchK), topK, request);
+        // Fuse over the over-fetched pool, then apply the budget: fusing to the answer size first would
+        // discard the very chunks the cap needs to promote and the selection needs to choose between.
+        List<SearchHit> hits = applyBudget(
+                RrfFusion.fuse(perVariant, ragProperties.getQueryExpansion().getRrfK(), budget.fetchK()),
+                budget, request);
         long searchTimeMs = System.currentTimeMillis() - startTime;
 
         log.info("Semantic search completed: {} results in {}ms for query: \"{}\" "
                         + "(minScore={}, variants={}, contributing={})",
                 hits.size(), searchTimeMs, request.getQuery(), minScore, variants.size(), perVariant.size());
 
-        return response(request, hits, vectorDimension, totalCount, searchTimeMs);
+        return response(request, hits, budget, vectorDimension, totalCount, searchTimeMs);
     }
 
     /**
-     * Trims the retrieved pool to {@code topK}, capping how much of it one document may occupy.
+     * Reduces the retrieved pool to the answer, either by selecting documents or by trimming chunks.
      *
-     * <p>A no-op beyond the trim when the cap is off or the request opted out, in which case the ordering
-     * and the result count are exactly what they were before {@link DocumentDiversityLimiter} existed.</p>
+     * <p>The two are different reductions, not one parameterised one. Trimming spends a chunk budget and
+     * backfills so it can never shorten a result set; selecting spends a document budget and must not
+     * backfill, or the guarantee {@code topDocuments} exists to give is gone (#135).</p>
      */
-    private List<SearchHit> diversify(List<SearchHit> hits, int topK, SemanticSearchRequest request) {
-        return DocumentDiversityLimiter.limit(hits, topK, maxChunksPerDocument(request));
+    private List<SearchHit> applyBudget(List<SearchHit> hits, ResultBudget budget, SemanticSearchRequest request) {
+        if (budget.documentBudget()) {
+            return DocumentGroupSelector.select(hits, budget.topDocuments(), budget.chunksPerDocument());
+        }
+        return DocumentDiversityLimiter.limit(hits, budget.chunkLimit(), maxChunksPerDocument(request));
+    }
+
+    /**
+     * How much to retrieve and how much to return, from either budget the caller may have asked in.
+     *
+     * <p>With no {@code topDocuments} this is the pre-#135 arithmetic unchanged, {@link #MAX_TOP_K} bounding
+     * both the answer and the fetch. With one, the answer is a product of two request-visible numbers and
+     * the fetch is bounded by {@link #MAX_FETCH_K} instead, because a pool no larger than the answer cannot
+     * be made to yield a given number of distinct documents.</p>
+     */
+    private ResultBudget resolveBudget(SemanticSearchRequest request) {
+        int topK = Math.min(Math.max(request.getTopK(), 1), MAX_TOP_K);
+
+        Integer requestedDocuments = request.getTopDocuments();
+        if (requestedDocuments == null) {
+            // The legs retrieve past topK when the per-document cap is on, so the cap has other documents'
+            // chunks to promote: a budget already filled by one document has nothing to swap in.
+            int fetchK = Math.min(topK * Math.max(overFetchFactor(request), 1), MAX_TOP_K);
+            return new ResultBudget(null, 0, topK, fetchK);
+        }
+
+        int documents = clamp(requestedDocuments, 1, MAX_TOP_K);
+        // Falls back to the configured cap rather than to "unlimited", because a document budget with no
+        // per-document bound has no defined size: one document could fill the whole answer.
+        int perDocument = request.getChunksPerDocument() != null
+                ? clamp(request.getChunksPerDocument(), 1, MAX_CHUNKS_PER_DOCUMENT)
+                : Math.max(configuredChunksPerDocument(), 1);
+
+        int chunkLimit = Math.min(documents * perDocument, MAX_CHUNK_LIMIT);
+        // At least doubled: the selection needs chunks of documents it will not keep to choose between.
+        int fetchK = Math.min(chunkLimit * Math.max(overFetchFactor(request), 2), MAX_FETCH_K);
+
+        return new ResultBudget(documents, perDocument, chunkLimit, fetchK);
+    }
+
+    private static int clamp(int value, int min, int max) {
+        return Math.min(Math.max(value, min), max);
+    }
+
+    /** The configured per-document cap, or 0 when document diversity is disabled. */
+    private int configuredChunksPerDocument() {
+        RagProperties.RetrievalProperties.DocumentDiversityProperties diversity = documentDiversity();
+        return diversity != null && diversity.isEnabled() ? diversity.getMaxChunksPerDocument() : 0;
+    }
+
+    /**
+     * What to retrieve and what to return for one request.
+     *
+     * @param topDocuments      the clamped document budget, or null when the caller asked in chunks
+     * @param chunksPerDocument chunks one document may contribute; meaningless without {@code topDocuments}
+     * @param chunkLimit        chunks the response may carry
+     * @param fetchK            rows to ask hxpr for, per variant, before any deepening
+     */
+    private record ResultBudget(Integer topDocuments, int chunksPerDocument, int chunkLimit, int fetchK) {
+
+        boolean documentBudget() {
+            return topDocuments != null;
+        }
     }
 
     /**
@@ -321,10 +409,10 @@ public class SemanticSearchService {
         };
     }
 
-    /** One retrieval pass for one query variant: embed, kNN, enrich, threshold. */
+    /** One retrieval pass for one query variant: embed, kNN, threshold, enrich. */
     private VariantResult searchVariant(QueryVariant variant,
                                         SemanticSearchRequest request,
-                                        int topK,
+                                        ResultBudget budget,
                                         double minScore,
                                         Supplier<String> hxqlFilter,
                                         String logUser) {
@@ -332,8 +420,8 @@ public class SemanticSearchService {
         // instruction prefix); otherwise embed query-side as usual.
         List<Double> queryVector = variant.vectorVector();
         if (queryVector == null) {
-            log.info("Embedding query: \"{}\" (variant={}, topK={}, minScore={}, user={})",
-                    variant.vectorText(), variant.label(), topK, minScore, logUser);
+            log.info("Embedding query: \"{}\" (variant={}, fetchK={}, minScore={}, user={})",
+                    variant.vectorText(), variant.label(), budget.fetchK(), minScore, logUser);
             queryVector = embedQueryCached(variant.vectorText(), request.getEmbeddingType());
         }
 
@@ -344,25 +432,100 @@ public class SemanticSearchService {
 
         String filter = hxqlFilter.get();
         log.debug("Executing vector search with filter: {}", filter);
-        final List<Double> vector = queryVector;
-        VectorSearchResult vectorResult = traced("rag.search.vector",
-                () -> vectorLeg(variant, vector, request.getEmbeddingType(), filter, topK));
+        VectorSearchResult vectorResult = probeForDocuments(
+                variant, queryVector, request, filter, budget, minScore);
 
         if (vectorResult == null || vectorResult.getEmbeddings() == null || vectorResult.getEmbeddings().isEmpty()) {
             log.info("No results for query: \"{}\"", variant.vectorText());
             return VariantResult.empty(queryVector.size());
         }
 
+        // Threshold before enriching. fetchDocumentMetadata issues one SysContent point query per distinct
+        // document, so enriching the raw pool pays for documents whose only chunks are about to be dropped:
+        // the score is on the Embedding itself and needs no metadata to read. HybridSearchService already
+        // runs in this order.
+        List<Embedding> retained = applyScoreThreshold(vectorResult.getEmbeddings(), minScore);
+
         Map<String, SectionMap> sectionMaps = new ConcurrentHashMap<>();
-        Map<String, SourceDocument> documentCache = fetchDocumentMetadata(vectorResult.getEmbeddings(), sectionMaps);
-        List<SearchHit> hits = buildSearchHits(vectorResult.getEmbeddings(), documentCache, sectionMaps, minScore);
+        Map<String, SourceDocument> documentCache = fetchDocumentMetadata(retained, sectionMaps);
+        List<SearchHit> hits = buildSearchHits(retained, documentCache, sectionMaps);
         long totalCount = vectorResult.getTotalCount() != null ? vectorResult.getTotalCount() : hits.size();
 
         return new VariantResult(hits, queryVector.size(), totalCount);
     }
 
+    /**
+     * The kNN call, deepened while a document budget is starved.
+     *
+     * <p>Re-queries at a doubled limit rather than paging: {@code MultiTypeVectorSearchService.Request} has
+     * no offset component, and a global offset is not expressible across a per-embedding-type merge, since
+     * page 2 of a merge is not the merge of each type's page 2. Each probe discards the previous result
+     * rather than merging it, because a kNN result at a larger limit is a superset in rank order, so merging
+     * would buy nothing and risk counting a chunk twice. The query vector is already embedded, so a deeper
+     * probe pays only for kNN.</p>
+     *
+     * <p>Stops as soon as hxpr returns fewer rows than asked: that means the filtered index is exhausted and
+     * no deeper probe can find another document.</p>
+     */
+    private VectorSearchResult probeForDocuments(QueryVariant variant,
+                                                 List<Double> queryVector,
+                                                 SemanticSearchRequest request,
+                                                 String filter,
+                                                 ResultBudget budget,
+                                                 double minScore) {
+        int limit = budget.fetchK();
+        VectorSearchResult result = vectorLegTraced(variant, queryVector, request, filter, limit);
+
+        if (!budget.documentBudget()) {
+            return result;
+        }
+
+        for (int probe = 1; probe < MAX_VECTOR_PROBES && limit < MAX_FETCH_K; probe++) {
+            int rows = rowCount(result);
+            if (rows < limit) {
+                break;
+            }
+            int documents = distinctDocuments(result, minScore);
+            if (documents >= budget.topDocuments()) {
+                break;
+            }
+
+            int deeper = Math.min(limit * 2, MAX_FETCH_K);
+            log.debug("Document budget starved: {} of {} documents in {} rows; re-querying at limit {}",
+                    documents, budget.topDocuments(), rows, deeper);
+            limit = deeper;
+            result = vectorLegTraced(variant, queryVector, request, filter, limit);
+        }
+        return result;
+    }
+
+    private VectorSearchResult vectorLegTraced(QueryVariant variant, List<Double> queryVector,
+                                               SemanticSearchRequest request, String filter, int limit) {
+        return traced("rag.search.vector",
+                () -> vectorLeg(variant, queryVector, request.getEmbeddingType(), filter, limit));
+    }
+
+    private static int rowCount(VectorSearchResult result) {
+        return result == null || result.getEmbeddings() == null ? 0 : result.getEmbeddings().size();
+    }
+
+    /** Distinct documents among the candidates that would survive the threshold. */
+    private static int distinctDocuments(VectorSearchResult result, double minScore) {
+        if (result == null || result.getEmbeddings() == null) {
+            return 0;
+        }
+        Set<String> docIds = new HashSet<>();
+        for (Embedding embedding : result.getEmbeddings()) {
+            if (scoreOf(embedding) >= minScore && embedding.getSysembedDocId() != null) {
+                docIds.add(embedding.getSysembedDocId());
+            }
+        }
+        return docIds.size();
+    }
+
     private SemanticSearchResponse response(SemanticSearchRequest request,
                                             List<SearchHit> hits,
+                                            ResultBudget budget,
                                             int vectorDimension,
                                             long totalCount,
                                             long searchTimeMs) {
@@ -372,6 +535,11 @@ public class SemanticSearchService {
                 .vectorDimension(vectorDimension)
                 .resultCount(hits.size())
                 .totalCount(totalCount)
+                // Reported whatever the caller asked in: a chunk-oriented caller otherwise recomputes it by
+                // grouping the hits, and under a document budget it is how a short answer is read correctly.
+                .documentCount(DocumentGroupSelector.documentCount(hits))
+                .appliedTopDocuments(budget.topDocuments())
+                .appliedChunksPerDocument(budget.documentBudget() ? budget.chunksPerDocument() : null)
                 .searchTimeMs(searchTimeMs)
                 .results(hits)
                 .build();
@@ -586,38 +754,54 @@ public class SemanticSearchService {
     // Result building
     // ---------------------------------------------------------------
 
-    private List<SearchHit> buildSearchHits(List<Embedding> embeddings,
-                                            Map<String, SourceDocument> documentCache,
-                                            Map<String, SectionMap> sectionMaps,
-                                            double minScore) {
-        List<SearchHit> hits = new ArrayList<>();
-        int rank = 1;
-
-        if (log.isDebugEnabled()) {
-            long wouldFilter = embeddings.stream()
-                    .filter(e -> (e.getSysembedScore() != null ? e.getSysembedScore() : 0.0) < minScore)
-                    .count();
-            log.debug("Score filter: minScore={} candidates={} filtered={} passing={}",
-                    minScore, embeddings.size(), wouldFilter, embeddings.size() - wouldFilter);
-        }
-
+    /**
+     * The candidates scoring at or above {@code minScore}, in the order hxpr returned them.
+     *
+     * <p>Separated from {@link #buildSearchHits} so the threshold can run before enrichment. The
+     * per-candidate diagnostics stay here, since this is now the only place that sees a rejected
+     * candidate.</p>
+     */
+    private static List<Embedding> applyScoreThreshold(List<Embedding> embeddings, double minScore) {
+        List<Embedding> retained = new ArrayList<>(embeddings.size());
         int candidateIndex = 0;
+
         for (Embedding embedding : embeddings) {
-            double score = embedding.getSysembedScore() != null ? embedding.getSysembedScore() : 0.0;
+            double score = scoreOf(embedding);
             candidateIndex++;
 
             if (log.isDebugEnabled()) {
-                String preview = embedding.getSysembedText() != null
-                        ? embedding.getSysembedText().substring(0, Math.min(60, embedding.getSysembedText().length()))
-                        : "";
+                String text = embedding.getSysembedText();
+                String preview = text != null ? text.substring(0, Math.min(60, text.length())) : "";
                 log.debug("  Candidate [{}] docId={} score={} {}\"{}...\"",
                         candidateIndex, embedding.getSysembedDocId(), String.format("%.3f", score),
                         score < minScore ? "[FILTERED] " : "", preview);
             }
 
-            if (score < minScore) {
-                continue;
+            if (score >= minScore) {
+                retained.add(embedding);
             }
+        }
+
+        if (log.isDebugEnabled()) {
+            log.debug("Score filter: minScore={} candidates={} filtered={} passing={}",
+                    minScore, embeddings.size(), embeddings.size() - retained.size(), retained.size());
+        }
+        return retained;
+    }
+
+    private static double scoreOf(Embedding embedding) {
+        return embedding.getSysembedScore() != null ? embedding.getSysembedScore() : 0.0;
+    }
+
+    /** Builds hits from candidates that have already passed the score threshold. */
+    private List<SearchHit> buildSearchHits(List<Embedding> embeddings,
+                                            Map<String, SourceDocument> documentCache,
+                                            Map<String, SectionMap> sectionMaps) {
+        List<SearchHit> hits = new ArrayList<>();
+        int rank = 1;
+
+        for (Embedding embedding : embeddings) {
+            double score = scoreOf(embedding);
 
             String chunkText = embedding.getSysembedText();
             String docId = embedding.getSysembedDocId();

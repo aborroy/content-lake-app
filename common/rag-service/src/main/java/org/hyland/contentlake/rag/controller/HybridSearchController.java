@@ -44,6 +44,17 @@ public class HybridSearchController {
             );
         }
 
+        // A non-positive document budget is rejected rather than clamped, because unlike a too-large value
+        // there is no sensible reading of it: "zero documents" is not the same request with a bound applied.
+        if (isNonPositive(request.getTopDocuments()) || isNonPositive(request.getChunksPerDocument())) {
+            return ResponseEntity.badRequest().body(
+                    HybridSearchResponse.builder()
+                            .query(request.getQuery())
+                            .resultCount(0)
+                            .build()
+            );
+        }
+
         if (!hybridSearchProperties.isEnabled()) {
             return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(
                     HybridSearchResponse.builder()
@@ -54,10 +65,17 @@ public class HybridSearchController {
             );
         }
 
-        log.debug("Hybrid search request: query=\"{}\", strategy={}, maxResults={}",
-                request.getQuery(), request.getStrategy(), request.getMaxResults());
+        log.debug("Hybrid search request: query=\"{}\", strategy={}, maxResults={}, topDocuments={}, "
+                        + "chunksPerDocument={}",
+                request.getQuery(), request.getStrategy(), request.getMaxResults(),
+                request.getTopDocuments(), request.getChunksPerDocument());
 
         HybridSearchResponse response = hybridSearchService.search(request);
         return ResponseEntity.ok(response);
+    }
+
+    /** A supplied budget of zero or less. Absent (null) is not a budget and is not rejected. */
+    private static boolean isNonPositive(Integer value) {
+        return value != null && value <= 0;
     }
 }

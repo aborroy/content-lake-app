@@ -31,7 +31,7 @@ class DocumentDiversityScopeTest {
         // endpoints, which an A/B against one fixed index caught and no unit test would have.
         assertThat(SemanticSearchRequest.builder().query("q").build().isSkipDocumentDiversity()).isFalse();
         assertThat(new SemanticSearchRequest().isSkipDocumentDiversity()).isFalse();
-        assertThat(new SemanticSearchRequest("q", 5, null, null, null, null, 0.0, false)
+        assertThat(new SemanticSearchRequest("q", 5, null, null, null, null, null, null, 0.0, false)
                 .isSkipDocumentDiversity()).isFalse();
     }
 

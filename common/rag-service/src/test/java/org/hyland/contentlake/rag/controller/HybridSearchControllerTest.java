@@ -39,6 +39,39 @@ class HybridSearchControllerTest {
         verifyNoInteractions(hybridSearchService);
     }
 
+    /**
+     * A zero or negative document budget is rejected, not clamped (#135). Unlike a value over the maximum,
+     * it has no sensible reading: "zero documents" is not the same request with a bound applied. The check
+     * runs before the enabled check, so no service stubbing is needed here.
+     */
+    @Test
+    void search_nonPositiveDocumentBudget_returnsBadRequest() {
+        for (HybridSearchRequest request : java.util.List.of(
+                HybridSearchRequest.builder().query("test").topDocuments(0).build(),
+                HybridSearchRequest.builder().query("test").topDocuments(-1).build(),
+                HybridSearchRequest.builder().query("test").chunksPerDocument(0).build(),
+                HybridSearchRequest.builder().query("test").chunksPerDocument(-5).build())) {
+
+            ResponseEntity<HybridSearchResponse> response = controller.search(request);
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(response.getBody()).isNotNull();
+            assertThat(response.getBody().getResultCount()).isZero();
+        }
+        verifyNoInteractions(hybridSearchService);
+    }
+
+    /** Absence must not be read as zero, or every caller that never mentioned documents would get a 400. */
+    @Test
+    void search_withNoDocumentBudget_isNotRejected() {
+        when(hybridSearchProperties.isEnabled()).thenReturn(true);
+        HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
+        when(hybridSearchService.search(request))
+                .thenReturn(HybridSearchResponse.builder().query("test").build());
+
+        assertThat(controller.search(request).getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
     @Test
     void search_whenDisabled_returnsServiceUnavailable() {
         when(hybridSearchProperties.isEnabled()).thenReturn(false);

@@ -22,9 +22,32 @@ public class SemanticSearchRequest {
     /** Free-text query to embed and search. */
     private String query;
 
-    /** Maximum number of results to return (default 5, max 50). */
+    /** Maximum number of chunks to return (default 5, max 50). */
     @Builder.Default
     private int topK = 5;
+
+    /**
+     * Distinct source documents to return chunks from (max 50), or {@code null} for chunk-oriented paging.
+     *
+     * <p>{@link #topK} is a budget of chunks and a document contributes every chunk it has, so ten results
+     * can be two documents (#135). When this is set it owns the budget and {@code topK} is ignored: the
+     * response carries chunks of up to this many documents, at most {@link #chunksPerDocument} from each.</p>
+     *
+     * <p>Nullable rather than a primitive so "I said nothing about documents" is distinguishable from
+     * "zero documents". Every existing caller sends {@code topK} with its default, so a rule where the
+     * smaller of the two binds would have made {@code topDocuments: 20} silently return 5 chunks.</p>
+     */
+    private Integer topDocuments;
+
+    /**
+     * Most chunks to take from any one document (max 10), or {@code null} to use
+     * {@code rag.retrieval.document-diversity.max-chunks-per-document}.
+     *
+     * <p>Ships with {@link #topDocuments} because without it that field has no defined meaning when the
+     * configured cap is disabled: nothing would bound how many chunks one document occupies. With it the
+     * budget is the product of two request-visible numbers.</p>
+     */
+    private Integer chunksPerDocument;
 
     /** Optional HXQL filter to scope the search (appended to the permission filter). */
     private String filter;

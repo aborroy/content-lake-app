@@ -51,10 +51,29 @@ public class HybridSearchResponse {
      */
     private Integer queryVariants;
 
+    /**
+     * Distinct source documents the returned chunks belong to.
+     *
+     * <p>See {@link SemanticSearchResponse#getDocumentCount()}: populated on every response, and the only
+     * way to read a short answer under a document budget correctly.</p>
+     */
+    private Integer documentCount;
+
+    /** The document budget actually applied, after clamping, or null when none was requested. */
+    private Integer appliedTopDocuments;
+
+    /** The per-document chunk budget actually applied, or null when no document budget was requested. */
+    private Integer appliedChunksPerDocument;
+
     /** Time taken for the full hybrid search in milliseconds. */
     private long searchTimeMs;
 
-    /** Ordered list of fused search hits. */
+    /**
+     * Ordered list of fused search hits.
+     *
+     * <p>Flat, with {@code sourceDocument} repeated per hit. See
+     * {@link SemanticSearchResponse#getResults()} for what a document budget does to the ordering.</p>
+     */
     private List<HybridHit> results;
 
     @Data

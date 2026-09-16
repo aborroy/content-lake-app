@@ -37,10 +37,36 @@ public class SemanticSearchResponse {
     /** Total matching embeddings (approximate when trackTotalCount is false). */
     private long totalCount;
 
+    /**
+     * Distinct source documents the returned chunks belong to.
+     *
+     * <p>Populated on every response, not only when {@code topDocuments} was requested, because it is what
+     * a chunk-oriented caller otherwise recomputes by grouping {@code results} on
+     * {@code sourceDocument.documentId}.</p>
+     *
+     * <p>With {@code topDocuments} it is also the only way to read a short answer correctly: a selection
+     * carries no chunks from a document past the budget and no filler from one already at
+     * {@code chunksPerDocument}, so fewer chunks than the budget allows means the corpus held fewer
+     * matching documents, not that the budget miscomputed.</p>
+     */
+    private Integer documentCount;
+
+    /** The document budget actually applied, after clamping, or null when none was requested. */
+    private Integer appliedTopDocuments;
+
+    /** The per-document chunk budget actually applied, or null when no document budget was requested. */
+    private Integer appliedChunksPerDocument;
+
     /** Time taken for the search in milliseconds. */
     private long searchTimeMs;
 
-    /** Ordered list of search hits. */
+    /**
+     * Ordered list of search hits.
+     *
+     * <p>Flat, with {@code sourceDocument} repeated per hit, whether or not {@code topDocuments} was
+     * requested. Under a document budget the hits of one document are contiguous, sitting at the position
+     * of that document's best chunk, so {@code score} is not monotonically decreasing down the list.</p>
+     */
     private List<SearchHit> results;
 
     @Data

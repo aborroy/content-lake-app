@@ -273,6 +273,27 @@ search:
     default-min-score: ${SEARCH_HYBRID_MIN_SCORE:0.01}
 ```
 
+#### Result Shaping On The Search Endpoints
+
+How much of a result set one document may occupy, applied to `/api/rag/search/semantic` and
+`/api/rag/search/hybrid` and **not** to the RAG generation path, which asks for chunks and measurably loses
+answer quality when they are capped:
+
+```yaml
+rag:
+  retrieval:
+    document-diversity:
+      enabled: ${RAG_DOCUMENT_DIVERSITY_ENABLED:true}
+      max-chunks-per-document: ${RAG_DOCUMENT_DIVERSITY_MAX_CHUNKS_PER_DOCUMENT:2}
+      over-fetch-factor: ${RAG_DOCUMENT_DIVERSITY_OVER_FETCH_FACTOR:3}
+```
+
+| Setting | Effect |
+|---|---|
+| `enabled` | Whether the per-document cap applies at all. On by default: without it a single long document can fill a whole `topK`, which a caller cannot distinguish from the other documents not being indexed |
+| `max-chunks-per-document` | Chunks one document may contribute before others are preferred. Chunks over the cap are deferred behind other documents' best ones, not dropped, so this changes which chunks arrive and never how many. It is also the fallback for a `topDocuments` request that sends no `chunksPerDocument`, and the request field is its per-request override |
+| `over-fetch-factor` | How far past `topK` to retrieve, as a multiple, so the cap has other documents' chunks available to promote. Bounded by the endpoint's own maximum |
+
 #### Query-Side Security
 
 Everything that shapes the per-request permission predicate lives under `rag.security.*`:

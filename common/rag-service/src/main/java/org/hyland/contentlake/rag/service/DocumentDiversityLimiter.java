@@ -108,8 +108,13 @@ final class DocumentDiversityLimiter {
      * A hit with none of the three counts as its own document rather than joining a shared "unknown"
      * bucket, because grouping unrelated hits together would cap them against each other and drop real
      * results from the capped pass.</p>
+     *
+     * <p>Shared with {@link DocumentGroupSelector} rather than duplicated: one caps how much of a chunk
+     * budget a document may take and the other selects whole documents, so the two disagreeing on what
+     * counts as one document would make {@code topDocuments} and {@code chunksPerDocument} count
+     * different things.</p>
      */
-    private static String documentKey(SearchHit hit) {
+    static String documentKey(SearchHit hit) {
         if (hit.getSourceDocument() != null) {
             String documentId = hit.getSourceDocument().getDocumentId();
             if (documentId != null && !documentId.isBlank()) {

@@ -334,6 +334,45 @@ Results can include both Alfresco and Nuxeo hits in the same response. Each hit 
 * Applied server-side after vector retrieval
 * Can be overridden per request
 
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `query` | String | *required* | Query text; embedded and matched against the chunk vectors |
+| `topK` | int | `5` | Chunks to return, maximum 50. A long document may contribute several |
+| `topDocuments` | Integer | -- | Distinct documents to return chunks from, maximum 50. Owns the budget when present |
+| `chunksPerDocument` | Integer | -- | Chunks any one document may contribute, maximum 10 |
+| `minScore` | Double | `0.2` | Minimum cosine score a chunk must reach; an explicit `0.0` disables the threshold |
+| `filter` | String | -- | Additional raw HXQL filter |
+| `namedQuery` | String | -- | Server-side named query resolved to an HXQL fragment |
+| `sourceType` | String | -- | Restricts the request to one source system, for example `alfresco` or `nuxeo` |
+| `embeddingType` | String | -- | Restricts retrieval to one embedding type; all types when absent |
+
+`topK` is a budget of chunks and `topDocuments` a budget of documents. When `topDocuments` is present it owns
+the result budget and `topK` is ignored; when it is absent nothing about the request changes. A value above a
+maximum is clamped rather than rejected, and the clamped value is reported back in `appliedTopDocuments` /
+`appliedChunksPerDocument`; zero or negative is rejected with 400, having no such reading.
+
+The chunks a document contributes are bounded either way: by `chunksPerDocument` when the request sets it,
+otherwise by `rag.retrieval.document-diversity.max-chunks-per-document`. So a `topDocuments` answer can be
+shorter than `topDocuments * chunksPerDocument`, because a document outside the budget is never admitted to
+fill the remainder. `documentCount` is what says how many documents actually answered.
+
+```bash
+curl -X POST http://localhost:9091/api/rag/search/semantic -u admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{ "query": "contract renewal terms", "topDocuments": 10, "chunksPerDocument": 2 }'
+```
+
+| Response Field | Type | Description |
+|---------------|------|-------------|
+| `query` | String | Original query |
+| `resultCount` | int | Chunks returned |
+| `documentCount` | Integer | Distinct documents those chunks belong to; always reported |
+| `appliedTopDocuments` | Integer | The document budget as applied after clamping; absent when none was asked for |
+| `appliedChunksPerDocument` | Integer | The per-document bound as applied; absent when no document budget was asked for |
+| `totalCount` | Integer | Matching chunks in the index, where hxpr reports it |
+| `searchTimeMs` | long | Total search execution time |
+| `results[]` | array | Chunks, best first, with `rank`, `score`, `chunkText`, `sourceDocument` and `chunkMetadata` |
+
 #### Hybrid Search
 
 Run vector + keyword retrieval and fuse results with `rrf` (default) or `weighted` scoring:
@@ -360,6 +399,10 @@ curl -X POST http://localhost:9091/api/rag/search/hybrid -u admin:admin \
 
 Structured metadata filters are optional. You can still pass a raw HXQL `filter` for advanced cases.
 Use `sourceType` when you want to restrict the request to a single source system without writing raw HXQL.
+
+`topDocuments` and `chunksPerDocument` behave exactly as on semantic search, taking the place of `maxResults`
+when present. Asking for one raises the candidates each leg retrieves, since a document budget cannot be met
+out of a pool the size of the answer; `candidateCount` and `maxResults` keep their own maximum of 100.
 
 Response example:
 
@@ -404,6 +447,8 @@ Response example:
 | `normalization` | String | `max` | Weighted score normalization: `max` or `minmax` |
 | `candidateCount` | int | `20` | Candidates retrieved from each leg before fusion |
 | `maxResults` | int | `5` | Final fused result limit |
+| `topDocuments` | Integer | -- | Distinct documents to return chunks from, maximum 50. Owns the budget when present, and `maxResults` is ignored |
+| `chunksPerDocument` | Integer | -- | Chunks any one document may contribute, maximum 10 |
 | `vectorWeight` | double | `0.7` | Weight when `strategy=weighted` |
 | `textWeight` | double | `0.3` | Weight when `strategy=weighted` |
 | `filter` | String | -- | Additional raw HXQL filter |
@@ -423,6 +468,9 @@ Response example:
 | `resultCount` | int | Number of fused results returned |
 | `vectorCandidates` | int | Number of vector candidates retrieved |
 | `keywordCandidates` | int | Number of keyword candidates retrieved |
+| `documentCount` | Integer | Distinct documents the fused results belong to; always reported |
+| `appliedTopDocuments` | Integer | The document budget as applied after clamping; absent when none was asked for |
+| `appliedChunksPerDocument` | Integer | The per-document bound as applied; absent when no document budget was asked for |
 | `searchTimeMs` | long | Total hybrid search execution time |
 | `results[].score` | double | Fused score (RRF or weighted) |
 | `results[].vectorScore` | Double | Raw vector score, if available |

@@ -1117,6 +1117,194 @@ class HybridSearchServiceTest {
     }
 
     // -----------------------------------------------------------------------
+    // Document budget (#135)
+    // -----------------------------------------------------------------------
+
+    /**
+     * {@code topDocuments} on the hybrid endpoint.
+     *
+     * <p>Document ids here are deliberately not uuid-shaped, so {@code fetchDocumentMetadata} skips them
+     * and each hit carries the bare document id. Selection reads the id off the fused chunk, not off the
+     * enriched metadata, which is what makes that possible.</p>
+     */
+    @Nested
+    class DocumentBudget {
+
+        /** One candidate chunk. Every getter read by the vector leg is stubbed, so none goes unused. */
+        private Embedding chunkOf(String docId, String embeddingId) {
+            Embedding emb = mock(Embedding.class);
+            when(emb.getSysembedDocId()).thenReturn(docId);
+            when(emb.getSysembedId()).thenReturn(embeddingId);
+            when(emb.getSysembedText()).thenReturn(docId + "/" + embeddingId);
+            return emb;
+        }
+
+        /**
+         * A service whose vector leg returns {@code embeddings} and whose keyword leg returns nothing, so
+         * the fused order is the candidate order. Built up front: nesting a when(...) inside another
+         * when(...) leaves Mockito mid-stubbing.
+         */
+        private HybridSearchService stubbedService(List<Embedding> embeddings) {
+            when(properties.getStrategy()).thenReturn("rrf");
+            when(properties.getRrfK()).thenReturn(60);
+            when(securityContextService.getCurrentUsername()).thenReturn("user");
+            when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1));
+            when(embeddingService.getModelName()).thenReturn("test-model");
+
+            VectorSearchResult result = mock(VectorSearchResult.class);
+            when(result.getEmbeddings()).thenReturn(embeddings);
+            when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(result);
+
+            HybridSearchService svc = spy(service);
+            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
+            doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
+            return svc;
+        }
+
+        private List<String> documentIdsOf(HybridSearchResponse response) {
+            return response.getResults().stream()
+                    .map(hit -> hit.getSourceDocument().getDocumentId())
+                    .toList();
+        }
+
+        @Test
+        void search_withTopDocuments_returnsChunksOfThatManyDistinctDocuments() {
+            HybridSearchService svc = stubbedService(List.of(
+                    chunkOf("doc-a", "a1"),
+                    chunkOf("doc-a", "a2"),
+                    chunkOf("doc-b", "b1"),
+                    chunkOf("doc-c", "c1")));
+
+            HybridSearchResponse response = svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .topDocuments(2)
+                    .chunksPerDocument(1)
+                    .build());
+
+            assertThat(documentIdsOf(response)).containsExactly("doc-a", "doc-b");
+            assertThat(response.getResultCount()).isEqualTo(2);
+            assertThat(response.getDocumentCount()).isEqualTo(2);
+            assertThat(response.getAppliedTopDocuments()).isEqualTo(2);
+            assertThat(response.getAppliedChunksPerDocument()).isEqualTo(1);
+        }
+
+        /**
+         * The one behaviour that separates a document budget from the per-document cap: a document outside
+         * the budget is not admitted to fill the chunk budget, so the answer is short rather than wrong.
+         */
+        @Test
+        void search_withTopDocuments_doesNotBackfillFromDocumentsOutsideTheBudget() {
+            HybridSearchService svc = stubbedService(List.of(
+                    chunkOf("doc-a", "a1"),
+                    chunkOf("doc-a", "a2"),
+                    chunkOf("doc-a", "a3"),
+                    chunkOf("doc-b", "b1")));
+
+            HybridSearchResponse response = svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .topDocuments(1)
+                    .chunksPerDocument(2)
+                    .build());
+
+            assertThat(documentIdsOf(response)).containsExactly("doc-a", "doc-a");
+            assertThat(response.getDocumentCount()).isEqualTo(1);
+        }
+
+        /** With no per-request override the budget falls back to the configured cap, not to unlimited. */
+        @Test
+        void search_withNoPerDocumentOverride_usesTheConfiguredCap() {
+            HybridSearchService svc = stubbedService(List.of(
+                    chunkOf("doc-a", "a1"),
+                    chunkOf("doc-a", "a2"),
+                    chunkOf("doc-a", "a3"),
+                    chunkOf("doc-b", "b1")));
+
+            HybridSearchResponse response = svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .topDocuments(1)
+                    .build());
+
+            assertThat(response.getResultCount()).isEqualTo(2);
+            assertThat(response.getAppliedChunksPerDocument()).isEqualTo(2);
+        }
+
+        /** A document budget is unsatisfiable out of a pool the size of the answer, so the pool grows. */
+        @Test
+        void search_withTopDocuments_asksTheLegsPastTheConfiguredCandidateCount() {
+            when(properties.getCandidateCount()).thenReturn(20);
+            HybridSearchService svc = stubbedService(List.of());
+
+            svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .topDocuments(50)
+                    .chunksPerDocument(10)
+                    .build());
+
+            // 50 x 10 caps at the 200-chunk ceiling, doubled so the selection has documents to choose between.
+            verify(hxprService).vectorSearch(any(), any(), any(), eq(400));
+        }
+
+        @Test
+        void search_withoutTopDocuments_asksTheLegsForTheConfiguredCandidateCount() {
+            when(properties.getCandidateCount()).thenReturn(20);
+            when(properties.getMaxResults()).thenReturn(5);
+            HybridSearchService svc = stubbedService(List.of());
+
+            svc.search(HybridSearchRequest.builder().query("test").build());
+
+            verify(hxprService).vectorSearch(any(), any(), any(), eq(20));
+        }
+
+        /** Raising the pool must never lower it: a small budget keeps whatever the deployment configured. */
+        @Test
+        void search_withASmallDocumentBudget_doesNotShrinkTheCandidatePool() {
+            when(properties.getCandidateCount()).thenReturn(100);
+            HybridSearchService svc = stubbedService(List.of());
+
+            svc.search(HybridSearchRequest.builder()
+                    .query("test")
+                    .topDocuments(2)
+                    .chunksPerDocument(1)
+                    .build());
+
+            verify(hxprService).vectorSearch(any(), any(), any(), eq(100));
+        }
+
+        @Test
+        void search_withoutTopDocuments_stillReportsDocumentCountAndNoAppliedBudget() {
+            when(properties.getCandidateCount()).thenReturn(20);
+            when(properties.getMaxResults()).thenReturn(10);
+            HybridSearchService svc = stubbedService(List.of(
+                    chunkOf("doc-a", "a1"),
+                    chunkOf("doc-a", "a2"),
+                    chunkOf("doc-b", "b1")));
+
+            HybridSearchResponse response = svc.search(HybridSearchRequest.builder().query("test").build());
+
+            assertThat(response.getResultCount()).isEqualTo(3);
+            assertThat(response.getDocumentCount()).isEqualTo(2);
+            assertThat(response.getAppliedTopDocuments()).isNull();
+            assertThat(response.getAppliedChunksPerDocument()).isNull();
+        }
+
+        /** Without this the same query with and without a budget returns whichever ran first. */
+        @Test
+        void theDocumentBudgetIsPartOfTheCacheKey() {
+            String chunks = cacheKey(HybridSearchRequest.builder().query("test").build());
+            String documents = cacheKey(HybridSearchRequest.builder().query("test").topDocuments(10).build());
+            String perDocument = cacheKey(HybridSearchRequest.builder()
+                    .query("test").topDocuments(10).chunksPerDocument(3).build());
+
+            assertThat(chunks).isNotEqualTo(documents);
+            assertThat(documents).isNotEqualTo(perDocument);
+        }
+
+        private String cacheKey(HybridSearchRequest request) {
+            return ReflectionTestUtils.invokeMethod(service, "buildCacheKey", request);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Keyword search extraction
     // -----------------------------------------------------------------------
 

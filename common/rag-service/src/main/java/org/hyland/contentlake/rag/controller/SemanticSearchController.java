@@ -28,7 +28,7 @@ public class SemanticSearchController {
     /**
      * Executes a semantic search against the embedded chunks.
      *
-     * @param request search parameters (query, topK, filter, minScore)
+     * @param request search parameters (query, topK or topDocuments, filter, minScore)
      * @return ranked search results with similarity scores and metadata
      */
     @PostMapping
@@ -43,11 +43,30 @@ public class SemanticSearchController {
             );
         }
 
-        log.debug("Semantic search request: query=\"{}\", topK={}, minScore={}",
-                request.getQuery(), request.getTopK(), request.getMinScore());
+        // A non-positive document budget is rejected rather than clamped, because unlike a too-large value
+        // there is no sensible reading of it: "zero documents" is not the same request with a bound applied.
+        if (isNonPositive(request.getTopDocuments()) || isNonPositive(request.getChunksPerDocument())) {
+            return ResponseEntity.badRequest().body(
+                    SemanticSearchResponse.builder()
+                            .query(request.getQuery())
+                            .resultCount(0)
+                            .totalCount(0)
+                            .build()
+            );
+        }
+
+        log.debug("Semantic search request: query=\"{}\", topK={}, topDocuments={}, chunksPerDocument={}, "
+                        + "minScore={}",
+                request.getQuery(), request.getTopK(), request.getTopDocuments(),
+                request.getChunksPerDocument(), request.getMinScore());
 
         SemanticSearchResponse response = semanticSearchService.search(request);
         return ResponseEntity.ok(response);
+    }
+
+    /** A supplied budget of zero or less. Absent (null) is not a budget and is not rejected. */
+    private static boolean isNonPositive(Integer value) {
+        return value != null && value <= 0;
     }
 
     /**
