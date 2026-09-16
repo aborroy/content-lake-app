@@ -151,10 +151,9 @@ public class NuxeoDiscoveryService {
                 collectFromNode(child, scopeResolver, pageSize, discovered);
             }
 
-            if (children.size() < pageSize) {
-                break;
-            }
-            skip += children.size();
+            // Only an empty page ends a container, and the cursor advances by what was asked for rather
+            // than by what came back. The SPI does not promise a full page while more remains.
+            skip += pageSize;
         }
     }
 

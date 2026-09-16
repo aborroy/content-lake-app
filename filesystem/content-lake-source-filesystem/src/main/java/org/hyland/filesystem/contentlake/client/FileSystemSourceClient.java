@@ -15,6 +15,7 @@ import org.springframework.core.io.Resource;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -156,12 +157,26 @@ public class FileSystemSourceClient implements ContentSourceClient {
         }
     }
 
+    /**
+     * Converts one directory entry, dropping it only when it is no longer there.
+     *
+     * <p>A vanished entry, or a symlink whose target is gone, is a deletion: dropping it is what the
+     * reconciliation sweep should then act on, and it is the only case that reads as
+     * {@link NoSuchFileException}. Any other failure means the entry is there and could not be read -- a
+     * permission on the entry, a symlink loop, an unreachable mount -- and swallowing it would let the sweep
+     * read "not discovered" as "deleted at source" and remove a document that is still there. So it fails
+     * the listing, which fails the subtree and the job, before any sweep can run.</p>
+     */
     private SourceNode toSourceNodeQuietly(Path path) {
         try {
             return toSourceNode(path, Files.readAttributes(path, BasicFileAttributes.class));
-        } catch (IOException e) {
-            log.warn("Skipping unreadable filesystem entry {}: {}", path, e.getMessage());
+        } catch (NoSuchFileException e) {
+            log.debug("Filesystem entry {} is no longer there: {}", path, e.getMessage());
             return null;
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "Filesystem entry " + path + " is present but its attributes cannot be read, so a "
+                            + "discovery pass over this directory would be silently incomplete", e);
         }
     }
 

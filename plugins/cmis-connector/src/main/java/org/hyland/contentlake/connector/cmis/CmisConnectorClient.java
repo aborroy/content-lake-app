@@ -142,6 +142,14 @@ public class CmisConnectorClient implements ContentSourceClient {
         }
     }
 
+    /**
+     * One page of children, which may be shorter than {@code maxItems}.
+     *
+     * <p>The page window is a CMIS one and is applied before the objects are mapped, so anything that is
+     * neither a folder nor a document -- a relationship, a policy, an item -- drops out and shortens the
+     * page. {@code ContentSourceClient.getChildren} allows exactly that, which is why the host pages until it
+     * gets an empty list rather than until it gets a short one.</p>
+     */
     @Override
     public List<SourceNode> getChildren(String containerId, int skip, int maxItems) {
         CmisObject object;

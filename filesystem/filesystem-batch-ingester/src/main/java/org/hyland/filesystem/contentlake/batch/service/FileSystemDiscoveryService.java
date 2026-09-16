@@ -40,9 +40,11 @@ public class FileSystemDiscoveryService {
     /**
      * As {@link #discover}, but also reporting the pass's completeness.
      *
-     * <p>Complete on a normal return: an unreadable or missing root makes {@code client.getNode}
-     * throw, which propagates and fails the job before any sweep can run, and the walk has no path
-     * that silently skips a subtree.</p>
+     * <p>Complete on a normal return, and each of the three ways it could fail to be propagates rather
+     * than being swallowed: an unreadable or missing root makes {@code client.getNode} throw, a directory
+     * that will not list makes {@code client.getChildren} throw, and an entry that is present but whose
+     * attributes will not read does the same. The walk pages until it gets an empty page, so a directory
+     * whose entry count is not a multiple of the page size is not cut short either.</p>
      */
     public FileSystemDiscovery discoverTallied() {
         List<SourceNode> discovered = new ArrayList<>();
@@ -74,10 +76,9 @@ public class FileSystemDiscoveryService {
             for (SourceNode child : children) {
                 collect(child, discovered);
             }
-            if (children.size() < pageSize) {
-                break;
-            }
-            skip += children.size();
+            // Only an empty page ends a directory, and the cursor advances by what was asked for. A short
+            // page is not exhaustion: the client applies the page window before converting entries.
+            skip += pageSize;
         }
     }
 }

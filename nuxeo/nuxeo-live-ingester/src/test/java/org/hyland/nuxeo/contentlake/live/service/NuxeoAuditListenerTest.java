@@ -450,6 +450,66 @@ class NuxeoAuditListenerTest {
         verify(nodeSyncService).syncNode(fileNode);
     }
 
+    /**
+     * A page shorter than the page size is not an exhausted folder (#136). Ending there would leave the tail
+     * of the folder holding the ACLs it had before the change, which is a permission change that silently
+     * did not take effect.
+     */
+    @Test
+    void listen_permissionUpdate_onFolder_keepsPagingPastAShortPage() {
+        AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
+        OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
+        NuxeoAuditEntry securityUpdated = entry(58, "documentSecurityUpdated", "folder-58",
+                "2026-03-26T16:48:55.000Z", "2026-03-26T16:48:55.050Z");
+        SourceNode folder = folderNode("folder-58", List.of());
+        SourceNode first = sourceNode("child-1");
+        SourceNode second = sourceNode("child-2");
+        SourceNode third = sourceNode("child-3");
+
+        when(cursorStore.load("nuxeo:local")).thenReturn(Optional.of(initialCursor));
+        when(auditClient.fetchPage(initialCursor, windowEnd, 2)).thenReturn(pageOf(false, securityUpdated));
+        when(nuxeoClient.getNode("folder-58")).thenReturn(folder);
+        when(nuxeoClient.getChildren("folder-58", 0, 2)).thenReturn(List.of(first));
+        when(nuxeoClient.getChildren("folder-58", 2, 2)).thenReturn(List.of(second, third));
+        when(nuxeoClient.getChildren("folder-58", 4, 2)).thenReturn(List.of());
+        when(scopeResolver.isInScope(any())).thenReturn(true);
+
+        listener.listen();
+
+        verify(nodeSyncService).updatePermissions(first);
+        verify(nodeSyncService).updatePermissions(second);
+        verify(nodeSyncService).updatePermissions(third);
+        // The cursor advances by what was asked for, so a dropped entry cannot shift the next window.
+        verify(nuxeoClient, never()).getChildren("folder-58", 1, 2);
+    }
+
+    /** The same loop on the scope-change path, where a truncated tail keeps documents that left scope. */
+    @Test
+    void listen_folderScopeChange_keepsPagingPastAShortPage() {
+        AuditCursor initialCursor = new AuditCursor(OffsetDateTime.parse("2026-03-26T16:48:41.235Z"), 46);
+        OffsetDateTime windowEnd = OffsetDateTime.parse("2026-03-26T17:00:00Z");
+        NuxeoAuditEntry modified = entry(59, "documentModified", "folder-59",
+                "2026-03-26T16:48:56.000Z", "2026-03-26T16:48:56.050Z");
+        SourceNode folder = folderNode("folder-59", List.of("ContentLakeIndexed"));
+        SourceNode inScope = sourceNode("child-in");
+        SourceNode outOfScope = sourceNode("child-out");
+
+        when(cursorStore.load("nuxeo:local")).thenReturn(Optional.of(initialCursor));
+        when(auditClient.fetchPage(initialCursor, windowEnd, 2)).thenReturn(pageOf(false, modified));
+        when(nuxeoClient.getNode("folder-59")).thenReturn(folder);
+        when(nuxeoClient.getChildren("folder-59", 0, 2)).thenReturn(List.of(inScope));
+        when(nuxeoClient.getChildren("folder-59", 2, 2)).thenReturn(List.of(outOfScope));
+        when(nuxeoClient.getChildren("folder-59", 4, 2)).thenReturn(List.of());
+        when(scopeResolver.isInScope(inScope)).thenReturn(true);
+        when(scopeResolver.isInScope(outOfScope)).thenReturn(false);
+
+        listener.listen();
+
+        verify(nodeSyncService).syncNode(inScope);
+        // The document that left scope is on the second page, which the old loop never asked for.
+        verify(nodeSyncService).deleteNode(eq("child-out"), any());
+    }
+
     private static SourceNode sourceNode(String nodeId) {
         return new SourceNode(
                 nodeId,

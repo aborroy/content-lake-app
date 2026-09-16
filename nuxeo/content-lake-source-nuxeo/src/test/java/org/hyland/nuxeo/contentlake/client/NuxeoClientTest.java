@@ -260,6 +260,23 @@ class NuxeoClientTest {
         assertThat(enricherHeaders).containsOnly("acls");
     }
 
+    /**
+     * The walkers page until they get an empty list, so what this returns past the last entry is what ends
+     * every traversal over a Nuxeo folder.
+     */
+    @Test
+    void getChildren_returnsAnEmptyListPastTheLastEntry() throws IOException {
+        server.createContext("/nuxeo/api/v1/id/folder-1/@children", exchange -> writeJson(exchange, """
+                {
+                  "isNextPageAvailable": false,
+                  "entries": []
+                }
+                """));
+        server.start();
+
+        assertThat(client("file:content").getChildren("folder-1", 4, 2)).isEmpty();
+    }
+
     @Test
     void getNodeByPath_fetchesRepositoryPath() throws IOException {
         RequestCapture capture = new RequestCapture();

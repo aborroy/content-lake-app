@@ -86,6 +86,13 @@ public class DirectoryConnectorClient implements ContentSourceClient {
         }
     }
 
+    /**
+     * One page of directory entries, which may be shorter than {@code maxItems}.
+     *
+     * <p>The page window is applied before the entries are mapped, so dropping an unreadable one shortens
+     * the page. That is what {@code ContentSourceClient.getChildren} allows and why the host pages until it
+     * gets an empty list rather than until it gets a short one.</p>
+     */
     @Override
     public List<SourceNode> getChildren(String containerId, int skip, int maxItems) {
         Path directory = resolveInsideRoot(containerId);

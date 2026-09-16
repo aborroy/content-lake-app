@@ -174,6 +174,42 @@ public class AlfrescoClient implements ContentSourceClient {
      * @return list of children as Alfresco nodes
      */
     public List<Node> listChildren(String folderId, int skipCount, int maxItems) {
+        return listChildrenPage(folderId, skipCount, maxItems).nodes();
+    }
+
+    /**
+     * Lists all direct children of a folder by paging until Alfresco reports no more items.
+     *
+     * <p>Pages on the response's own {@code hasMoreItems} flag rather than on whether the page came back
+     * full. The two agree while the listing is a straight window over the association list, but the flag
+     * is the repository's own answer and stays right if a page is ever filtered on the way out, which is
+     * what {@code ContentSourceClient.getChildren} explicitly allows.</p>
+     *
+     * @param folderId folder node identifier
+     * @return list of children nodes
+     */
+    public List<Node> getAllChildren(String folderId) {
+        List<Node> allNodes = new ArrayList<>();
+        int skipCount = 0;
+
+        while (true) {
+            ChildPage page = listChildrenPage(folderId, skipCount, DEFAULT_PAGE_SIZE);
+            allNodes.addAll(page.nodes());
+
+            if (!page.hasMore()) {
+                break;
+            }
+            skipCount += DEFAULT_PAGE_SIZE;
+        }
+
+        return allNodes;
+    }
+
+    /** One page of children plus the repository's own answer to whether more remain. */
+    private record ChildPage(List<Node> nodes, boolean hasMore) {
+    }
+
+    private ChildPage listChildrenPage(String folderId, int skipCount, int maxItems) {
         NodeChildAssociationPaging response = nodesApi.listNodeChildren(
                 folderId,
                 skipCount,
@@ -187,37 +223,21 @@ public class AlfrescoClient implements ContentSourceClient {
         ).getBody();
 
         if (response == null || response.getList() == null || response.getList().getEntries() == null) {
-            return List.of();
+            return new ChildPage(List.of(), false);
         }
 
         List<Node> nodes = new ArrayList<>(response.getList().getEntries().size());
         for (NodeChildAssociationEntry entry : response.getList().getEntries()) {
             nodes.add(entry.getEntry());
         }
-        return nodes;
-    }
 
-    /**
-     * Lists all direct children of a folder by paging until exhaustion.
-     *
-     * @param folderId folder node identifier
-     * @return list of children nodes
-     */
-    public List<Node> getAllChildren(String folderId) {
-        List<Node> allNodes = new ArrayList<>();
-        int skipCount = 0;
-
-        while (true) {
-            List<Node> batch = listChildren(folderId, skipCount, DEFAULT_PAGE_SIZE);
-            allNodes.addAll(batch);
-
-            if (batch.size() < DEFAULT_PAGE_SIZE) {
-                break;
-            }
-            skipCount += DEFAULT_PAGE_SIZE;
-        }
-
-        return allNodes;
+        Boolean hasMore = response.getList().getPagination() != null
+                ? response.getList().getPagination().isHasMoreItems()
+                : null;
+        // No pagination block means an older or unexpected response shape. Fall back to the page-size
+        // heuristic there rather than stopping early, which would truncate the folder.
+        boolean more = hasMore != null ? hasMore : nodes.size() >= maxItems;
+        return new ChildPage(nodes, more);
     }
 
     /**

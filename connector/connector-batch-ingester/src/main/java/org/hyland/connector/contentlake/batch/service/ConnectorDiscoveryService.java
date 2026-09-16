@@ -16,7 +16,7 @@ import java.util.Set;
 /**
  * Walks a plugin connector's containers through the SPI alone, returning the in-scope documents (#132).
  *
- * <p>The same shape as the filesystem walker, with three differences that all come from not knowing the
+ * <p>The same shape as the filesystem walker, with four differences that all come from not knowing the
  * source:</p>
  *
  * <ul>
@@ -32,10 +32,22 @@ import java.util.Set;
  *       stops the reconciliation sweep from reading the gap as "deleted at source". A root that cannot be
  *       read is different and propagates, because a pass that enumerated none of its scope has nothing
  *       worth keeping.</li>
+ *   <li><strong>A page bound.</strong> Only an empty page ends a container, because a connector is allowed
+ *       to return a short one. A connector that ignores {@code skip} would therefore never end, so the
+ *       listing is abandoned as incomplete after {@link #MAX_PAGES_PER_CONTAINER} non-empty pages.</li>
  * </ul>
  */
 @Slf4j
 public class ConnectorDiscoveryService {
+
+    /**
+     * How many non-empty pages one container may produce before its listing is abandoned as incomplete.
+     *
+     * <p>Not a scope setting, so not configurable: it is the point past which the connector is misbehaving
+     * rather than the container being large. At the default page size that is a million entries in one
+     * container.</p>
+     */
+    private static final int MAX_PAGES_PER_CONTAINER = 10_000;
 
     private final ContentSourceClient client;
     private final ScopeResolver scopeResolver;
@@ -159,7 +171,19 @@ public class ConnectorDiscoveryService {
         }
 
         int skip = 0;
-        while (true) {
+        for (int page = 0; ; page++) {
+            if (page >= MAX_PAGES_PER_CONTAINER) {
+                // Only an empty page ends a container, so a connector that ignores skip and answers every
+                // listing with the same non-empty page would spin here forever. The other walkers drive
+                // in-tree clients that provably honour skip; this one drives whatever a jar implements.
+                String reason = "Container '" + node.nodeId() + "' returned " + MAX_PAGES_PER_CONTAINER
+                        + " non-empty pages without exhausting, so its listing was abandoned";
+                log.error("Connector discovery abandoned container {} after {} pages; the connector may be "
+                        + "ignoring the skip argument", node.nodeId(), MAX_PAGES_PER_CONTAINER);
+                reasons.add(reason);
+                return;
+            }
+
             List<SourceNode> children;
             try {
                 children = client.getChildren(node.nodeId(), skip, pageSize);
@@ -178,10 +202,10 @@ public class ConnectorDiscoveryService {
                     collect(child, discovered, visited, reasons, depth + 1);
                 }
             }
-            if (children.size() < pageSize) {
-                return;
-            }
-            skip += children.size();
+            // A connector may return fewer than pageSize entries after dropping what it cannot represent
+            // as a SourceNode, so a short page is not exhaustion. The cursor advances by what was asked
+            // for rather than by what came back, or those drops would shift every later page window.
+            skip += pageSize;
         }
     }
 }

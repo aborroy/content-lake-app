@@ -37,6 +37,7 @@ class ConnectorDiscoveryServiceTest {
         private final Map<String, List<String>> children = new LinkedHashMap<>();
         private final Set<String> unlistable = new java.util.LinkedHashSet<>();
         private final Set<String> unreadable = new java.util.LinkedHashSet<>();
+        private final Set<String> unmappable = new java.util.LinkedHashSet<>();
         private final AtomicInteger listings = new AtomicInteger();
         private String ownRoot;
 
@@ -59,6 +60,17 @@ class ConnectorDiscoveryServiceTest {
         /** A node the connector cannot even fetch, as opposed to one whose children it cannot list. */
         FakeSource unreadable(String id) {
             unreadable.add(id);
+            return this;
+        }
+
+        /**
+         * A child the connector counts inside the page window but cannot hand back as a SourceNode: a
+         * CMIS relationship, a directory entry whose attributes will not read. The page it lands in comes
+         * back short, which is exactly what must not be read as "container exhausted".
+         */
+        FakeSource unmappable(String id) {
+            unmappable.add(id);
+            nodes.put(id, node(id, false));
             return this;
         }
 
@@ -98,8 +110,12 @@ class ConnectorDiscoveryServiceTest {
             }
             List<String> ids = children.getOrDefault(containerId, List.of());
             List<SourceNode> page = new ArrayList<>();
+            // The page window is applied first and the unmappable entries dropped after, which is what
+            // makes a full window arrive as a short page.
             for (int i = skip; i < Math.min(ids.size(), skip + maxItems); i++) {
-                page.add(nodes.get(ids.get(i)));
+                if (!unmappable.contains(ids.get(i))) {
+                    page.add(nodes.get(ids.get(i)));
+                }
             }
             return page;
         }
@@ -130,7 +146,7 @@ class ConnectorDiscoveryServiceTest {
         assertThat(discovery.outcome().resolvedRootPaths()).containsExactly("/" + ROOT);
     }
 
-    /** A short final page ends the loop; a full one asks for more. */
+    /** Only an empty page ends the loop, so five entries at a page size of two cost four listings. */
     @Test
     void pagesThroughAContainer() {
         FakeSource source = new FakeSource().folder(ROOT, "a", "b", "c", "d", "e");
@@ -143,9 +159,98 @@ class ConnectorDiscoveryServiceTest {
 
         assertThat(discovery.nodes()).extracting(SourceNode::nodeId)
                 .containsExactly("a", "b", "c", "d", "e");
-        // 2 + 2 + 1: the short page ends it, so no fourth call.
-        assertThat(source.listings).hasValue(3);
+        // 2 + 2 + 1 + 0. The trailing empty listing is the price of not reading a short page as exhaustion.
+        assertThat(source.listings).hasValue(4);
         assertThat(discovery.outcome().complete()).isTrue();
+    }
+
+    /**
+     * The defect this walker was written with (#136). A connector that applies the page window and then
+     * drops what it cannot map returns a full window as a short page, and stopping there loses every
+     * entry after it. Worse than losing them: the pass still reports itself complete, so the
+     * reconciliation sweep deletes the tail from the index rather than merely missing it.
+     */
+    @Test
+    void keepsPagingPastAPageTheConnectorReturnedShort() {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ids.add("doc-" + i);
+        }
+        FakeSource source = new FakeSource().folder(ROOT, ids.toArray(String[]::new));
+        ids.forEach(source::document);
+        // Lands in the first page of two, which therefore comes back with one entry.
+        source.unmappable("doc-1");
+
+        ConnectorDiscoveryService.ConnectorDiscovery discovery =
+                discover(source, List.of(ROOT), props -> props.setPageSize(2));
+
+        assertThat(discovery.nodes()).extracting(SourceNode::nodeId)
+                .containsExactly("doc-0", "doc-2", "doc-3", "doc-4");
+        assertThat(discovery.outcome().complete()).isTrue();
+    }
+
+    /** The cursor advances by what was asked for, so a dropped entry does not shift the next window. */
+    @Test
+    void aDroppedEntryDoesNotShiftTheFollowingPages() {
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < 9; i++) {
+            ids.add("doc-" + i);
+        }
+        FakeSource source = new FakeSource().folder(ROOT, ids.toArray(String[]::new));
+        ids.forEach(source::document);
+        source.unmappable("doc-0");
+        source.unmappable("doc-4");
+
+        ConnectorDiscoveryService.ConnectorDiscovery discovery =
+                discover(source, List.of(ROOT), props -> props.setPageSize(3));
+
+        assertThat(discovery.nodes()).extracting(SourceNode::nodeId)
+                .containsExactly("doc-1", "doc-2", "doc-3", "doc-5", "doc-6", "doc-7", "doc-8");
+    }
+
+    /**
+     * With a short page no longer ending a listing, a connector that ignores skip has nothing to stop it.
+     * The bound abandons the container and says so, rather than spinning until the job is killed.
+     */
+    @Test
+    void aConnectorThatIgnoresSkipIsAbandonedRatherThanLoopingForever() {
+        ContentSourceClient stuck = new ContentSourceClient() {
+            @Override
+            public String getSourceId() {
+                return "instance-1";
+            }
+
+            @Override
+            public String getSourceType() {
+                return "sample";
+            }
+
+            @Override
+            public SourceNode getNode(String nodeId) {
+                return node(nodeId, ROOT.equals(nodeId));
+            }
+
+            @Override
+            public List<SourceNode> getChildren(String containerId, int skip, int maxItems) {
+                return List.of(node("always-the-same.txt", false));
+            }
+
+            @Override
+            public Resource downloadContent(String nodeId, String fileName) {
+                return null;
+            }
+
+            @Override
+            public byte[] getContent(String nodeId) {
+                return new byte[0];
+            }
+        };
+
+        ConnectorDiscoveryService.ConnectorDiscovery discovery = discover(stuck, List.of(ROOT));
+
+        assertThat(discovery.nodes()).extracting(SourceNode::nodeId).containsExactly("always-the-same.txt");
+        assertThat(discovery.outcome().complete()).isFalse();
+        assertThat(discovery.outcome().reasonSummary()).contains("without exhausting");
     }
 
     /**

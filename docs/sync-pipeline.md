@@ -272,6 +272,33 @@ WHERE ecm:path STARTSWITH '/default-domain/workspaces'
 
 ---
 
+## Container Listing and Paging
+
+Every walker enumerates a container through `ContentSourceClient.getChildren(containerId, skip,
+maxItems)`, and the contract on that method has two clauses a caller has to honour:
+
+- **A page shorter than `maxItems` does not mean the container is exhausted. Only an empty page does.**
+  An implementation may return fewer entries than asked for: several apply the source's own page window
+  and then drop what they cannot represent as a `SourceNode`. The filesystem client drops an entry that is
+  no longer there, the CMIS connector drops an object that is neither a folder nor a document, and the
+  sample directory connector drops one it cannot map. So a full window can arrive as a short page with
+  more still to come.
+- **The cursor advances by `maxItems`, not by the size of the page received.** Advancing by the size
+  received re-reads the entries that were dropped, which either loops forever or shifts every subsequent
+  page window.
+
+Terminating on a short page silently truncates the container, and the consequence is worse than a missed
+document: a discovery pass that reports itself complete hands the reconciliation sweep a list the sweep
+treats as authoritative, so the dropped tail is deleted from the index rather than merely missed. On the
+Nuxeo live path the same truncation leaves the tail of a folder holding the ACLs it had before the change.
+
+`connector-batch-ingester` adds one bound the others do not need, because it drives whatever a third-party
+jar implements: a container that returns 10 000 non-empty pages without exhausting has its listing
+abandoned and the pass marked incomplete, rather than spinning on a connector that ignores `skip`.
+
+`AlfrescoClient.getAllChildren` pages on the repository's own `hasMoreItems` flag instead, which is the
+same rule expressed through the source's answer rather than through an extra empty request.
+
 ## Deletion
 
 Deletion is one operation, `NodeSyncService.delete(SourceTombstone)`, reached from every source. A

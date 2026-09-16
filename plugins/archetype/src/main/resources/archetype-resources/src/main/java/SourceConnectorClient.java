@@ -72,6 +72,10 @@ public class SourceConnectorClient implements ContentSourceClient {
     @Override
     public List<SourceNode> getChildren(String containerId, int skip, int maxItems) {
         // TODO: list one page of children, honouring skip and maxItems. pageSize is the configured default.
+        // Returning fewer than maxItems is fine -- drop whatever you cannot map, the host keeps paging until
+        // it gets an empty list. Returning an empty list means "nothing at or beyond skip", so never use it
+        // to signal a transient failure: throw instead, and the host marks the pass incomplete rather than
+        // letting the reconciliation sweep read the gap as a deletion.
         return List.of();
     }
 

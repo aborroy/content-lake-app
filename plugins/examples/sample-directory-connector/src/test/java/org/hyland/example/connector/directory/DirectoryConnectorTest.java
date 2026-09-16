@@ -98,6 +98,31 @@ class DirectoryConnectorTest {
                 .extracting(SourceNode::name).containsExactly("c.txt");
     }
 
+    /**
+     * A page window is applied before entries are mapped, so an entry that cannot be mapped shortens the
+     * page without ending the directory. That is what a connector is allowed to do, and it is why the host
+     * pages until it gets an empty list and advances its cursor by what it asked for.
+     */
+    @Test
+    void aPageCanComeBackShortWithoutTheDirectoryBeingExhausted(@TempDir Path root) throws IOException {
+        for (String name : List.of("a.txt", "c.txt", "d.txt")) {
+            Files.writeString(root.resolve(name), name);
+        }
+        // Sorts between a.txt and c.txt, so it falls inside the first page window.
+        try {
+            Files.createSymbolicLink(root.resolve("b.txt"), root.resolve("never-existed.txt"));
+        } catch (IOException | UnsupportedOperationException e) {
+            org.junit.jupiter.api.Assumptions.abort("This filesystem does not support symbolic links");
+        }
+        ContentSourceClient client = plugin.createClient(context(root));
+        String rootId = client.getRootNodeId();
+
+        assertThat(client.getChildren(rootId, 0, 2)).extracting(SourceNode::name).containsExactly("a.txt");
+        assertThat(client.getChildren(rootId, 2, 2))
+                .extracting(SourceNode::name).containsExactly("c.txt", "d.txt");
+        assertThat(client.getChildren(rootId, 4, 2)).isEmpty();
+    }
+
     /** The pipeline deletes what downloadContent returns, so it must never be the source file. */
     @Test
     void downloadContentReturnsACopyThatCanBeDeletedSafely(@TempDir Path root) throws IOException {

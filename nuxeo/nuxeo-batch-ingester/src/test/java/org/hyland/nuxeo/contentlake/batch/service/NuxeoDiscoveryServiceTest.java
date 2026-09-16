@@ -19,6 +19,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -78,6 +79,58 @@ class NuxeoDiscoveryServiceTest {
 
         assertThat(discovered).extracting(SourceNode::nodeId).containsExactly("doc-3");
         verify(nuxeoClient).getNodeByPath("/default-domain/workspaces");
+    }
+
+    /**
+     * A page shorter than the page size is not an exhausted container (#136): the SPI lets a client return
+     * fewer entries than asked for, so only an empty page ends the loop. Ending on the short page here would
+     * drop the rest of the folder, and the pass would still report itself complete, which is what exposes
+     * the tail to the reconciliation sweep.
+     */
+    @Test
+    void childrenTraversalKeepsPagingPastAShortPage() {
+        props.getDiscovery().setMode(NuxeoProperties.Mode.CHILDREN);
+        SourceNode root = folderNode("folder-1", "/default-domain/workspaces");
+
+        // The scope resolver asks NXQL which ancestors carry the facets; none here, so scope falls back to
+        // the configured roots.
+        when(nuxeoClient.searchPageByNxql(anyString(), anyInt(), anyInt())).thenReturn(pageOf(false));
+        when(nuxeoClient.getNodeByPath("/default-domain/workspaces")).thenReturn(root);
+        when(nuxeoClient.getChildren("folder-1", 0, 2)).thenReturn(List.of(doc("doc-1")));
+        when(nuxeoClient.getChildren("folder-1", 2, 2)).thenReturn(List.of(doc("doc-2"), doc("doc-3")));
+        when(nuxeoClient.getChildren("folder-1", 4, 2)).thenReturn(List.of());
+
+        NuxeoDiscoveryService.NuxeoDiscovery discovery = service.discoverFromConfigTallied();
+
+        assertThat(discovery.nodes()).extracting(SourceNode::nodeId)
+                .containsExactly("doc-1", "doc-2", "doc-3");
+        assertThat(discovery.outcome().complete()).isTrue();
+    }
+
+    /**
+     * The cursor advances by what was asked for, not by what came back. Advancing by the page size received
+     * would re-read the entries a short page dropped, which shifts every later window.
+     */
+    @Test
+    void childrenTraversalAdvancesTheCursorByThePageSize() {
+        props.getDiscovery().setMode(NuxeoProperties.Mode.CHILDREN);
+        SourceNode root = folderNode("folder-1", "/default-domain/workspaces");
+
+        // The scope resolver asks NXQL which ancestors carry the facets; none here, so scope falls back to
+        // the configured roots.
+        when(nuxeoClient.searchPageByNxql(anyString(), anyInt(), anyInt())).thenReturn(pageOf(false));
+        when(nuxeoClient.getNodeByPath("/default-domain/workspaces")).thenReturn(root);
+        when(nuxeoClient.getChildren("folder-1", 0, 2)).thenReturn(List.of(doc("doc-1")));
+        when(nuxeoClient.getChildren("folder-1", 2, 2)).thenReturn(List.of());
+
+        service.discoverFromConfig();
+
+        verify(nuxeoClient).getChildren("folder-1", 2, 2);
+        verify(nuxeoClient, never()).getChildren("folder-1", 1, 2);
+    }
+
+    private static SourceNode doc(String nodeId) {
+        return fileNode(nodeId, "/default-domain/workspaces/finance/" + nodeId + ".pdf", "File", "project");
     }
 
     private static SourceNode fileNode(String nodeId, String fullPath, String type, String lifecycleState) {

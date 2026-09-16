@@ -210,10 +210,9 @@ public class NuxeoAuditListener {
                     }
                 }
             }
-            if (children.size() < pageSize) {
-                break;
-            }
-            skip += children.size();
+            // Only an empty page ends a container, and the cursor advances by what was asked for. Ending
+            // on a short page here leaves the tail of the folder with the ACLs it had before the change.
+            skip += pageSize;
         }
     }
 
@@ -287,10 +286,9 @@ public class NuxeoAuditListener {
                     nodeSyncService.updatePermissions(child);
                 }
             }
-            if (children.size() < pageSize) {
-                break;
-            }
-            skip += children.size();
+            // Only an empty page ends a container, and the cursor advances by what was asked for. Ending
+            // on a short page here leaves the tail of the folder with the ACLs it had before the change.
+            skip += pageSize;
         }
     }
 

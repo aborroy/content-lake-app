@@ -59,10 +59,23 @@ public interface ContentSourceClient {
     /**
      * Lists direct children of a container node.
      *
+     * <p><strong>A page shorter than {@code maxItems} does not mean the container is exhausted.</strong>
+     * Only an empty page does. An implementation is free to return fewer entries than asked for: several
+     * here apply the source's own page window and then drop what they cannot represent as a
+     * {@link SourceNode} -- a CMIS relationship, a directory entry whose attributes will not read -- so
+     * a full window can arrive as a short page with more still to come.</p>
+     *
+     * <p>Callers must therefore page until they get an empty list, and must advance the cursor by
+     * {@code maxItems} rather than by the size of the page they received. Advancing by the size received
+     * re-reads the entries that were dropped, which either loops forever or shifts every subsequent page
+     * window. Terminating on a short page silently truncates the container, which is worse than it sounds:
+     * a discovery pass that reports itself complete hands the reconciliation sweep a list the sweep then
+     * treats as authoritative, so the dropped tail is deleted from the index rather than merely missed.</p>
+     *
      * @param containerId source-system identifier of the parent container
-     * @param skip        number of entries to skip (for pagination)
-     * @param maxItems    maximum number of entries to return
-     * @return list of child nodes; empty list when the container has no children
+     * @param skip        number of entries to skip (for pagination); callers advance it by {@code maxItems}
+     * @param maxItems    maximum number of entries to return; fewer is allowed, more is not
+     * @return list of child nodes; empty list when there is nothing left at or beyond {@code skip}
      */
     List<SourceNode> getChildren(String containerId, int skip, int maxItems);
 
