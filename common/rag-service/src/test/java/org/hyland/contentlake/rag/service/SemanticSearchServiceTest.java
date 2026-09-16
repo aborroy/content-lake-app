@@ -8,7 +8,10 @@ import org.hyland.contentlake.model.HxprTermsAggregationResult;
 import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
+import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
+import org.hyland.contentlake.security.GroupResolutionFailurePolicy;
 import org.hyland.contentlake.security.SecurityContextService;
+import org.hyland.contentlake.security.SourceGroupResolver;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +23,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -49,13 +53,32 @@ class SemanticSearchServiceTest {
         ReflectionTestUtils.setField(service, "alfrescoSourceId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
-        ReflectionTestUtils.setField(service, "nuxeoUrl", "http://localhost:8081/nuxeo");
-        ReflectionTestUtils.setField(service, "nuxeoUsername", "Administrator");
-        ReflectionTestUtils.setField(service, "nuxeoPassword", "Administrator");
-        ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
-        ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
-        ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
         ReflectionTestUtils.setField(service, "defaultMinScore", 0.5d);
+    }
+
+    /** A resolver for the {@code alfresco} type whose single answer is whatever the supplier does. */
+    private static SourceGroupResolver alfrescoResolver(Supplier<List<String>> answer) {
+        return new SourceGroupResolver() {
+            @Override
+            public String sourceType() {
+                return "alfresco";
+            }
+
+            @Override
+            public List<String> resolveGroups(String username) {
+                return answer.get();
+            }
+        };
+    }
+
+    private void withResolvers(SourceGroupResolver... resolvers) {
+        withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, resolvers);
+    }
+
+    /** Wires a registry with no cache, so each test's resolver answer is the one that is read. */
+    private void withRegistry(GroupResolutionFailurePolicy policy, SourceGroupResolver... resolvers) {
+        ReflectionTestUtils.setField(service, "groupResolverRegistry",
+                new SourceGroupResolverRegistry(List.of(resolvers), policy, 0L, 0L, null));
     }
 
     /**
@@ -241,10 +264,28 @@ class SemanticSearchServiceTest {
 
     @Test
     void getUserAuthorities_thirdSource_resolvesDefaultsOnlyAndDoesNotCallADirectory() {
-        // No group resolver exists for such a source, so the caller gets themselves and Everyone: its
-        // public documents are retrievable and its group-granted ones stay hidden. alfrescoUrl points at
-        // a closed port, so a directory call would have thrown and failed closed instead.
+        // No resolver claims that source's type, so the caller gets themselves and Everyone: its public
+        // documents are retrievable and its group-granted ones stay hidden.
+        withResolvers(alfrescoResolver(() -> List.of("GROUP_UNREACHABLE")));
+
         assertThat(service.getUserAuthorities("alice", "sample-directory"))
+                .containsExactly("alice", "GROUP_EVERYONE");
+    }
+
+    @Test
+    void getUserAuthorities_resolverKnowsTheUser_addsTheirGroups() {
+        withResolvers(alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
+
+        assertThat(service.getUserAuthorities("alice", "test-repo"))
+                .containsExactly("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS");
+    }
+
+    @Test
+    void getUserAuthorities_resolverHasNoSuchIdentity_keepsTheSourceWithDefaults() {
+        // null is "not in this directory", which is not a directory failure and must not cost the source.
+        withResolvers(alfrescoResolver(() -> null));
+
+        assertThat(service.getUserAuthorities("alice", "test-repo"))
                 .containsExactly("alice", "GROUP_EVERYONE");
     }
 
@@ -254,25 +295,28 @@ class SemanticSearchServiceTest {
 
     @Test
     void getUserAuthorities_lookupFails_failClosed_resolvesNoAuthorities() {
-        // alfrescoUrl points at a closed port, so the group lookup throws.
-        ReflectionTestUtils.setField(service, "groupResolutionFailureMode", "fail-closed");
+        withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> {
+            throw new IllegalStateException("directory down");
+        }));
 
         assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
     }
 
     @Test
     void getUserAuthorities_lookupFails_degrade_keepsUsernameAndEveryone() {
-        ReflectionTestUtils.setField(service, "groupResolutionFailureMode", "degrade");
+        withRegistry(GroupResolutionFailurePolicy.DEGRADE, alfrescoResolver(() -> {
+            throw new IllegalStateException("directory down");
+        }));
 
         assertThat(service.getUserAuthorities("alice", "test-repo"))
                 .containsExactly("alice", "GROUP_EVERYONE");
     }
 
     @Test
-    void getUserAuthorities_unsetMode_defaultsToFailClosed() {
-        ReflectionTestUtils.setField(service, "groupResolutionFailureMode", null);
-
-        assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
+    void getUserAuthorities_noRegistryWired_resolvesDefaultsForEverySource() {
+        // A service constructed without the registry, as several tests here do, must still answer.
+        assertThat(service.getUserAuthorities("alice", "test-repo"))
+                .containsExactly("alice", "GROUP_EVERYONE");
     }
 
     @Test

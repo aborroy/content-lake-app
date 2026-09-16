@@ -8,11 +8,11 @@ import org.hyland.contentlake.rag.observability.RagObservations;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
 import org.hyland.contentlake.rag.security.DualSourceAuthentication;
+import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SearchHit;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SourceDocument;
 import org.hyland.contentlake.security.AclFilterBuilder;
-import org.hyland.contentlake.security.GroupResolutionFailurePolicy;
 import org.hyland.contentlake.security.SecurityContextService;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.client.NamedQueryService;
@@ -24,14 +24,10 @@ import org.hyland.contentlake.model.SectionMap;
 import org.hyland.contentlake.service.EmbeddingService;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
-import java.time.Clock;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
@@ -56,11 +52,6 @@ public class SemanticSearchService {
 
     private static final int MAX_TOP_K = 50;
 
-    // The sys_racl predicate itself lives in AclFilterBuilder, which owns every constant and every
-    // clause it is made of. GROUP_PREFIX stays here because it is also used to normalise Nuxeo group
-    // names, which is not an ACL concern.
-    private static final String GROUP_PREFIX = "GROUP_";
-
     private static final double FALLBACK_MIN_SCORE = 0.5d;
 
     private final HxprService hxprService;
@@ -81,21 +72,16 @@ public class SemanticSearchService {
     private final RagQueryCache queryCache;
     /** Optional (#73): null in unit tests that construct this service without the tracing collaborator. */
     private final RagObservations observations;
-
     /**
-     * How long the discovered set of sources is reused.
-     *
-     * <p>Thirty seconds, because this window <em>is</em> how long a newly ingested source stays
-     * unsearchable, and a source can appear at any moment: a connector jar dropped into a running
-     * deployment ingests within seconds of being told to. Measured at five minutes, the deployment's
-     * connector suite failed all three of its retrieval assertions against a source whose documents were
-     * in the index the whole time, and each failure cost the suite its full polling deadline.</p>
-     *
-     * <p>What it costs is two terms aggregations per minute per search service, each a single call over
-     * the document index returning at most a hundred buckets. That is cheap enough that the window is
-     * set by what a caller should have to wait rather than by what the call costs.</p>
+     * Group expansion per source (#143). Optional: null in unit tests that construct this service without
+     * it, where {@link #groupResolvers()} falls back to a registry with no resolvers.
      */
-    private static final Duration SOURCE_DISCOVERY_TTL = Duration.ofSeconds(30);
+    private final SourceGroupResolverRegistry groupResolverRegistry;
+    /**
+     * The shared source catalogue. Optional: null in unit tests, where {@link #sourceCatalog()} builds a
+     * private one.
+     */
+    private final PermissionSourceCatalog permissionSourceCatalog;
 
     @Value("${alfresco.source-id:}")
     private String alfrescoSourceId;
@@ -103,41 +89,17 @@ public class SemanticSearchService {
     @Value("${rag.permission.source-ids:}")
     private String permissionSourceIds;
 
-    @Value("${rag.security.group-resolution-failure:fail-closed}")
-    private String groupResolutionFailureMode;
-
     @Value("${rag.security.admin-bypass.enabled:false}")
     private boolean adminBypassEnabled;
 
     @Value("${nuxeo.source-id:}")
     private String nuxeoSourceId;
 
-    @Value("${nuxeo.base-url:http://localhost:8081/nuxeo}")
-    private String nuxeoUrl;
-
-    @Value("${nuxeo.username:Administrator}")
-    private String nuxeoUsername;
-
-    @Value("${nuxeo.password:Administrator}")
-    private String nuxeoPassword;
-
-    @Value("${content.service.url}")
-    private String alfrescoUrl;
-
-    @Value("${content.service.security.basicAuth.username}")
-    private String serviceAccountUsername;
-
-    @Value("${content.service.security.basicAuth.password}")
-    private String serviceAccountPassword;
-
     @Value("${semantic-search.default-min-score:" + FALLBACK_MIN_SCORE + "}")
     private double defaultMinScore;
 
-    /** Built on first use by {@link #sourceCatalog()}; see that method for why it is not injected. */
-    private volatile PermissionSourceCatalog sourceCatalog;
-
-    /** Source types whose authorities could not be resolved, so the warning is logged once each. */
-    private final Set<String> unresolvableAuthoritySources = ConcurrentHashMap.newKeySet();
+    /** Built on first use by {@link #sourceCatalog()} when no bean was injected. */
+    private volatile PermissionSourceCatalog fallbackSourceCatalog;
 
     /**
      * Permission-aware semantic search. When the query cache (#72) is enabled, an identical
@@ -570,145 +532,8 @@ public class SemanticSearchService {
      * guessing.
      */
     List<String> getUserAuthorities(String username, String sourceId) {
-        LinkedHashSet<String> authorities =
-                new LinkedHashSet<>(AclFilterBuilder.defaultAuthorities(username));
-        try {
-            if (isAlfrescoSource(sourceId)) {
-                authorities.addAll(fetchAlfrescoGroups(username));
-            } else if (isNuxeoSource(sourceId)) {
-                authorities.addAll(fetchNuxeoGroups(username));
-            } else {
-                warnUnresolvableAuthorities(sourceId);
-            }
-            log.debug("Resolved {} authorities for user {} on source {}", authorities.size(), username, sourceId);
-        } catch (Exception e) {
-            return onGroupResolutionFailure(username, sourceId, e);
-        }
-
-        return List.copyOf(authorities);
-    }
-
-    /**
-     * Says once per source that its groups cannot be expanded, and what that costs.
-     *
-     * <p>Group expansion needs a directory to ask, and rag-service has a client for Alfresco and for
-     * Nuxeo. Any other source still gets a clause, built from the caller's default authorities, so its
-     * {@code __Everyone__} documents and documents granted to the caller by name are retrievable while
-     * its group-granted ones are not. Filtering less would be over-sharing, so the gap is reported
-     * rather than closed by guessing.</p>
-     */
-    private void warnUnresolvableAuthorities(String sourceId) {
-        if (sourceId == null || sourceId.isBlank() || !unresolvableAuthoritySources.add(sourceId)) {
-            return;
-        }
-        log.warn("Source {} has no group resolver in rag-service, so its permission clause carries only "
-                        + "the caller's own authorities: public documents and documents granted to the user "
-                        + "by name are retrievable, group-granted documents are not. See "
-                        + "docs/deployment-rag.md",
-                sourceId);
-    }
-
-    /**
-     * Applies {@code rag.security.group-resolution-failure}. Both modes log at WARN: a directory outage
-     * is worth knowing about whichever behaviour is configured, because in one mode the caller silently
-     * loses group-granted documents and in the other they lose the source.
-     */
-    private List<String> onGroupResolutionFailure(String username, String sourceId, Exception cause) {
-        GroupResolutionFailurePolicy policy =
-                GroupResolutionFailurePolicy.parse(groupResolutionFailureMode);
-        if (policy == GroupResolutionFailurePolicy.DEGRADE) {
-            log.warn("Failed to resolve authorities for user {} on source {}; policy is {}, so proceeding "
-                            + "with username + GROUP_EVERYONE and no group-granted access: {}",
-                    username, sourceId, policy, cause.getMessage());
-            return AclFilterBuilder.defaultAuthorities(username);
-        }
-        log.warn("Failed to resolve authorities for user {} on source {}; policy is {}, so the source is "
-                        + "excluded from the permission filter and the caller sees nothing from it: {}",
-                username, sourceId, policy, cause.getMessage());
-        return List.of();
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> fetchAlfrescoGroups(String username) {
-        RestTemplate restTemplate = new RestTemplate();
-
-        String url = alfrescoUrl
-                + "/alfresco/api/-default-/public/alfresco/versions/1/people/"
-                + username + "/groups?skipCount=0&maxItems=1000";
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        headers.setBasicAuth(serviceAccountUsername, serviceAccountPassword);
-
-        ResponseEntity<Map> response = restTemplate.exchange(
-                url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-
-        LinkedHashSet<String> groups = new LinkedHashSet<>();
-        if (response.getBody() != null) {
-            Map<String, Object> body = response.getBody();
-            Map<String, Object> list = (Map<String, Object>) body.get("list");
-            if (list != null) {
-                List<Map<String, Object>> entries = (List<Map<String, Object>>) list.get("entries");
-                if (entries != null) {
-                    for (Map<String, Object> entry : entries) {
-                        Map<String, Object> entryData = (Map<String, Object>) entry.get("entry");
-                        if (entryData != null && entryData.get("id") != null) {
-                            groups.add((String) entryData.get("id"));
-                        }
-                    }
-                }
-            }
-        }
-
-        log.debug("Retrieved {} groups for user {}", groups.size(), username);
-        return List.copyOf(groups);
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> fetchNuxeoGroups(String username) {
-        RestTemplate restTemplate = new RestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        headers.setBasicAuth(nuxeoUsername, nuxeoPassword);
-
-        ResponseEntity<Map> response = restTemplate.exchange(
-                buildNuxeoApiUrl() + "/user/{username}",
-                HttpMethod.GET,
-                new HttpEntity<>(headers),
-                Map.class,
-                username
-        );
-
-        LinkedHashSet<String> groups = new LinkedHashSet<>();
-        if (response.getBody() == null) {
-            return List.of();
-        }
-
-        Map<String, Object> body = response.getBody();
-        Object directGroups = body.get("groups");
-        if (directGroups instanceof List<?> values) {
-            values.forEach(value -> addNuxeoGroup(groups, value));
-        }
-
-        Object extendedGroups = body.get("extendedGroups");
-        if (extendedGroups instanceof List<?> values) {
-            for (Object value : values) {
-                if (value instanceof Map<?, ?> map) {
-                    addNuxeoGroup(groups, firstString(map.get("name"), map.get("groupname"), map.get("id")));
-                }
-            }
-        }
-
-        Object propertiesObject = body.get("properties");
-        if (propertiesObject instanceof Map<?, ?> properties) {
-            Object propertyGroups = properties.get("groups");
-            if (propertyGroups instanceof List<?> values) {
-                values.forEach(value -> addNuxeoGroup(groups, value));
-            }
-        }
-
-        log.debug("Retrieved {} Nuxeo groups for user {}", groups.size(), username);
-        return List.copyOf(groups);
+        String sourceType = sourceCatalog().sourceType(configuredSources(), sourceId);
+        return groupResolvers().authorities(username, sourceId, sourceType);
     }
 
     // ---------------------------------------------------------------
@@ -920,17 +745,32 @@ public class SemanticSearchService {
     }
 
     /**
-     * The catalogue of sources to filter on, built lazily so it is available to a unit test that never
-     * runs {@code @PostConstruct}. It holds only what came from the index; the configured ids are read
-     * from this service's own fields on every call, which is what keeps the two from disagreeing.
+     * The catalogue of sources to filter on: the injected bean when there is one, otherwise a private
+     * instance built lazily so it is available to a unit test that never runs {@code @PostConstruct}. It
+     * holds only what came from the index; the configured ids are read from this service's own fields on
+     * every call, which is what keeps the two from disagreeing.
      */
     private PermissionSourceCatalog sourceCatalog() {
-        PermissionSourceCatalog current = sourceCatalog;
+        if (permissionSourceCatalog != null) {
+            return permissionSourceCatalog;
+        }
+        PermissionSourceCatalog current = fallbackSourceCatalog;
         if (current == null) {
-            current = new PermissionSourceCatalog(hxprService, SOURCE_DISCOVERY_TTL, Clock.systemUTC());
-            sourceCatalog = current;
+            current = new PermissionSourceCatalog(hxprService);
+            fallbackSourceCatalog = current;
         }
         return current;
+    }
+
+    /**
+     * The group resolvers, or a registry holding none when this service was constructed without one. A
+     * registry with no resolvers yields the caller's default authorities for every source, which is the
+     * same answer this service gave for a source it had no directory client for.
+     */
+    private SourceGroupResolverRegistry groupResolvers() {
+        return groupResolverRegistry != null
+                ? groupResolverRegistry
+                : SourceGroupResolverRegistry.withoutResolvers();
     }
 
     private PermissionSourceCatalog.Configured configuredSources() {
@@ -943,30 +783,5 @@ public class SemanticSearchService {
 
     private boolean isNuxeoSource(String sourceId) {
         return sourceCatalog().isNuxeo(configuredSources(), sourceId);
-    }
-
-    private String buildNuxeoApiUrl() {
-        String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
-        return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
-    }
-
-    private void addNuxeoGroup(Set<String> groups, Object candidate) {
-        if (candidate == null) {
-            return;
-        }
-        String group = candidate.toString().trim();
-        if (group.isBlank()) {
-            return;
-        }
-        groups.add(group.startsWith(GROUP_PREFIX) ? group : GROUP_PREFIX + group);
-    }
-
-    private String firstString(Object... candidates) {
-        for (Object candidate : candidates) {
-            if (candidate instanceof String value && !value.isBlank()) {
-                return value;
-            }
-        }
-        return null;
     }
 }

@@ -3,6 +3,8 @@ package org.hyland.contentlake.rag.service;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.model.HxprTermsAggregationResult;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -45,22 +47,41 @@ import java.util.regex.Pattern;
  *
  * <h3>What it deliberately does not decide</h3>
  *
- * <p>Whose authorities can be resolved on a source. Group expansion needs a directory to ask, and there
- * is one only for Alfresco and Nuxeo. A source whose type is unknown resolves to the caller's default
- * authorities alone (themselves, and Everyone), so its public documents are retrievable and its
- * group-restricted ones stay hidden. That is fail-closed, and it belongs to the search services that own
- * the directory clients rather than here.</p>
+ * <p>Whose authorities can be resolved on a source. Group expansion needs a directory to ask, and which
+ * types have one is {@code SourceGroupResolverRegistry}'s question. This class answers only what type a
+ * source id is; the registry decides what can be done with that answer, and a type it holds no resolver
+ * for yields the caller's default authorities alone (themselves, and Everyone), so that source's public
+ * documents are retrievable and its group-restricted ones stay hidden.</p>
  *
  * <p>Configuration is passed in per call as {@link Configured} rather than injected, because both search
  * services already own those properties as {@code @Value} fields and a second copy that could disagree
  * with them would be a defect waiting to happen. The cache therefore holds only what came from the
  * index, which is the part that is expensive and the part that is shared.</p>
+ *
+ * <p>One bean, injected into both search services, so the discovery TTL below is one window rather than
+ * one per service.</p>
  */
 @Slf4j
+@Component
 final class PermissionSourceCatalog {
 
     static final String ALFRESCO = "alfresco";
     static final String NUXEO = "nuxeo";
+
+    /**
+     * How long the discovered set of sources is reused.
+     *
+     * <p>Thirty seconds, because this window <em>is</em> how long a newly ingested source stays
+     * unsearchable, and a source can appear at any moment: a connector jar dropped into a running
+     * deployment ingests within seconds of being told to. Measured at five minutes, the deployment's
+     * connector suite failed all three of its retrieval assertions against a source whose documents were
+     * in the index the whole time, and each failure cost the suite its full polling deadline.</p>
+     *
+     * <p>What it costs is two terms aggregations per minute, each a single call over the document index
+     * returning at most a hundred buckets. That is cheap enough that the window is set by what a caller
+     * should have to wait rather than by what the call costs.</p>
+     */
+    static final Duration DISCOVERY_TTL = Duration.ofSeconds(30);
 
     /** Aggregation bucket ceiling. A deployment with more distinct sources than this is logged. */
     private static final int MAX_SOURCE_BUCKETS = 100;
@@ -86,6 +107,11 @@ final class PermissionSourceCatalog {
     /** Bare source id to source type, as read from the index. Empty until the first successful scan. */
     private volatile Map<String, String> cached;
     private volatile Instant cachedAt;
+
+    @Autowired
+    PermissionSourceCatalog(HxprService hxprService) {
+        this(hxprService, DISCOVERY_TTL, Clock.systemUTC());
+    }
 
     PermissionSourceCatalog(HxprService hxprService, Duration ttl, Clock clock) {
         this.hxprService = hxprService;

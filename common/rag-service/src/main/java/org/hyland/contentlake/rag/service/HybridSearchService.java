@@ -20,20 +20,16 @@ import org.hyland.contentlake.rag.model.HybridSearchResponse;
 import org.hyland.contentlake.rag.model.HybridSearchResponse.HybridHit;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SourceDocument;
+import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
 import org.hyland.contentlake.security.AclFilterBuilder;
-import org.hyland.contentlake.security.GroupResolutionFailurePolicy;
 import org.hyland.contentlake.security.SecurityContextService;
 import org.hyland.contentlake.service.EmbeddingService;
 import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
-import java.time.Clock;
-import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -61,10 +57,6 @@ public class HybridSearchService {
     static final String NORMALIZATION_MINMAX = "minmax";
 
     private static final int MAX_CANDIDATE_COUNT = 100;
-    // The sys_racl predicate itself lives in AclFilterBuilder, which owns every constant and every
-    // clause it is made of. GROUP_PREFIX stays here because it is also used to normalise Nuxeo group
-    // names, which is not an ACL concern.
-    private static final String GROUP_PREFIX = "GROUP_";
     private static final String INGEST_PROP_PREFIX = "cin_ingestProperties.";
     private static final String SOURCE_MIME_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_MIME_TYPE;
     private static final String SOURCE_PATH_PROP = INGEST_PROP_PREFIX + ContentLakeIngestProperties.SOURCE_PATH;
@@ -87,8 +79,6 @@ public class HybridSearchService {
             "may", "not", "the", "that", "this", "was", "were", "what", "when", "which", "who",
             "why", "with", "you", "your", "from", "into", "than", "them", "then", "they", "will");
     private static final Pattern CUSTOM_PROP_KEY_PATTERN = Pattern.compile("[A-Za-z0-9_:-]+");
-    /** See {@link SemanticSearchService} for why the discovered sources are reused for this long. */
-    private static final Duration SOURCE_DISCOVERY_TTL = Duration.ofSeconds(30);
 
     private final HxprService hxprService;
     private final EmbeddingService embeddingService;
@@ -112,6 +102,16 @@ public class HybridSearchService {
     private final RagQueryCache queryCache;
     /** Optional (#73): null in unit tests that construct this service without the tracing collaborator. */
     private final RagObservations observations;
+    /**
+     * Group expansion per source (#143). Optional: null in unit tests that construct this service without
+     * it, where {@link #groupResolvers()} falls back to a registry with no resolvers.
+     */
+    private final SourceGroupResolverRegistry groupResolverRegistry;
+    /**
+     * The shared source catalogue. Optional: null in unit tests, where {@link #sourceCatalog()} builds a
+     * private one.
+     */
+    private final PermissionSourceCatalog permissionSourceCatalog;
 
     @Value("${alfresco.source-id:}")
     private String alfrescoSourceId;
@@ -119,38 +119,14 @@ public class HybridSearchService {
     @Value("${rag.permission.source-ids:}")
     private String permissionSourceIds;
 
-    @Value("${rag.security.group-resolution-failure:fail-closed}")
-    private String groupResolutionFailureMode;
-
     @Value("${rag.security.admin-bypass.enabled:false}")
     private boolean adminBypassEnabled;
 
     @Value("${nuxeo.source-id:}")
     private String nuxeoSourceId;
 
-    @Value("${nuxeo.base-url:http://localhost:8081/nuxeo}")
-    private String nuxeoUrl;
-
-    @Value("${nuxeo.username:Administrator}")
-    private String nuxeoUsername;
-
-    @Value("${nuxeo.password:Administrator}")
-    private String nuxeoPassword;
-
-    @Value("${content.service.url}")
-    private String alfrescoUrl;
-
-    @Value("${content.service.security.basicAuth.username}")
-    private String serviceAccountUsername;
-
-    @Value("${content.service.security.basicAuth.password}")
-    private String serviceAccountPassword;
-
-    /** Built on first use by {@link #sourceCatalog()}; see that method for why it is not injected. */
-    private volatile PermissionSourceCatalog sourceCatalog;
-
-    /** Sources whose authorities could not be resolved, so the warning is logged once each. */
-    private final Set<String> unresolvableAuthoritySources = ConcurrentHashMap.newKeySet();
+    /** Built on first use by {@link #sourceCatalog()} when no bean was injected. */
+    private volatile PermissionSourceCatalog fallbackSourceCatalog;
 
     /**
      * Executes a hybrid search: runs vector and keyword legs in sequence, then fuses the results
@@ -1252,42 +1228,9 @@ public class HybridSearchService {
      * configured policy is to fail closed. An empty list means unknown, not "no groups", and the
      * permission filter drops the source rather than guessing.
      */
-    @SuppressWarnings("unchecked")
     List<String> getUserAuthorities(String username, String sourceId) {
-        LinkedHashSet<String> authorities =
-                new LinkedHashSet<>(AclFilterBuilder.defaultAuthorities(username));
-        try {
-            if (isAlfrescoSource(sourceId)) {
-                authorities.addAll(fetchAlfrescoGroups(username));
-            } else if (isNuxeoSource(sourceId)) {
-                authorities.addAll(fetchNuxeoGroups(username));
-            } else {
-                warnUnresolvableAuthorities(sourceId);
-            }
-        } catch (Exception e) {
-            return onGroupResolutionFailure(username, sourceId, e);
-        }
-
-        return List.copyOf(authorities);
-    }
-
-    /**
-     * Applies {@code rag.security.group-resolution-failure}. Both modes log at WARN: a directory outage
-     * is worth knowing about whichever behaviour is configured.
-     */
-    private List<String> onGroupResolutionFailure(String username, String sourceId, Exception cause) {
-        GroupResolutionFailurePolicy policy =
-                GroupResolutionFailurePolicy.parse(groupResolutionFailureMode);
-        if (policy == GroupResolutionFailurePolicy.DEGRADE) {
-            log.warn("Failed to resolve authorities for user {} on source {}; policy is {}, so proceeding "
-                            + "with username + GROUP_EVERYONE and no group-granted access: {}",
-                    username, sourceId, policy, cause.getMessage());
-            return AclFilterBuilder.defaultAuthorities(username);
-        }
-        log.warn("Failed to resolve authorities for user {} on source {}; policy is {}, so the source is "
-                        + "excluded from the permission filter and the caller sees nothing from it: {}",
-                username, sourceId, policy, cause.getMessage());
-        return List.of();
+        String sourceType = sourceCatalog().sourceType(configuredSources(), sourceId);
+        return groupResolvers().authorities(username, sourceId, sourceType);
     }
 
     // ---------------------------------------------------------------
@@ -1428,116 +1371,33 @@ public class HybridSearchService {
     }
 
     /**
-     * The catalogue of sources to filter on, built lazily so it is available to a unit test that never
-     * runs {@code @PostConstruct}. Its own instance rather than one shared with
-     * {@link SemanticSearchService}: the two services hold their configuration separately, and a cache
-     * of what the index holds is cheap enough to keep twice.
+     * The catalogue of sources to filter on: the injected bean when there is one, otherwise a private
+     * instance built lazily so it is available to a unit test that never runs {@code @PostConstruct}.
      */
     private PermissionSourceCatalog sourceCatalog() {
-        PermissionSourceCatalog current = sourceCatalog;
+        if (permissionSourceCatalog != null) {
+            return permissionSourceCatalog;
+        }
+        PermissionSourceCatalog current = fallbackSourceCatalog;
         if (current == null) {
-            current = new PermissionSourceCatalog(hxprService, SOURCE_DISCOVERY_TTL, Clock.systemUTC());
-            sourceCatalog = current;
+            current = new PermissionSourceCatalog(hxprService);
+            fallbackSourceCatalog = current;
         }
         return current;
     }
 
+    /**
+     * The group resolvers, or a registry holding none when this service was constructed without one. A
+     * registry with no resolvers yields the caller's default authorities for every source.
+     */
+    private SourceGroupResolverRegistry groupResolvers() {
+        return groupResolverRegistry != null
+                ? groupResolverRegistry
+                : SourceGroupResolverRegistry.withoutResolvers();
+    }
+
     private PermissionSourceCatalog.Configured configuredSources() {
         return new PermissionSourceCatalog.Configured(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
-    }
-
-    /**
-     * Says once per source that its groups cannot be expanded. See
-     * {@link SemanticSearchService#warnUnresolvableAuthorities(String)} for what it costs a caller.
-     */
-    private void warnUnresolvableAuthorities(String sourceId) {
-        if (sourceId == null || sourceId.isBlank() || !unresolvableAuthoritySources.add(sourceId)) {
-            return;
-        }
-        log.warn("Source {} has no group resolver in rag-service, so its permission clause carries only "
-                        + "the caller's own authorities: public documents and documents granted to the user "
-                        + "by name are retrievable, group-granted documents are not. See "
-                        + "docs/deployment-rag.md",
-                sourceId);
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> fetchAlfrescoGroups(String username) {
-        RestTemplate restTemplate = new RestTemplate();
-        String url = alfrescoUrl
-                + "/alfresco/api/-default-/public/alfresco/versions/1/people/"
-                + username + "/groups?skipCount=0&maxItems=1000";
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        headers.setBasicAuth(serviceAccountUsername, serviceAccountPassword);
-
-        ResponseEntity<Map> response = restTemplate.exchange(
-                url, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-
-        LinkedHashSet<String> groups = new LinkedHashSet<>();
-        if (response.getBody() != null) {
-            Map<String, Object> body = response.getBody();
-            Map<String, Object> list = (Map<String, Object>) body.get("list");
-            if (list != null) {
-                List<Map<String, Object>> entries = (List<Map<String, Object>>) list.get("entries");
-                if (entries != null) {
-                    for (Map<String, Object> entry : entries) {
-                        Map<String, Object> entryData = (Map<String, Object>) entry.get("entry");
-                        if (entryData != null && entryData.get("id") != null) {
-                            groups.add((String) entryData.get("id"));
-                        }
-                    }
-                }
-            }
-        }
-        return List.copyOf(groups);
-    }
-
-    @SuppressWarnings("unchecked")
-    private List<String> fetchNuxeoGroups(String username) {
-        RestTemplate restTemplate = new RestTemplate();
-        HttpHeaders headers = new HttpHeaders();
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        headers.setBasicAuth(nuxeoUsername, nuxeoPassword);
-
-        ResponseEntity<Map> response = restTemplate.exchange(
-                buildNuxeoApiUrl() + "/user/{username}",
-                HttpMethod.GET,
-                new HttpEntity<>(headers),
-                Map.class,
-                username
-        );
-
-        LinkedHashSet<String> groups = new LinkedHashSet<>();
-        if (response.getBody() == null) {
-            return List.of();
-        }
-
-        Map<String, Object> body = response.getBody();
-        Object directGroups = body.get("groups");
-        if (directGroups instanceof List<?> values) {
-            values.forEach(value -> addNuxeoGroup(groups, value));
-        }
-
-        Object extendedGroups = body.get("extendedGroups");
-        if (extendedGroups instanceof List<?> values) {
-            for (Object value : values) {
-                if (value instanceof Map<?, ?> map) {
-                    addNuxeoGroup(groups, firstString(map.get("name"), map.get("groupname"), map.get("id")));
-                }
-            }
-        }
-
-        Object propertiesObject = body.get("properties");
-        if (propertiesObject instanceof Map<?, ?> properties) {
-            Object propertyGroups = properties.get("groups");
-            if (propertyGroups instanceof List<?> values) {
-                values.forEach(value -> addNuxeoGroup(groups, value));
-            }
-        }
-
-        return List.copyOf(groups);
     }
 
     private boolean isAlfrescoSource(String sourceId) {
@@ -1546,31 +1406,6 @@ public class HybridSearchService {
 
     private boolean isNuxeoSource(String sourceId) {
         return sourceCatalog().isNuxeo(configuredSources(), sourceId);
-    }
-
-    private String buildNuxeoApiUrl() {
-        String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
-        return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
-    }
-
-    private void addNuxeoGroup(Set<String> groups, Object candidate) {
-        if (candidate == null) {
-            return;
-        }
-        String group = candidate.toString().trim();
-        if (group.isBlank()) {
-            return;
-        }
-        groups.add(group.startsWith(GROUP_PREFIX) ? group : GROUP_PREFIX + group);
-    }
-
-    private String firstString(Object... candidates) {
-        for (Object candidate : candidates) {
-            if (candidate instanceof String value && !value.isBlank()) {
-                return value;
-            }
-        }
-        return null;
     }
 
     // ---------------------------------------------------------------

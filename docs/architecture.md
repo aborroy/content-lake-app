@@ -320,10 +320,12 @@ source on every run.
 
 `rag-service` discovers the sources to build permission clauses for from the index itself, so a connector's
 documents are retrievable as soon as they are ingested and need no configuration (#133). What it cannot do is
-expand a *group* on such a source: it holds a group directory client for Alfresco and for Nuxeo and has no way
-to ask a third source. A plugin connector's clause is therefore the caller's own authorities, which retrieves
-documents carrying `__Everyone__` and documents granted to the caller by name, and not documents granted to a
-group. A connector whose ACLs are group-based needs a resolver in `rag-service`, which is a code change; a
+expand a *group* on such a source: `SourceGroupResolverRegistry` selects a group directory client by source
+type and ships one for `alfresco` and one for `nuxeo`, so a type nothing claims has none. A plugin connector's
+clause is therefore the caller's own authorities, which retrieves documents carrying `__Everyone__` and
+documents granted to the caller by name, and not documents granted to a
+group. A connector whose ACLs are group-based needs a `SourceGroupResolver` bean declaring that source type,
+which is a code change but touches nothing in the search paths; a
 connector whose permissions cannot be read at all must emit no `__Everyone__` at all, because a document that
 should be restricted and is marked public is the one failure mode worth designing against.
 
@@ -452,7 +454,28 @@ Two inputs feed that predicate, and each fails closed independently:
 | Input | Source | On failure |
 |---|---|---|
 | Caller identity | `SecurityContextService.getCurrentUsername()` | throws `AuthenticationCredentialsNotFoundException`, which Spring Security translates into a 401 |
-| Group membership per source | Alfresco `GET /people/{user}/groups`, Nuxeo `GET /api/v1/user/{username}` | governed by `rag.security.group-resolution-failure` |
+| Group membership per source | `SourceGroupResolverRegistry`, one `SourceGroupResolver` per source type | governed by `rag.security.group-resolution-failure` |
+
+`SourceGroupResolver` lives in `content-lake-core` beside `AclFilterBuilder`, not in `content-lake-spi`:
+the SPI is the ingest contract, and a query-side directory client has no place in a jar that connectors
+compile against. A resolver declares the source type it answers for, matched against the
+`<sourceType>` half of `cin_sourceId`, and exactly one may claim a type -- two would let bean ordering
+decide who reads what, so the registry refuses to start. `rag-service` ships `AlfrescoGroupResolver`
+(`GET /people/{user}/groups`, paged) and `NuxeoGroupResolver` (`GET /api/v1/user/{username}`, reading
+`groups`, `extendedGroups` and `properties.groups`). Both search services hold the one registry, so a
+resolver added for a third source type is picked up by both without either being edited.
+
+A resolver has three answers, and the difference is the whole security contract:
+
+| Answer | Meaning | Effect on the predicate |
+|---|---|---|
+| a list | the caller's groups in this directory, empty being a legitimate known answer | added to their default authorities |
+| `null` | the directory holds no such identity | the source is kept with default authorities only |
+| a thrown exception | the directory could not be asked | `rag.security.group-resolution-failure` decides |
+
+`null` is deliberately not a failure: a site-local principal that exists in one repository and not in
+another is normal, and charging the caller a whole source for it would be a blackout with no outage
+behind it.
 
 `rag.security.group-resolution-failure` takes `fail-closed` (the default) or `degrade`. Under
 `fail-closed` a source whose directory cannot be reached is dropped from the predicate entirely, so
@@ -460,6 +483,12 @@ the caller sees nothing from it; under `degrade` the caller keeps their own name
 `GROUP_EVERYONE` and silently loses only group-granted documents. Both modes log at WARN, and an
 unrecognised value reads as `fail-closed`. When every source drops out, `AclFilterBuilder.query`
 emits the `__unresolved_permission_source__` sentinel rather than no clause at all.
+
+Resolved memberships are cached per `(sourceType, username)` under `rag.security.group-cache.*`, so a
+query with several sources of one type pays one round trip rather than one per source, and the TTL is
+the ceiling on membership staleness. A thrown failure is never cached; `null` is cached as itself
+rather than as an empty group list, since collapsing the two would make an unknown identity
+indistinguishable from a known one in no groups on the next read.
 
 ### `Chunk` -- unit of embedding
 

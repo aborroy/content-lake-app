@@ -273,6 +273,35 @@ search:
     default-min-score: ${SEARCH_HYBRID_MIN_SCORE:0.01}
 ```
 
+#### Query-Side Security
+
+Everything that shapes the per-request permission predicate lives under `rag.security.*`:
+
+```yaml
+rag:
+  security:
+    group-resolution-failure: ${RAG_SECURITY_GROUP_RESOLUTION_FAILURE:fail-closed}  # or degrade
+    admin-bypass:
+      enabled: ${RAG_SECURITY_ADMIN_BYPASS_ENABLED:false}
+    group-cache:
+      ttl-seconds: ${RAG_SECURITY_GROUP_CACHE_TTL_SECONDS:300}   # 0 disables the cache
+      max-size: ${RAG_SECURITY_GROUP_CACHE_MAX_SIZE:10000}
+```
+
+| Setting | Effect |
+|---|---|
+| `group-resolution-failure` | What a query does when a group directory cannot be reached at all. `fail-closed` drops that source from the predicate; `degrade` keeps the caller's own name plus `GROUP_EVERYONE` and loses only group-granted documents. Both log at WARN; an unrecognised value reads as `fail-closed` |
+| `admin-bypass.enabled` | Whether `GROUP_ALFRESCO_ADMINISTRATORS` reads an Alfresco source with no `sys_racl` condition. Never applies to a Nuxeo source |
+| `group-cache.ttl-seconds` | How long a resolved membership is reused, and therefore the ceiling on how stale it may be: a caller removed from a group keeps reading that group's documents until the entry expires |
+| `group-cache.max-size` | Entry bound on that cache. Entries are keyed by source type and username, so the working set is roughly one per active caller per source type |
+
+Group expansion itself is per source type, not global: `rag-service` holds one `SourceGroupResolver`
+bean per type and ships `alfresco` and `nuxeo`. A source of any other type, which today means the
+filesystem source or any plugin connector, contributes a clause built from the caller's own authorities
+only, so its group-granted documents are retrievable by nobody. That is logged once per source at WARN
+and is settings-independent: there is no flag that turns it on, only a resolver bean for that type.
+Cache hit-rate is exposed as `cache.gets{cache=rag.security.groups}` under `/actuator/metrics`.
+
 #### Optional Retrieval and Generation Features
 
 These stages are **off by default**: with every flag unset, retrieval and generation behave as the

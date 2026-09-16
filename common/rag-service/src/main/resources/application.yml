@@ -229,6 +229,14 @@ rag:
     # means one group membership grants read access to every document of that source.
     admin-bypass:
       enabled: ${RAG_SECURITY_ADMIN_BYPASS_ENABLED:false}
+    # Resolved group membership, keyed on (source type, username). Group expansion is a directory round
+    # trip per source per query, and a query that runs several expansion variants resolves the same
+    # membership repeatedly. ttl-seconds is also the ceiling on how stale membership may be: a caller
+    # removed from a group keeps reading that group's documents until the entry expires. Zero disables the
+    # cache. Failures are never cached, so a directory outage is retried rather than held for the TTL.
+    group-cache:
+      ttl-seconds: ${RAG_SECURITY_GROUP_CACHE_TTL_SECONDS:300}
+      max-size: ${RAG_SECURITY_GROUP_CACHE_MAX_SIZE:10000}
   # User feedback capture (#74). Enabled by default; POST /api/rag/feedback persists a rating for an
   # answer as an hxpr document under base-path, feeding the offline evaluation corpus.
   feedback:

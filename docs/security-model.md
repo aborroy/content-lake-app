@@ -40,7 +40,7 @@ flowchart TD
 | Caller to `rag-service` | HTTP Basic, Alfresco ticket, Nuxeo token, or the dual-source header pair, validated against the configured source repositories | the source repository decides *whether you are you* |
 | `rag-service` to the index | HTTP Basic with one service account plus the `HXCS-REPOSITORY` header | nothing; the service account is trusted completely |
 | Permission filtering | an HXQL predicate over `sys_racl`, built per request by `AclFilterBuilder` | `rag-service` decides *what you may read* |
-| Group resolution | Alfresco `GET /people/{user}/groups` and Nuxeo `GET /api/v1/user/{username}`, called with the service account | the source repository is the authority on group membership |
+| Group resolution | one `SourceGroupResolver` per source type, selected by `SourceGroupResolverRegistry` and called with the service account: Alfresco `GET /people/{user}/groups`, Nuxeo `GET /api/v1/user/{username}` | the source repository is the authority on group membership |
 | The engine's own ACL policy | real code, and it runs, but it adds no restriction for an administrative principal | inert for this connection |
 
 Authentication answers a different question from authorization here, and the two live in different
@@ -87,6 +87,20 @@ what that one account may read, which is not the caller's answer.
   `degrade` is available for deployments that would rather lose group-granted results than a whole
   source: it keeps the caller's own name plus `GROUP_EVERYONE`. Both log at WARN, and an unrecognised
   value reads as `fail-closed`.
+- **An identity a directory does not hold is not an outage.** A resolver that reaches its directory and
+  finds no such principal returns `null`, and the caller keeps that source with their default
+  authorities. Only a resolver that could not ask at all follows the failure policy above. Collapsing
+  the two would blank out a source for every site-local principal that legitimately exists in one
+  repository and not another.
+- **A source type with no resolver expands no groups.** `SourceGroupResolverRegistry` selects by source
+  type and ships `alfresco` and `nuxeo`; any other type gets the caller's own authorities only, so
+  group-granted documents on it are retrievable by nobody rather than by everybody. Exactly one
+  resolver may claim a type, and the registry refuses to start otherwise: which of two wins would
+  decide who reads what, and bean ordering must not settle that.
+- **Resolved membership is cached, failures are not.** `rag.security.group-cache.ttl-seconds` (300 by
+  default) bounds how stale a caller's membership may be, keyed by source type and username so no
+  entry is shared between callers. A directory failure is never cached, so an outage is retried on the
+  next query instead of held for the TTL.
 - **Reading a whole source is opt-in.** A member of `GROUP_ALFRESCO_ADMINISTRATORS` can be granted an
   Alfresco source with no `sys_racl` condition at all, which is the widest grant the filter can
   express. `rag.security.admin-bypass.enabled` therefore defaults to `false`, so an administrator is
@@ -208,6 +222,9 @@ Before any deployment reachable by someone else:
       questions and generated answers.
 - [ ] **Keep `rag.security.group-resolution-failure` at `fail-closed`** unless losing group-granted
       results is worse for you than losing a whole source, and watch for the WARN either way.
+- [ ] **Set `rag.security.group-cache.ttl-seconds` to what your revocation window allows.** 300 by
+      default. A revoked group membership stays effective for up to that long; `0` disables the cache
+      and asks the directory on every query.
 - [ ] **Do not expose `/actuator/metrics` or `/actuator/prometheus` publicly.** They require
       authentication already; a scraper needs an account valid in one of the configured sources.
 - [ ] **Leave `rag.observability.capture-content` at `false`** unless the trace backend sits inside the
@@ -226,6 +243,9 @@ Before any deployment reachable by someone else:
 | Filter chain, public paths, MCP invariants | `common/rag-service/.../config/RagSecurityConfig.java` |
 | Credential validation against the source repositories | `alfresco/content-lake-source-alfresco/.../security/` |
 | Predicate construction per query | `common/rag-service/.../service/SemanticSearchService.java`, `HybridSearchService.java` |
+| The resolver contract, and what each of its three answers means | `common/content-lake-core/.../security/SourceGroupResolver.java` |
+| Resolver selection, the failure policy, the membership cache | `common/rag-service/.../security/SourceGroupResolverRegistry.java` |
+| Which source ids exist and what type each is | `common/rag-service/.../service/PermissionSourceCatalog.java` |
 | ACEs written at ingest | `common/content-lake-core/.../service/NodeSyncService.java` |
 | Feedback authorization | `common/rag-service/.../service/FeedbackService.java` |
 | Span payload gating and content redaction | `common/rag-service/.../observability/RagObservations.java` |

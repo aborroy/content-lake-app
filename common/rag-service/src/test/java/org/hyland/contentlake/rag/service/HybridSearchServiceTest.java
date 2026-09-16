@@ -10,8 +10,11 @@ import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.model.HybridSearchRequest;
 import org.hyland.contentlake.rag.model.HybridSearchResponse;
 import org.hyland.contentlake.rag.service.HybridSearchService.FusedResult;
+import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
 import org.hyland.contentlake.rag.service.HybridSearchService.ScoredChunk;
+import org.hyland.contentlake.security.GroupResolutionFailurePolicy;
 import org.hyland.contentlake.security.SecurityContextService;
+import org.hyland.contentlake.security.SourceGroupResolver;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -24,6 +27,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -65,12 +69,27 @@ class HybridSearchServiceTest {
         ReflectionTestUtils.setField(service, "alfrescoSourceId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
-        ReflectionTestUtils.setField(service, "nuxeoUrl", "http://localhost:8081/nuxeo");
-        ReflectionTestUtils.setField(service, "nuxeoUsername", "Administrator");
-        ReflectionTestUtils.setField(service, "nuxeoPassword", "Administrator");
-        ReflectionTestUtils.setField(service, "alfrescoUrl", "http://localhost:1");
-        ReflectionTestUtils.setField(service, "serviceAccountUsername", "admin");
-        ReflectionTestUtils.setField(service, "serviceAccountPassword", "admin");
+    }
+
+    /** A resolver for the {@code alfresco} type whose single answer is whatever the supplier does. */
+    private static SourceGroupResolver alfrescoResolver(Supplier<List<String>> answer) {
+        return new SourceGroupResolver() {
+            @Override
+            public String sourceType() {
+                return "alfresco";
+            }
+
+            @Override
+            public List<String> resolveGroups(String username) {
+                return answer.get();
+            }
+        };
+    }
+
+    /** Wires a registry with no cache, so each test's resolver answer is the one that is read. */
+    private void withRegistry(GroupResolutionFailurePolicy policy, SourceGroupResolver... resolvers) {
+        ReflectionTestUtils.setField(service, "groupResolverRegistry",
+                new SourceGroupResolverRegistry(List.of(resolvers), policy, 0L, 0L, null));
     }
 
     // -----------------------------------------------------------------------
@@ -505,25 +524,48 @@ class HybridSearchServiceTest {
 
         @Test
         void failClosed_resolvesNoAuthoritiesWhenTheLookupThrows() {
-            // alfrescoUrl points at a closed port, so the group lookup throws.
-            ReflectionTestUtils.setField(service, "groupResolutionFailureMode", "fail-closed");
+            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> {
+                throw new IllegalStateException("directory down");
+            }));
 
             assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
         }
 
         @Test
         void degrade_keepsUsernameAndEveryoneWhenTheLookupThrows() {
-            ReflectionTestUtils.setField(service, "groupResolutionFailureMode", "degrade");
+            withRegistry(GroupResolutionFailurePolicy.DEGRADE, alfrescoResolver(() -> {
+                throw new IllegalStateException("directory down");
+            }));
 
             assertThat(service.getUserAuthorities("alice", "test-repo"))
                     .containsExactly("alice", "GROUP_EVERYONE");
         }
 
         @Test
-        void unsetMode_defaultsToFailClosed() {
-            ReflectionTestUtils.setField(service, "groupResolutionFailureMode", null);
+        void resolverKnowsTheUser_addsTheirGroups() {
+            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED,
+                    alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
 
-            assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
+            assertThat(service.getUserAuthorities("alice", "test-repo"))
+                    .containsExactly("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS");
+        }
+
+        @Test
+        void resolverHasNoSuchIdentity_keepsTheSourceWithDefaults() {
+            // null is "not in this directory", which is not a directory failure.
+            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> null));
+
+            assertThat(service.getUserAuthorities("alice", "test-repo"))
+                    .containsExactly("alice", "GROUP_EVERYONE");
+        }
+
+        @Test
+        void noResolverForTheSourceType_resolvesDefaultsOnly() {
+            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED,
+                    alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
+
+            assertThat(service.getUserAuthorities("alice", "sample-directory"))
+                    .containsExactly("alice", "GROUP_EVERYONE");
         }
 
         @Test

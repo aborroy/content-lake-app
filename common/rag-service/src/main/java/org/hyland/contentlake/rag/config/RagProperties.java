@@ -127,6 +127,43 @@ public class RagProperties {
     /** Multi-embedding-type retrieval and the re-embedding backfill (#121). */
     private EmbeddingProperties embedding = new EmbeddingProperties();
 
+    /** Group-membership resolution behind the ACL filter (#143). */
+    private SecurityProperties security = new SecurityProperties();
+
+    /**
+     * How a caller's group membership is resolved, and what happens when it cannot be.
+     *
+     * <p>{@code rag.security.admin-bypass.enabled} is deliberately absent: it decides the shape of the ACL
+     * predicate rather than how membership is resolved, and the search services that build that predicate
+     * read it directly.</p>
+     */
+    @Data
+    public static class SecurityProperties {
+
+        /**
+         * {@code fail-closed} (the default) or {@code degrade}. Anything unrecognised reads as
+         * {@code fail-closed}, because a typo must not widen access.
+         */
+        private String groupResolutionFailure = "fail-closed";
+
+        /** Caching of resolved group membership. */
+        private GroupCacheProperties groupCache = new GroupCacheProperties();
+
+        @Data
+        public static class GroupCacheProperties {
+
+            /**
+             * Time-to-live for a resolved membership. Also the ceiling on how stale it may be: a caller
+             * removed from a group keeps reading that group's documents until the entry expires. Zero
+             * disables the cache, so every query resolves membership afresh.
+             */
+            private long ttlSeconds = 300;
+
+            /** Maximum number of {@code (sourceType, username)} entries held. */
+            private long maxSize = 10000;
+        }
+    }
+
     /**
      * Querying a corpus that holds vectors from more than one embedding model, and moving it onto a
      * new one without search degrading in the meantime (#121).
