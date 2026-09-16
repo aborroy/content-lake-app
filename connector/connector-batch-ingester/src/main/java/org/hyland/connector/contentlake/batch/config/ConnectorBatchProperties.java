@@ -58,6 +58,15 @@ public class ConnectorBatchProperties {
      */
     private ReconcileProperties reconcile = new ReconcileProperties();
 
+    /**
+     * Incremental discovery through the connector's change feed, when it has one. Off by default, so the
+     * feature is purely additive: a deployment that does not turn it on walks exactly as it does today.
+     */
+    private ChangeFeed changeFeed = new ChangeFeed();
+
+    /** Where the host keeps each source's feed position. */
+    private Cursor cursor = new Cursor();
+
     private Security security = new Security();
 
     /**
@@ -72,6 +81,72 @@ public class ConnectorBatchProperties {
     public static class Security {
         private String username;
         private String password;
+    }
+
+    /**
+     * Reading a connector's change feed instead of walking it.
+     *
+     * <p>Enabling this asks for incremental passes; it does not promise them. A connector that answers
+     * {@code false} to {@code ContentSourceClient.supportsChangeFeed()} is walked regardless, so the setting
+     * is safe to turn on across a deployment where only some connectors have a feed.</p>
+     */
+    @Data
+    public static class ChangeFeed {
+
+        /** Off by default, so the feature is additive: an untouched deployment walks as it did before. */
+        private boolean enabled = false;
+
+        /** Soft bound on the changes asked for per feed page. */
+        private int pageSize = 200;
+
+        /**
+         * How many pages one pass may consume. A feed with more left is not a failure: the next pass
+         * resumes from the cursor this one reached.
+         */
+        private int maxPages = 100;
+
+        /**
+         * Force a full walk plus reconciliation sweep every Nth incremental pass; {@code 0} never does.
+         *
+         * <p>The only mechanism that catches a deletion the feed never reported, which is why the sweep is
+         * suspended during an incremental pass rather than removed for feed-capable sources. On a daily
+         * incremental schedule, {@code 24} gives a walk roughly once a day.</p>
+         */
+        private int fullWalkEvery = 0;
+    }
+
+    /**
+     * Where the host keeps each source's feed position.
+     *
+     * <p>The host keeps it, never the connector: a connector that persisted its own cursor would have to be
+     * trusted to forget it whenever the index was rebuilt, and nothing could check that it had.</p>
+     */
+    @Data
+    public static class Cursor {
+
+        /** Which store to use. */
+        private Store store = Store.HXPR;
+
+        /** Folder for the state documents when {@code store} is {@code HXPR}. */
+        private String hxprPath = "/content-lake/_state/cursors";
+
+        /** State file when {@code store} is {@code FILE}. Needs a writable mount. */
+        private String file = "/data/connector-cursor.json";
+
+        public enum Store {
+            /**
+             * One state document per source in hxpr. The default because the deployment gives this
+             * container no writable mount, and hxpr is somewhere it can already write.
+             */
+            HXPR,
+            /** A JSON file, for a deployment that does mount writable state. */
+            FILE,
+            /**
+             * Nothing survives a restart, so every run after one is a full walk. For dev, and the honest
+             * answer for a container with neither a mount nor write access to hxpr.
+             */
+            MEMORY
+        }
     }
 
     @Data

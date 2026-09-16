@@ -81,6 +81,8 @@ under `connector.*`:
 | `connector.max-depth` | Depth backstop for a hierarchy that does not bottom out |
 | `connector.security.*` | Credentials for this ingester's own sync API. No defaults; startup fails without both |
 | `connector.reconcile.*` | Post-discovery deletion sweep. Off by default |
+| `connector.change-feed.*` | Read the connector's change feed instead of walking it. Off by default |
+| `connector.cursor.*` | Where the change feed's position is kept between passes |
 
 Two things about it are deliberate. With no connector loaded it fails to start, because its only source is
 that jar and a sync API reporting zero documents hides the misconfiguration. And the walk visits each node id
@@ -90,6 +92,38 @@ otherwise ingest it repeatedly.
 `plugins/examples/sample-directory-connector` is a working connector that ingests a mounted
 directory, and `content-lake-app-deployment/test/test-connector.sh` builds it, mounts it and asserts the
 documents come back out of semantic search.
+
+### Incremental Passes Through A Connector's Change Feed
+
+A connector that overrides `supportsChangeFeed()` can report what changed since a token instead of being
+walked in full. Both sides have to agree: the connector implements the feed, and the deployment turns it on.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `connector.change-feed.enabled` | `false` | Opt-in, for the same reason the sweep is: an incremental pass suspends the sweep, so a feed that under-reports deletions leaves them in the index |
+| `connector.change-feed.page-size` | `200` | Changes requested per `changesSince` call |
+| `connector.change-feed.max-pages` | `100` | Pages read in one pass. Reaching it is not a failure: the cursor reached is saved and the next pass continues from it |
+| `connector.change-feed.full-walk-every` | `0` | `0` never forces a walk; `N` forces a walk plus sweep every Nth pass. `24` suits an hourly incremental schedule |
+| `connector.cursor.store` | `hxpr` | `hxpr`, `file` or `memory` |
+| `connector.cursor.hxpr-path` | `/content-lake/_state/cursors` | Where the `hxpr` store keeps its state document |
+| `connector.cursor.file` | `/data/connector-cursor.json` | Path the `file` store writes, which needs a writable mount |
+
+The default is `hxpr` because this container's mounts are read-only, so a file store would have nowhere to
+write. Its state document carries no `cin_sourceId` and no `cin_paths`, which is what keeps the sweep from
+proposing the deletion of the cursor that tells it where it is, and it has no embeddings, which is what keeps
+it out of search results. `memory` is the honest answer for a deployment with neither a mount nor hxpr write
+access: every pass is a full walk, which is the behaviour with the feature off.
+
+How one pass decides which mechanism it runs: the feed, if the feature is on, the connector declares one, a
+cursor is stored, and `full-walk-every` has not been reached. Otherwise a full walk. The first pass therefore
+always walks, because a feed opened at the source's current position would never mention the content that
+already exists; the host reads that position before the walk and saves it after, so a change made while the
+walk ran is replayed by the next pass rather than lost. A cursor the source has expired is discarded and the
+same job falls back to a walk.
+
+The two mechanisms never both delete in one pass. A walk hands its enumeration to the sweep; an incremental
+pass applies only the tombstones the feed reported and its `reconciliation` block says
+`SKIPPED_INCREMENTAL_RUN`. Deletions from either path are counted in the job's `deletedCount`.
 
 ### The CMIS Connector
 

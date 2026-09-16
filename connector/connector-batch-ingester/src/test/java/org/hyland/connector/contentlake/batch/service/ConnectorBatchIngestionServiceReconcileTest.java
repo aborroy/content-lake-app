@@ -5,6 +5,7 @@ import org.hyland.connector.contentlake.batch.config.SelectedConnector;
 import org.hyland.connector.contentlake.batch.model.IngestionJob;
 import org.hyland.contentlake.model.HxprDocument;
 import org.hyland.contentlake.service.DiscoveryOutcome;
+import org.hyland.contentlake.service.InMemorySyncCursorStore;
 import org.hyland.contentlake.service.IndexReconciliationService;
 import org.hyland.contentlake.service.NodeSyncService;
 import org.hyland.contentlake.service.SeenSet;
@@ -76,7 +77,7 @@ class ConnectorBatchIngestionServiceReconcileTest {
         SelectedConnector connector = new SelectedConnector("cmis", "cmis connector", "cmis.jar",
                 sourceClient, scopeResolver, textExtractor, false);
         service = new ConnectorBatchIngestionService(discoveryService, nodeSyncService, syncExecutor,
-                reconciliationService, connector, props);
+                reconciliationService, new InMemorySyncCursorStore(), connector, props);
 
         when(sourceClient.getSourceId()).thenReturn("cmis-instance");
         when(nodeSyncService.contentLakePathPrefix(eq("cmis-instance"), any())).thenReturn(INDEXED_PREFIX);

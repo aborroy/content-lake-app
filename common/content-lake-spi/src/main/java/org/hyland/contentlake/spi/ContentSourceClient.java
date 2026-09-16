@@ -80,6 +80,62 @@ public interface ContentSourceClient {
     List<SourceNode> getChildren(String containerId, int skip, int maxItems);
 
     /**
+     * Whether this source can report what changed since a previous pass, instead of being walked.
+     *
+     * <p>This is the capability gate, and the only thing a host checks before taking the incremental
+     * path. Defaults to {@code false}, so a connector written before this -- or one whose source has no
+     * change feed -- is walked exactly as it is today. Not implementing a feed is a supported choice, not
+     * a degraded one: the walk plus the reconciliation sweep is the authoritative mechanism, and a feed
+     * is an optimisation over it.</p>
+     */
+    default boolean supportsChangeFeed() {
+        return false;
+    }
+
+    /**
+     * The source's current feed position, for a host that has no cursor stored yet, or {@code null} when
+     * the source cannot name one.
+     *
+     * <p>This is a position, not a licence to skip anything. A host with no cursor reads this, walks the
+     * source in full, and only then saves the value it read: the walk is what indexes the nodes that
+     * already exist, and a feed opened at "now" would never mention them. Reading the position first and
+     * saving it second means a change made while the walk ran is replayed by the next incremental pass
+     * rather than falling between the two mechanisms.</p>
+     *
+     * <p>{@code null} is a supported answer and means every pass walks, which is the behaviour of a source
+     * with no feed at all. It is also the right answer for a source whose only token is start-of-time:
+     * nothing here distinguishes such a token from a current one, so a host that took one for the other
+     * would either replay the whole history on every pass or index nothing.</p>
+     */
+    default String initialCursor() {
+        return null;
+    }
+
+    /**
+     * Reads one page of the source's change feed.
+     *
+     * <p>Throws by default rather than returning an empty page. An empty page is indistinguishable from
+     * "nothing changed", and a host that skipped the walk on that basis would index nothing and treat the
+     * empty deletion list as authoritative; silence in the dangerous direction is the wrong default. The
+     * gate is {@link #supportsChangeFeed()}, so this is only ever called on a source that said yes.</p>
+     *
+     * <p>Implementations must return {@link SourceChangePage#expired()} rather than throwing when the
+     * cursor is no longer usable, must not parse or reorder the cursor they were given, and may return
+     * fewer than {@code maxItems} changes with {@code moreAvailable} still true.</p>
+     *
+     * @param cursor   the token from the previous page's {@code nextCursor}, or the value
+     *                 {@link #initialCursor()} gave the host before its seeding walk. Never {@code null} in
+     *                 practice: a host with no stored cursor walks instead of reading the feed
+     * @param maxItems soft upper bound on the number of changed nodes in the page
+     * @return the page; never {@code null}
+     * @throws UnsupportedOperationException when the source has no change feed
+     */
+    default SourceChangePage changesSince(String cursor, int maxItems) {
+        throw new UnsupportedOperationException(
+                "Source '" + getSourceType() + "' has no change feed; discovery must walk it");
+    }
+
+    /**
      * Downloads the primary content blob to a temporary {@link Resource}.
      *
      * <p>Callers are responsible for deleting any temporary files after use.</p>

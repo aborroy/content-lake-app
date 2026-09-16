@@ -65,6 +65,13 @@ public class IndexReconciliationService {
         SKIPPED_NODE_FAILURES,
         /** Discovery saw nothing, which is indistinguishable from discovery being broken. */
         SKIPPED_EMPTY_DISCOVERY,
+        /**
+         * The pass consumed a change feed instead of walking, so the feed owned its own deletions and a
+         * sweep would have had no enumeration of the source to compare against. Distinct from
+         * {@link #DISABLED}, which would read as a misconfiguration rather than as the designed
+         * behaviour of an incremental pass.
+         */
+        SKIPPED_INCREMENTAL_RUN,
         /** The seen set hit its bound, so ids discovery saw would look missing. */
         ABORTED_SEEN_SET_OVERFLOW,
         /** The scan of the index failed partway, so the candidate set is incomplete. */
@@ -101,6 +108,14 @@ public class IndexReconciliationService {
     ) {
         static Report skipped(Status status, String detail) {
             return new Report(status, 0, 0, 0, 0, 0, 0.0, detail);
+        }
+
+        /**
+         * The report an ingester attaches when its pass consumed a change feed rather than walking, so
+         * the sweep was never asked to run.
+         */
+        public static Report incrementalRun(String detail) {
+            return skipped(Status.SKIPPED_INCREMENTAL_RUN, detail);
         }
     }
 
@@ -266,8 +281,20 @@ public class IndexReconciliationService {
     }
 
     private String qualifiedSourceId() {
-        String type = sourceClient.getSourceType();
-        String id = sourceClient.getSourceId();
+        return qualifiedSourceId(sourceClient);
+    }
+
+    /**
+     * The {@code "<sourceType>:<sourceId>"} string this sweep scans the index by.
+     *
+     * <p>Public because it is also the key a {@link SyncCursorStore} stores a source's position under: a
+     * cursor and the sweep that would otherwise delete that source's documents have to name the source
+     * identically, and a second implementation of the same rule would eventually disagree with this one.
+     * An id that already carries a type prefix is returned as it is.</p>
+     */
+    public static String qualifiedSourceId(ContentSourceClient client) {
+        String type = client.getSourceType();
+        String id = client.getSourceId();
         if (id == null || id.isBlank() || type == null || type.isBlank() || id.contains(":")) {
             return id;
         }

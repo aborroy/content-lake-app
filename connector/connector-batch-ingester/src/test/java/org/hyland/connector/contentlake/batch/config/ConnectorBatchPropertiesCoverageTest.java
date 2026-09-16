@@ -70,6 +70,22 @@ class ConnectorBatchPropertiesCoverageTest {
         assertThat(new ConnectorBatchProperties().getReconcile().isEnabled()).isFalse();
     }
 
+    /**
+     * Incremental discovery suspends the sweep for its own pass, so it is opt-in for the same reason the
+     * sweep is. The enum default is not reached by the reflective coverage check above, which walks fields
+     * rather than values, so it is asserted here.
+     */
+    @Test
+    void theChangeFeedIsOffByDefaultAndCursorsGoToHxpr() throws IOException {
+        ConnectorBatchProperties props = new ConnectorBatchProperties();
+
+        assertThat(props.getChangeFeed().isEnabled()).isFalse();
+        assertThat(props.getChangeFeed().getFullWalkEvery()).isZero();
+        // hxpr rather than a file, because this container has no writable mount to keep state on.
+        assertThat(props.getCursor().getStore()).isEqualTo(ConnectorBatchProperties.Cursor.Store.HXPR);
+        assertThat(defines(applicationYml(), "connector.cursor.store")).isTrue();
+    }
+
     private static List<String> propertyNames(Class<?> type, String prefix) {
         List<String> names = new ArrayList<>();
         for (Field field : type.getDeclaredFields()) {

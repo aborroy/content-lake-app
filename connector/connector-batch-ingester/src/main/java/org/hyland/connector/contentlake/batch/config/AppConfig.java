@@ -16,8 +16,12 @@ import org.hyland.contentlake.extractor.ExtractionFormat;
 import org.hyland.contentlake.extractor.TikaTextExtractor;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.hyland.contentlake.service.EmbeddingTypeResolver;
+import org.hyland.contentlake.service.FileSyncCursorStore;
+import org.hyland.contentlake.service.HxprSyncCursorStore;
+import org.hyland.contentlake.service.InMemorySyncCursorStore;
 import org.hyland.contentlake.service.IndexReconciliationService;
 import org.hyland.contentlake.service.NodeSyncService;
+import org.hyland.contentlake.service.SyncCursorStore;
 import org.hyland.contentlake.service.chunking.NoiseReductionService;
 import org.hyland.contentlake.service.chunking.SimpleChunkingService;
 import org.hyland.contentlake.service.chunking.strategy.ChunkingStrategy.ChunkingConfig;
@@ -34,6 +38,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.support.RestClientAdapter;
 import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.Executor;
 
@@ -165,16 +170,44 @@ public class AppConfig {
         return new ConnectorDiscoveryService(connector, roots, props);
     }
 
+    /**
+     * Where a connector's change-feed position is kept between passes.
+     *
+     * <p>hxpr by default because this container has no writable mount: both its volumes are read-only, so a
+     * file store would silently fail to persist and every pass would walk. hxpr is somewhere the ingester can
+     * already write, and the state document is deliberately shaped so no sweep can see it.</p>
+     *
+     * <p>Built even when {@code connector.change-feed.enabled} is false, so that turning the feature on is a
+     * property change rather than a different wiring, and so a misconfigured path fails at startup rather
+     * than on the first pass that needed it.</p>
+     */
+    @Bean
+    public SyncCursorStore syncCursorStore(HxprService hxprService,
+                                           HxprDocumentApi documentApi,
+                                           ConnectorBatchProperties props) {
+        ConnectorBatchProperties.Cursor cursor = props.getCursor();
+        SyncCursorStore store = switch (cursor.getStore()) {
+            case HXPR -> new HxprSyncCursorStore(hxprService, documentApi, cursor.getHxprPath());
+            case FILE -> new FileSyncCursorStore(Path.of(cursor.getFile()));
+            case MEMORY -> new InMemorySyncCursorStore();
+        };
+        if (props.getChangeFeed().isEnabled()) {
+            log.info("Change-feed cursors for this connector are kept in {}", cursor.getStore());
+        }
+        return store;
+    }
+
     @Bean
     public ConnectorBatchIngestionService connectorBatchIngestionService(
             ConnectorDiscoveryService discoveryService,
             NodeSyncService nodeSyncService,
             Executor connectorBatchIngestionExecutor,
             IndexReconciliationService reconciliationService,
+            SyncCursorStore syncCursorStore,
             SelectedConnector connector,
             ConnectorBatchProperties props) {
         return new ConnectorBatchIngestionService(discoveryService, nodeSyncService,
-                connectorBatchIngestionExecutor, reconciliationService, connector, props);
+                connectorBatchIngestionExecutor, reconciliationService, syncCursorStore, connector, props);
     }
 
     @Bean

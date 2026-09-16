@@ -6,6 +6,7 @@ import org.springframework.core.io.Resource;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * What an adapter gets without implementing the optional methods.
@@ -13,6 +14,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>The point of {@link ContentSourceClient#getRootNodeId()} defaulting to {@code null} rather than
  * throwing is that a host can ask any connector where to start and act on "it does not say" (#132). A
  * default that threw would make the question unaskable.</p>
+ *
+ * <p>{@link ContentSourceClient#changesSince} defaults the other way, and the contrast is the point:
+ * there, a default that answered would be answered wrongly, because an empty page reads as "nothing
+ * changed" and would let a host skip the walk and then trust an empty deletion list.</p>
  */
 class ContentSourceClientDefaultsTest {
 
@@ -68,5 +73,24 @@ class ContentSourceClientDefaultsTest {
     void syncStatusWritesAreNoOps() {
         client.writeSyncStatus("node-1", "INDEXED", null);
         client.clearSyncStatus("node-1");
+    }
+
+    @Test
+    void declaresNoChangeFeedByDefault() {
+        assertThat(client.supportsChangeFeed()).isFalse();
+    }
+
+    /** No initial cursor means the host seeds one with a walk, which is what it would have done anyway. */
+    @Test
+    void namesNoInitialCursorByDefault() {
+        assertThat(client.initialCursor()).isNull();
+    }
+
+    /** The message names the source, so a host that called it despite the gate says which connector. */
+    @Test
+    void refusesToReadAChangeFeedByDefault() {
+        assertThatThrownBy(() -> client.changesSince("cursor-1", 100))
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessageContaining("sample");
     }
 }

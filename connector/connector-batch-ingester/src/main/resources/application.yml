@@ -59,6 +59,22 @@ connector:
     max-deletes: ${CONNECTOR_BATCH_RECONCILE_MAX_DELETES:1000}
     max-seen-ids: ${CONNECTOR_BATCH_RECONCILE_MAX_SEEN_IDS:200000}
     page-size: ${CONNECTOR_BATCH_RECONCILE_PAGE_SIZE:200}
+  # Incremental discovery, for a connector that implements ContentSourceClient.supportsChangeFeed().
+  # Enabling it asks for incremental passes; a connector without a feed is walked regardless, so this is
+  # safe to turn on where only some connectors have one. An incremental pass applies the feed's own
+  # tombstones and suspends the reconciliation sweep, so full-walk-every is what catches a deletion the
+  # feed never reported: 24 is the recommendation on a daily incremental schedule.
+  change-feed:
+    enabled: ${CONNECTOR_CHANGE_FEED_ENABLED:false}
+    page-size: ${CONNECTOR_CHANGE_FEED_PAGE_SIZE:200}
+    max-pages: ${CONNECTOR_CHANGE_FEED_MAX_PAGES:100}
+    full-walk-every: ${CONNECTOR_CHANGE_FEED_FULL_WALK_EVERY:0}
+  # Where the host keeps each source's feed position. hxpr by default because this container has no
+  # writable mount, so FILE needs one added; MEMORY forgets on restart, making the next pass a full walk.
+  cursor:
+    store: ${CONNECTOR_CURSOR_STORE:hxpr}
+    hxpr-path: ${CONNECTOR_CURSOR_HXPR_PATH:/content-lake/_state/cursors}
+    file: ${CONNECTOR_CURSOR_FILE:/data/connector-cursor.json}
   executor:
     core-size: ${CONNECTOR_BATCH_CORE_SIZE:1}
     max-size: ${CONNECTOR_BATCH_MAX_SIZE:1}

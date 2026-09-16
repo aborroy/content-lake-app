@@ -42,6 +42,16 @@ public class IngestionJob {
     @JsonIgnore
     private final AtomicInteger failedCount = new AtomicInteger(0);
 
+    /**
+     * Documents removed because the connector's change feed reported them gone or out of scope.
+     *
+     * <p>Separate from the sweep's own count in {@link #reconciliation}: on an incremental pass the feed
+     * owns deletions and no sweep runs, so without this the deletions a job applied would be invisible to
+     * the status API.</p>
+     */
+    @JsonIgnore
+    private final AtomicInteger deletedCount = new AtomicInteger(0);
+
     public void incrementDiscovered() {
         discoveredCount.incrementAndGet();
     }
@@ -56,6 +66,10 @@ public class IngestionJob {
 
     public void incrementFailed() {
         failedCount.incrementAndGet();
+    }
+
+    public void incrementDeleted() {
+        deletedCount.incrementAndGet();
     }
 
     /**
@@ -99,5 +113,10 @@ public class IngestionJob {
     @JsonProperty("failedCount")
     public int getFailedCountValue() {
         return failedCount.get();
+    }
+
+    @JsonProperty("deletedCount")
+    public int getDeletedCountValue() {
+        return deletedCount.get();
     }
 }

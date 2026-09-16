@@ -6,7 +6,9 @@ import org.hyland.connector.contentlake.batch.config.SelectedConnector;
 import org.hyland.contentlake.service.DiscoveryOutcome;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.hyland.contentlake.spi.ScopeResolver;
+import org.hyland.contentlake.spi.SourceChangePage;
 import org.hyland.contentlake.spi.SourceNode;
+import org.hyland.contentlake.spi.SourceTombstone;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -97,6 +99,152 @@ public class ConnectorDiscoveryService {
 
     /** A discovery pass and its own account of whether it covered its whole scope. */
     public record ConnectorDiscovery(List<SourceNode> nodes, DiscoveryOutcome outcome) {
+    }
+
+    /**
+     * What a connector's change feed reported, and how far through it the pass got.
+     *
+     * @param nodes         in-scope documents to ingest, in feed order
+     * @param deletions     nodes to remove: what the feed reported gone, plus anything it reported changed
+     *                      that the scope resolver no longer accepts. In an incremental pass the feed is
+     *                      the only mechanism that can notice either, since no sweep runs
+     * @param nextCursor    the furthest cursor the pass consumed, or {@code null} when it consumed none
+     * @param cursorExpired the source rejected the cursor it was given, so nothing here is usable and the
+     *                      caller has to forget its cursor and walk
+     * @param drained       whether the feed reported no further pages. {@code false} means the window is
+     *                      only partly consumed, which is not a failure: the next pass resumes from
+     *                      {@code nextCursor}
+     * @param outcome       the same completeness claim a walk makes. On an incremental pass
+     *                      {@code complete} means the feed was drained, and the covered root paths are
+     *                      empty because a feed does not enumerate a scope
+     */
+    public record ConnectorChanges(List<SourceNode> nodes,
+                                   List<SourceTombstone> deletions,
+                                   String nextCursor,
+                                   boolean cursorExpired,
+                                   boolean drained,
+                                   DiscoveryOutcome outcome) {
+
+        public ConnectorChanges {
+            nodes = nodes == null ? List.of() : List.copyOf(nodes);
+            deletions = deletions == null ? List.of() : List.copyOf(deletions);
+        }
+
+        /** The cursor is gone; the caller falls back to a walk in the same job. */
+        static ConnectorChanges expired(String reason) {
+            return new ConnectorChanges(List.of(), List.of(), null, true, false,
+                    DiscoveryOutcome.incomplete(List.of(), List.of(reason)));
+        }
+    }
+
+    /**
+     * Reads a connector's change feed instead of walking it, up to {@code maxPages} pages.
+     *
+     * <p>Only the connector host does this, and only for a connector that answers
+     * {@link ContentSourceClient#supportsChangeFeed()}. A feed page is a first-hand statement about the
+     * nodes it names, so its deletions need none of the ratio guards a walk's inferred deletions do -- but
+     * for the same reason a feed cannot notice anything it failed to report, which is what
+     * {@code connector.change-feed.full-walk-every} exists to correct.</p>
+     *
+     * <p>Folders are dropped rather than ingested, matching the walk: a container has no content to
+     * extract. A changed document the scope resolver rejects becomes an out-of-scope deletion, because a
+     * node leaving scope is indistinguishable, from the index's side, from a node being removed, and no
+     * sweep will run to notice.</p>
+     *
+     * @param cursor   where to resume; never {@code null} in practice, since a caller with no cursor walks
+     * @param pageSize soft bound on the changes requested per page
+     * @param maxPages how many pages one pass may consume before leaving the rest for the next one
+     */
+    public ConnectorChanges discoverIncremental(String cursor, int pageSize, int maxPages) {
+        List<SourceNode> nodes = new ArrayList<>();
+        List<SourceTombstone> deletions = new ArrayList<>();
+        List<String> reasons = new ArrayList<>();
+        int effectivePageSize = Math.max(1, pageSize);
+        int pageBudget = Math.max(1, maxPages);
+
+        String position = cursor;
+        String consumed = null;
+        boolean drained = false;
+
+        for (int page = 0; page < pageBudget; page++) {
+            SourceChangePage changes;
+            try {
+                changes = client.changesSince(position, effectivePageSize);
+            } catch (Exception e) {
+                // Contained like a failed container listing: what earlier pages reported is already correct,
+                // and the pass simply did not finish.
+                String reason = "Reading the change feed after cursor '" + position + "' failed: "
+                        + e.getMessage();
+                log.error("Connector change feed failed after {} page(s); keeping what it reported so far",
+                        page, e);
+                reasons.add(reason);
+                break;
+            }
+
+            if (changes == null) {
+                String reason = "The change feed returned no page for cursor '" + position + "'";
+                log.error("Connector change feed returned null for cursor {}", position);
+                reasons.add(reason);
+                break;
+            }
+            if (changes.cursorExpired()) {
+                log.warn("Connector change feed reports cursor '{}' expired after {} page(s); "
+                        + "the cursor will be cleared and the source walked", position, page);
+                return ConnectorChanges.expired("Cursor '" + position + "' expired at the source");
+            }
+
+            for (SourceNode node : changes.changed()) {
+                if (node == null || node.nodeId() == null) {
+                    continue;
+                }
+                if (node.folder()) {
+                    continue;
+                }
+                if (scopeResolver.isInScope(node)) {
+                    nodes.add(node);
+                } else {
+                    deletions.add(new SourceTombstone(node.nodeId(), node.modifiedAt(),
+                            SourceTombstone.Reason.OUT_OF_SCOPE));
+                }
+            }
+            for (SourceTombstone tombstone : changes.deleted()) {
+                if (tombstone != null && tombstone.nodeId() != null && !tombstone.nodeId().isBlank()) {
+                    deletions.add(tombstone);
+                }
+            }
+
+            if (changes.nextCursor() != null && !changes.nextCursor().isBlank()) {
+                consumed = changes.nextCursor();
+                position = consumed;
+            } else if (changes.moreAvailable()) {
+                // More to come but nowhere to resume from: continuing would re-read the same window, and
+                // the pass cannot claim the feed was drained.
+                String reason = "The change feed reported more pages but no cursor to resume from";
+                log.error("Connector change feed offered more pages without a next cursor; stopping");
+                reasons.add(reason);
+                break;
+            }
+
+            if (!changes.moreAvailable()) {
+                drained = true;
+                break;
+            }
+        }
+
+        if (!drained && reasons.isEmpty()) {
+            reasons.add("The change feed still had pages after the " + pageBudget
+                    + "-page limit for one pass");
+            log.info("Connector change feed stopped at the {}-page limit; the next pass resumes from the "
+                    + "cursor it reached", pageBudget);
+        }
+
+        DiscoveryOutcome outcome = drained
+                ? DiscoveryOutcome.complete(List.of())
+                : DiscoveryOutcome.incomplete(List.of(), reasons);
+
+        log.info("Connector change feed reported {} change(s) and {} deletion(s); feed {}",
+                nodes.size(), deletions.size(), drained ? "drained" : "not drained");
+        return new ConnectorChanges(nodes, deletions, consumed, false, drained, outcome);
     }
 
     public List<SourceNode> discover() {

@@ -315,6 +315,28 @@ An event timestamp, when present, is compared against the stored `source_modifie
 than the indexed version is skipped. That guard orders events; it does not veto a reconciliation sweep,
 which observed the source directly and therefore carries no event time.
 
+### One owner per job
+
+A batch job either walks its source or reads its change feed, and whichever mechanism ran owns that job's
+deletions:
+
+| Pass | Who deletes | What guards it |
+|---|---|---|
+| Walk | The reconciliation sweep, from the difference between the index and what discovery enumerated | Completeness, node failures, `max-delete-ratio`, `max-deletes`, scope |
+| Incremental | The feed, from the tombstones it reported | Nothing beyond the per-node timestamp check |
+
+A tombstone with `Reason.DELETED` or `Reason.OUT_OF_SCOPE` from a change feed therefore bypasses the ratio
+and cap guards, and that is deliberate. Those guards exist to second-guess deletions a walk *inferred* from
+an enumeration that may silently have been partial; a connector naming one node id is a first-hand statement
+about that node, and there is no ratio to compute because a feed page is not a census of anything.
+
+The cost is that a deletion the feed never reported is never noticed. `connector.change-feed.full-walk-every`
+is what pays it back: it forces a walk, sweep included, every Nth pass.
+
+On an incremental pass a changed document the `ScopeResolver` rejects becomes an `OUT_OF_SCOPE` tombstone
+rather than being ignored. From the index's side, a node leaving scope and a node being removed are the same
+thing, and with the sweep suspended the feed is the only mechanism that could notice either.
+
 ## Reconciliation Sweep
 
 Deletion otherwise depends entirely on a delete event arriving. With the live ingester down, a dropped
@@ -355,7 +377,13 @@ The sweep's outcome is attached to the job, so `GET /api/sync/status/{jobId}` re
 
 Any `status` other than `COMPLETED` means nothing was deleted, and says why:
 `DISABLED`, `SKIPPED_INCOMPLETE_DISCOVERY`, `SKIPPED_NODE_FAILURES`, `SKIPPED_EMPTY_DISCOVERY`,
-`ABORTED_SEEN_SET_OVERFLOW`, `ABORTED_SCAN_FAILED`, `ABORTED_RATIO`, `ABORTED_ABSOLUTE_CAP`.
+`SKIPPED_INCREMENTAL_RUN`, `ABORTED_SEEN_SET_OVERFLOW`, `ABORTED_SCAN_FAILED`, `ABORTED_RATIO`,
+`ABORTED_ABSOLUTE_CAP`.
+
+`SKIPPED_INCREMENTAL_RUN` is the connector host reporting that the job read a change feed, so the feed owned
+its deletions and there was no enumeration of the source for a sweep to compare the index against. It is a
+separate status from `DISABLED` because an operator reading `DISABLED` on a deployment that enabled the sweep
+would go looking for the misconfiguration, and there is none.
 
 **Expect the first sweep on an existing corpus to abort on the ratio guard.** A corpus that has
 accumulated drift genuinely has many documents to remove, and the guard cannot tell that from a broken
@@ -372,6 +400,72 @@ plugin connector's `SourceNode.path()` is whatever the connector decided: one re
 sweep everything under that source's target path. Read `resolvedRootPaths` from a completed run before
 enabling it. Its walk also reports an incomplete pass whenever a container could not be listed, which is
 routine rather than exceptional there, and an incomplete pass never deletes.
+
+A pass driven by a change feed suspends the sweep entirely and records `SKIPPED_INCREMENTAL_RUN`, so on a
+feed-capable connector `full-walk-every` is what decides how often the sweep actually gets to run.
+
+## Incremental Discovery (Change Feeds)
+
+Walking a source is authoritative but proportional to its size. A source that can report what changed since
+a previous pass can be read instead, and `connector-batch-ingester` is the only host that does this: the
+Alfresco and Nuxeo batch ingesters do not discover through `ContentSourceClient` at all, both live ingesters
+are already event- or cursor-driven, and the filesystem source has no feed.
+
+Three optional methods on `ContentSourceClient` carry it, all defaulted, so every existing adapter and every
+connector jar already built is unaffected and keeps being walked exactly as before:
+
+| Method | Default | Meaning |
+|---|---|---|
+| `supportsChangeFeed()` | `false` | The capability gate, and the only thing the host checks before taking the incremental path |
+| `initialCursor()` | `null` | The source's position as of now, for a host that has none stored yet |
+| `changesSince(cursor, maxItems)` | throws | One page: changed nodes, tombstones, the next cursor, whether more is available, and whether the cursor expired |
+
+`changesSince` throws by default rather than returning an empty page. An empty page is indistinguishable from
+"nothing changed", and a host that skipped its walk on that basis would index nothing while treating the empty
+deletion list as authoritative.
+
+### How one pass decides
+
+A job reads the feed only when the feature is enabled, the connector claims a feed, a cursor is already
+stored, and that cursor has not driven `full-walk-every` passes yet. Every condition fails towards walking.
+
+A first pass therefore always walks, and seeds the cursor from the position it read **before** the walk
+started. Reading the position first and saving it second means a change made while the walk ran is replayed by
+the next incremental pass rather than falling between the two mechanisms. A connector whose `initialCursor()`
+answers `null` cannot be resumed and is walked on every pass, which is a supported outcome and is what a
+source with no feed does anyway.
+
+The cursor advances only after a pass with no node failures, mirroring the sweep's own
+`SKIPPED_NODE_FAILURES` guard: a pass that could not apply some of what the feed named must not claim to have
+consumed the window. Re-reading a window is safe, because ingestion is idempotent per node and deleting an
+already-absent document reports `NOT_FOUND` rather than failing. A pass stopped by `max-pages` does save the
+cursor it reached, or a busy source would re-read its first pages forever and never catch up.
+
+`cursorExpired` on a page is not an error; every real feed has that state, whether it is an invalidated delta
+link or an aged-out marker. The host clears the cursor, logs at WARN, and falls through to a full walk in the
+same job with the sweep as configured. Expiry is the designed bridge back to the authoritative mechanism.
+
+### Where the cursor lives
+
+The host owns cursor storage through `SyncCursorStore`, keyed on the same `"<sourceType>:<sourceId>"` string
+the reconciliation sweep scans by, so cursor keys and sweep logs name a source identically. A connector
+persists nothing.
+
+| `connector.cursor.store` | Where | When |
+|---|---|---|
+| `hxpr` (default) | One state document per source under `connector.cursor.hxpr-path` | The deployment gives this container no writable mount, and hxpr is somewhere it can already write |
+| `file` | JSON at `connector.cursor.file` | A deployment that does mount writable state |
+| `memory` | Nowhere | Dev, and the honest answer where neither of the above is available: every pass after a restart walks |
+
+The hxpr state document is safe **only because** of what it does not carry. It has no `cin_sourceId`, so the
+sweep's source scan cannot reach it; no `cin_paths`, so the scope predicate cannot match it; no `cin_id`, so
+an unqualified node lookup cannot mistake it for a source node; and no `_e_*` embedding children, so no query
+can return it, since both retrieval legs read chunks from the embeddings index. Nothing in the type system
+enforces any of those, which is why each has a test of its own.
+
+`nuxeo-live-ingester` keeps its own `FileAuditCursorStore` at `nuxeo.live.audit.cursor-file` and is
+deliberately not converged onto `SyncCursorStore`: doing so would change a shipped on-disk format and a
+shipped property name for no functional gain.
 
 ## Embedding Storage and the Embedding Type
 
