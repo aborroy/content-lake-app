@@ -115,7 +115,7 @@ public class SemanticSearchResponse {
         /** Source-system identifier stored in cin_sourceId. */
         private String sourceId;
 
-        /** Short source type label such as `alfresco` or `nuxeo`. */
+        /** Short source type label, such as `alfresco`, `nuxeo`, `filesystem` or a connector plugin's own type. */
         private String sourceType;
 
         /** Source document name. */

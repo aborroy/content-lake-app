@@ -45,7 +45,7 @@ public class RagPromptRequest {
     /** Optional HXQL filter to scope the search. */
     private String filter;
 
-    /** Optional source type filter (`alfresco` or `nuxeo`). */
+    /** Optional source type filter: any ingested source type, such as `alfresco`, `nuxeo`, `filesystem` or a connector plugin's own type. */
     private String sourceType;
 
     /** Embedding type to match. */

@@ -71,7 +71,7 @@ public class HybridSearchRequest {
      */
     private String namedQuery;
 
-    /** Optional source type filter (`alfresco` or `nuxeo`). */
+    /** Optional source type filter: any ingested source type, such as `alfresco`, `nuxeo`, `filesystem` or a connector plugin's own type. */
     private String sourceType;
 
     /** Optional structured metadata filter layer (source mime, path, modified range, custom properties). */

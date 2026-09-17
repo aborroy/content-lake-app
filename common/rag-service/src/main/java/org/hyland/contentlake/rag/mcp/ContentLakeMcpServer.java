@@ -61,7 +61,7 @@ public class ContentLakeMcpServer {
             @ToolParam(description = "The natural-language search query") String query,
             @ToolParam(description = "Maximum results to return (default 5)", required = false) Integer topK,
             @ToolParam(description = "Optional HXQL filter to scope the search", required = false) String filter,
-            @ToolParam(description = "Optional source type filter: alfresco or nuxeo", required = false)
+            @ToolParam(description = "Optional source type filter: any ingested source type, such as alfresco, nuxeo, filesystem or a connector plugin type", required = false)
             String sourceType) {
         SemanticSearchRequest request = SemanticSearchRequest.builder()
                 .query(query)

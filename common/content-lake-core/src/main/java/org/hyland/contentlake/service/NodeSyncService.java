@@ -31,6 +31,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -81,6 +83,18 @@ public class NodeSyncService {
     private static final String P_CL_EXTRACTED_TEXT = ContentLakeIngestProperties.CONTENT_LAKE_EXTRACTED_TEXT;
     private static final String P_CL_SECTION_MAP    = ContentLakeIngestProperties.CONTENT_LAKE_SECTION_MAP;
     private static final String P_CL_FINGERPRINT    = ContentLakeIngestProperties.CONTENT_LAKE_CONTENT_FINGERPRINT;
+
+    /**
+     * Fixed-width UTC, so {@code source_modifiedAt} orders correctly under a text comparison.
+     *
+     * <p>Nine fractional digits, not three. A source's timestamp has to survive this format unchanged or
+     * the staleness check reads an unmodified node as modified; a local filesystem reports nanoseconds
+     * (`2026-09-17T09:23:25.023986867Z`), and truncating that to milliseconds makes every later pass see
+     * a node newer than its stored copy and re-extract and re-embed the whole corpus, for ever. Sources
+     * with coarser precision are zero-padded, which costs nothing and still sorts.</p>
+     */
+    private static final DateTimeFormatter SOURCE_MODIFIED_AT_FORMAT =
+            DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'");
 
     /**
      * Ingest properties derived from the document's content rather than from its source metadata.
@@ -1072,10 +1086,57 @@ public class NodeSyncService {
         return sourceId;
     }
 
+    /**
+     * Builds {@code cin_ingestProperties} from the node's own record fields, then its source properties.
+     *
+     * <p>The generic {@code source_*} keys are seeded from the {@link SourceNode} record rather than
+     * left to each adapter. {@code SourceNode} already carries {@code sourceType}, {@code name},
+     * {@code path}, {@code mimeType} and {@code modifiedAt}, and those are exactly the values
+     * {@code SourceMetadataResolver} and the {@code sourceType} search filter look for under these
+     * keys. The three in-tree adapters duplicate them into their property maps by hand; a connector
+     * loaded from a jar gets no such help, and nothing told its author the duplication was required.
+     * Seeding them here fixes every present and future connector at once and makes that duplication
+     * redundant rather than load-bearing.</p>
+     *
+     * <p>{@code sourceProperties} is applied last, so an adapter that wants a different value for one
+     * of these keys still wins and the in-tree sources are unaffected.</p>
+     */
     private Map<String, Object> buildIngestProperties(SourceNode node) {
-        Map<String, Object> props = new LinkedHashMap<>(node.sourceProperties());
+        Map<String, Object> props = new LinkedHashMap<>();
+        props.put(ContentLakeIngestProperties.SOURCE_NODE_ID, node.nodeId());
+        props.put(ContentLakeIngestProperties.SOURCE_TYPE, node.sourceType());
+        props.put(ContentLakeIngestProperties.SOURCE_NAME, node.name());
+        props.put(ContentLakeIngestProperties.SOURCE_PATH, node.path());
+        props.put(ContentLakeIngestProperties.SOURCE_MIME_TYPE, node.mimeType());
+        props.put(P_SOURCE_MODIFIED_AT, formatSourceModifiedAt(node.modifiedAt()));
+        props.putAll(node.sourceProperties());
         props.values().removeIf(Objects::isNull);
         return props;
+    }
+
+    /**
+     * Renders a modification timestamp as fixed-width UTC, because this property is compared as a string.
+     *
+     * <p>{@code source_modifiedAt} is not decorative: {@link #getStoredModifiedAt} reads it back for the
+     * staleness short circuit, and the {@code modifiedAfter} / {@code modifiedBefore} metadata filters
+     * emit HXQL range predicates against it. The staleness path parses the value, so it tolerates any
+     * shape; the range predicates compare it as text, which only orders correctly if every value has the
+     * same width and the same offset.</p>
+     *
+     * <p>That rules out {@code OffsetDateTime.toString()}, which is neither. It elides zero seconds and
+     * trailing zero fractions, so the same clock renders as {@code 2026-09-17T10:00Z} or
+     * {@code 2026-09-17T10:00:00.123Z} depending on the value, and those do not sort against each
+     * other.</p>
+     *
+     * <p>It also has to be lossless, which is the less obvious constraint: {@link #isStale} asks whether
+     * the incoming timestamp is *after* the stored one, so a format that drops precision makes every
+     * unchanged node look modified and re-extracts the corpus on every sweep. Hence nine fractional
+     * digits, which is what a local filesystem reports.</p>
+     */
+    private static String formatSourceModifiedAt(OffsetDateTime modifiedAt) {
+        return modifiedAt == null
+                ? null
+                : SOURCE_MODIFIED_AT_FORMAT.format(modifiedAt.withOffsetSameInstant(ZoneOffset.UTC));
     }
 
     private String formatSourceId(SourceNode node) {
