@@ -57,8 +57,17 @@ upper-cased, which makes `cmis.page-size` reachable as `CMIS_PAGE_SIZE`.
 ### Ingesting Through A Plugin Connector
 
 Every ingester loads a connector; `connector-batch-ingester` is the one that ingests with it. The Alfresco,
-Nuxeo and filesystem ingesters each drive a client they were compiled against, so for them a mounted jar is
-listed and otherwise inert.
+Nuxeo and filesystem ingesters each drive a client they were compiled against, so they never ingest from a
+mounted jar and only list what they found.
+
+Loading is not the same as being inert, though. Validation is fail-closed by default, so a jar whose
+required settings are supplied only to `connector-batch-ingester` would otherwise stop the other five
+ingesters at startup over a connector they were never going to use. They therefore default
+`content-lake.connector.validation` to `warn`: the jar and the reason it did not load appear under
+`problems[]` on `GET /api/connectors`, and ingestion continues. Set `CONNECTOR_VALIDATION=fail` on one of
+those services (or `CONNECTOR_VALIDATION_INGESTERS=fail` for all five in the deployment stack) to make it
+refuse to start instead. `connector-batch-ingester` still defaults to `fail`, because for it a connector
+that will not load means there is nothing to ingest.
 
 ```bash
 # From content-lake-app-deployment, on top of any base profile

@@ -91,6 +91,16 @@ hxpr:
   username: ${HXPR_USERNAME:admin}
   password: ${HXPR_PASSWORD:password}
 
+# The connector plugin loader, in core. Every ingester mounts the same plugin directory, but this
+# service ingests through the client it was compiled against and never from a mounted jar: it only
+# lists what it found. So a jar whose required settings are supplied to connector-batch-ingester alone
+# is not this service's problem, and refusing to start over it would stop an unrelated ingestion for a
+# reason this service cannot act on. warn reports the jar and the reason it did not load on
+# GET /api/connectors and starts anyway; set CONNECTOR_VALIDATION=fail to refuse to start instead.
+content-lake:
+  connector:
+    validation: ${CONNECTOR_VALIDATION:warn}
+
 management:
   endpoints:
     web:

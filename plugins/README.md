@@ -54,7 +54,13 @@ cp plugins/cmis-connector/target/cmis-connector-1.0.0.jar \
 ```
 
 Only `connector-batch-ingester` **ingests** with a plugin. The Alfresco, Nuxeo and filesystem ingesters each
-drive a client they were compiled against, so for them a mounted jar is listed and otherwise inert.
+drive a client they were compiled against, so they only list what they found in the plugin directory.
+
+They still load it, so a jar is not inert: with fail-closed validation, one whose settings are configured
+for `connector-batch-ingester` alone would stop those five at startup. They default
+`content-lake.connector.validation` to `warn` for that reason, reporting the jar under `problems[]` on
+`GET /api/connectors` and starting anyway. `connector-batch-ingester` keeps the `fail` default, since a
+connector it cannot load leaves it with nothing to ingest.
 
 ## Writing a new one
 
