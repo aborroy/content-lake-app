@@ -66,9 +66,9 @@ class MockGraphServerTest {
             deltaLink = GraphHttpClient.text(response.body(), "@odata.deltaLink");
         }
 
-        // 14 fixtures at 3 per page: the feed has to be drained, not sampled.
+        // 15 fixtures at 3 per page: the feed has to be drained, not sampled.
         assertThat(pages).isEqualTo(5);
-        assertThat(ids).hasSize(14).contains("root", "i-quarterly", "i-deep");
+        assertThat(ids).hasSize(15).contains("root", "i-quarterly", "i-deep", "i-report");
         // The last page, and only the last page, carries the cursor to store.
         assertThat(deltaLink).isNotNull().contains("token=delta-");
     }

@@ -168,7 +168,8 @@ class SharePointConnectorClientTest {
                 .containsExactly("quarterly-review.txt", "incident-log.md");
         assertThat(rootPageTwo).extracting(SourceNode::name)
                 .containsExactly("restricted-group", "org-link");
-        assertThat(publicPageTwo).extracting(SourceNode::name).containsExactly("obsolete-note.txt");
+        assertThat(publicPageTwo).extracting(SourceNode::name)
+                .containsExactly("obsolete-note.txt", "quarterly-report.pdf");
     }
 
     @Test
@@ -318,7 +319,8 @@ class SharePointConnectorClientTest {
         List<SourceNode> children = client.getChildren(DRIVE + ":f-public", 0, 10);
 
         assertThat(children).extracting(SourceNode::name)
-                .containsExactly("quarterly-review.txt", "incident-log.md", "obsolete-note.txt");
+                .containsExactly("quarterly-review.txt", "incident-log.md", "obsolete-note.txt",
+                        "quarterly-report.pdf");
     }
 
     @Test

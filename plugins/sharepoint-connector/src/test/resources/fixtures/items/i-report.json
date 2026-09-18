@@ -1,0 +1,13 @@
+{
+  "id": "i-report",
+  "name": "quarterly-report.pdf",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/quarterly-report.pdf",
+  "eTag": "\"{i-report},2\"",
+  "cTag": "\"c:{i-report},1\"",
+  "size": 700,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public" },
+  "file": { "mimeType": "application/pdf", "hashes": { "quickXorHash": "mock-hash-i-report" } },
+  "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" }
+}
