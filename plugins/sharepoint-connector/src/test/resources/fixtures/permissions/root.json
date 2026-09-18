@@ -1,0 +1,21 @@
+{
+  "value": [
+    {
+      "id": "site-owners-role",
+      "roles": [ "owner" ],
+      "grantedToV2": {
+        "siteGroup": { "id": "3", "displayName": "Content Lake Owners", "loginName": "Content Lake Owners" }
+      }
+    },
+    {
+      "id": "everyone-except-external",
+      "roles": [ "read" ],
+      "grantedToV2": {
+        "group": {
+          "id": "everyone-except-external-guid",
+          "displayName": "Everyone except external users"
+        }
+      }
+    }
+  ]
+}

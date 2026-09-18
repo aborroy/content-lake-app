@@ -1,0 +1,10 @@
+{
+  "value": [
+    {
+      "id": "b!mock-drive-id",
+      "name": "Documents",
+      "driveType": "documentLibrary",
+      "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents"
+    }
+  ]
+}

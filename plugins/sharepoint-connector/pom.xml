@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        A shipped connector, not a module of content-lake-app: no parent, absent from the root POM, and
+        named in no Dockerfile. Same rules as cmis-connector next door, and for the same reason.
+
+        maven.compiler.release stays at 21 while the reactor targets 25: this jar is dropped into
+        whatever ingester a deployment happens to run.
+
+        Build it standalone, with content-lake-spi installed in the local repository:
+
+            mvn -f ../../pom.xml -pl common/content-lake-spi -am install -DskipTests
+            mvn -f pom.xml package
+
+        The result is target/sharepoint-connector-1.0.0.jar, to be dropped into the deployment's
+        connectors/ directory and run on connector-batch-ingester.
+    -->
+    <groupId>org.hyland.contentlake</groupId>
+    <artifactId>sharepoint-connector</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <name>sharepoint-connector</name>
+    <description>Content Lake connector plugin for SharePoint Online, through Microsoft Graph</description>
+
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.release>21</maven.compiler.release>
+        <content-lake.version>1.0.0-SNAPSHOT</content-lake.version>
+        <spring.version>7.0.8</spring.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <msal4j.version>1.26.0</msal4j.version>
+        <jackson.version>2.22.0</jackson.version>
+        <junit.version>5.11.4</junit.version>
+        <assertj.version>3.27.3</assertj.version>
+        <mockito.version>5.14.2</mockito.version>
+    </properties>
+
+    <repositories>
+        <repository>
+            <id>alfresco-public</id>
+            <url>https://artifacts.alfresco.com/nexus/content/groups/public</url>
+        </repository>
+    </repositories>
+
+    <dependencies>
+        <!-- Provided by the ingester at runtime. The plugin classloader delegates to its parent first,
+             so a bundled copy would resolve to the host's classes anyway, and a second copy of the SPI
+             types would not be the classes the host loaded. -->
+        <dependency>
+            <groupId>org.hyland</groupId>
+            <artifactId>content-lake-spi</artifactId>
+            <version>${content-lake.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- ContentSourceClient returns a Spring Resource. Also the host's. -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-core</artifactId>
+            <version>${spring.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- msal4j logs through slf4j, and the host is a Spring Boot application that has it with a
+             binding already. Bundling a second api would risk two bindings and a warning at best. -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>${slf4j.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- Token acquisition. Earns its place over hand-rolling the OAuth call because it caches
+             tokens, handles expiry skew, and supports certificate credentials, which a production
+             tenant wants instead of a client secret. Shaded, since no host provides it. -->
+        <dependency>
+            <groupId>com.microsoft.azure</groupId>
+            <artifactId>msal4j</artifactId>
+            <version>${msal4j.version}</version>
+        </dependency>
+
+        <!-- Graph responses. Shaded AND relocated: see the shade configuration below. -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>${mockito.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>sharepoint-connector-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+
+            <!--
+                One self-contained jar, because ConnectorPluginLoader puts the directory's jars on a
+                URLClassLoader and resolves nothing else. The SPI, Spring and slf4j are `provided` and
+                therefore not shaded, which is required rather than an optimisation.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <!-- Signatures do not survive shading, and a module descriptor
+                                             from a dependency would claim this jar is that module. -->
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>module-info.class</exclude>
+                                        <!--
+                                            Multi-release classes, dropped for two reasons that compound.
+                                            The shade plugin does not rewrite paths under
+                                            META-INF/versions/, so Jackson's versioned classes survive
+                                            relocation under their original package name and nothing
+                                            references them. And this jar's manifest carries no
+                                            Multi-Release entry, so the JVM would ignore them anyway.
+                                            Keeping them would mean 50 KB of classes that look like an
+                                            unrelocated Jackson to anyone auditing the jar.
+                                        -->
+                                        <exclude>META-INF/versions/**</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <relocations>
+                                <!--
+                                    Jackson is the one dependency the host also has, and a parent-first
+                                    classloader means the host's copy wins for any class of the same
+                                    name. Shading it unrelocated would therefore be dead weight, and
+                                    relying on the host's copy makes this jar's behaviour depend on a
+                                    version it does not choose: content-lake-core pins jackson-databind
+                                    today, and a host that moved to Jackson 3 would break this plugin at
+                                    runtime with no build-time signal. Relocating is what makes the jar
+                                    carry the version it was tested against.
+                                -->
+                                <relocation>
+                                    <pattern>com.fasterxml.jackson</pattern>
+                                    <shadedPattern>
+                                        org.hyland.contentlake.connector.sharepoint.shaded.jackson
+                                    </shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <transformers>
+                                <!-- Keeps this plugin's ConnectorPlugin service file, and any that
+                                     travel with a dependency, rather than one replacing the other. -->
+                                <transformer
+                                    implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

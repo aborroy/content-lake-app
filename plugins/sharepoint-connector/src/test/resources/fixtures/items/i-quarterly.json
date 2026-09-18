@@ -1,0 +1,15 @@
+{
+  "id": "i-quarterly",
+  "name": "quarterly-review.txt",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/quarterly-review.txt",
+  "eTag": "\"{i-quarterly},2\"",
+  "cTag": "\"c:{i-quarterly},1\"",
+  "size": 74,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public", "siteId": "contoso.sharepoint.com,site-guid,web-guid" },
+  "file": { "mimeType": "text/plain", "hashes": { "quickXorHash": "mock-hash-i-quarterly" } },
+  "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" },
+  "createdBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams", "email": "alice@contoso.com" } },
+  "lastModifiedBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams", "email": "alice@contoso.com" } }
+}

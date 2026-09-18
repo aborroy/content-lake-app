@@ -1,0 +1,7 @@
+{
+  "id": "i-removed",
+  "name": "obsolete-note.txt",
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public" },
+  "deleted": { "state": "deleted" },
+  "file": { "mimeType": "text/plain" }
+}

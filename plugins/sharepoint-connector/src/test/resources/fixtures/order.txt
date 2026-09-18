@@ -1,0 +1,16 @@
+# Item ids in the order this drive's delta feed reports them, one per line.
+# Folders come before their children, which is what a real delta does for a freshly built tree.
+root
+f-public
+i-quarterly
+i-incident
+i-removed
+f-user
+i-named
+f-group
+i-group
+f-orglink
+i-orgwide
+f-nested
+f-level-two
+i-deep

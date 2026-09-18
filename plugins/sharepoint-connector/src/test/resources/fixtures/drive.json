@@ -1,0 +1,8 @@
+{
+  "id": "b!mock-drive-id",
+  "name": "Documents",
+  "driveType": "documentLibrary",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents",
+  "owner": { "group": { "id": "site-group-guid", "displayName": "Content Lake Site Owners" } },
+  "quota": { "total": 27487790694400, "used": 1048576, "state": "normal" }
+}

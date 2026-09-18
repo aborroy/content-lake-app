@@ -1,0 +1,13 @@
+{
+  "id": "f-level-two",
+  "name": "level-two",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/level-two",
+  "eTag": "\"{f-level-two},1\"",
+  "cTag": "\"c:{f-level-two},0\"",
+  "size": 0,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-nested", "siteId": "contoso.sharepoint.com,site-guid,web-guid" },
+  "folder": { "childCount": 1 },
+  "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" }
+}

@@ -1,0 +1,18 @@
+{
+  "value": [
+    {
+      "id": "users-link",
+      "roles": [ "read" ],
+      "link": { "scope": "users", "type": "view", "webUrl": "https://contoso.sharepoint.com/:t:/s/lake/mock-users-link" },
+      "grantedToIdentitiesV2": [
+        {
+          "user": {
+            "id": "user-guid-carol",
+            "displayName": "Carol Clark",
+            "userPrincipalName": "carol@contoso.com"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+# The first incremental delta call after a cursor was stored reports one deletion.
+# The fixture file is named for the fixture key, while the payload's own "id" is the real item id.
+i-removed-deleted

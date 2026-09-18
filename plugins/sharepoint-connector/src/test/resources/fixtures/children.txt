@@ -1,0 +1,9 @@
+# "<parentId>: <childId> <childId> ..." -- one parent per line.
+# Stated rather than derived from each item's parentReference, because the mock parses no JSON.
+root: f-public f-user f-group f-orglink f-nested
+f-public: i-quarterly i-incident i-removed
+f-user: i-named
+f-group: i-group
+f-orglink: i-orgwide
+f-nested: f-level-two
+f-level-two: i-deep

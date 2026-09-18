@@ -1,0 +1,13 @@
+{
+  "id": "root",
+  "name": "Documents",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/Documents",
+  "eTag": "\"{root},1\"",
+  "cTag": "\"c:{root},0\"",
+  "size": 0,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "", "siteId": "contoso.sharepoint.com,site-guid,web-guid" },
+  "folder": { "childCount": 5 },
+  "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" }
+}

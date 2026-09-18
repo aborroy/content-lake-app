@@ -1,0 +1,25 @@
+{
+  "value": [
+    {
+      "id": "organization-link",
+      "roles": [ "read" ],
+      "shareId": "u!mock-share-org",
+      "hasPassword": false,
+      "link": {
+        "scope": "organization",
+        "type": "view",
+        "webUrl": "https://contoso.sharepoint.com/:t:/s/lake/mock-org-link",
+        "preventsDownload": false
+      }
+    },
+    {
+      "id": "anonymous-link-that-grants-nothing",
+      "roles": [ "read" ],
+      "link": {
+        "scope": "anonymous",
+        "type": "view",
+        "webUrl": "https://contoso.sharepoint.com/:t:/s/lake/mock-anon-link"
+      }
+    }
+  ]
+}

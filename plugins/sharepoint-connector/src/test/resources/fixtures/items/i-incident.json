@@ -1,0 +1,15 @@
+{
+  "id": "i-incident",
+  "name": "incident-log.md",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/incident-log.md",
+  "eTag": "\"{i-incident},2\"",
+  "cTag": "\"c:{i-incident},1\"",
+  "size": 96,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public", "siteId": "contoso.sharepoint.com,site-guid,web-guid" },
+  "file": { "mimeType": "text/markdown", "hashes": { "quickXorHash": "mock-hash-i-incident" } },
+  "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" },
+  "createdBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams", "email": "alice@contoso.com" } },
+  "lastModifiedBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams", "email": "alice@contoso.com" } }
+}
