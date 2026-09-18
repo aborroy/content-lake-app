@@ -1,0 +1,11 @@
+{
+  "value": [
+    {
+      "id": "page-two-grant",
+      "roles": [ "read" ],
+      "grantedToV2": {
+        "user": { "id": "user-guid-page-two", "userPrincipalName": "page.two@contoso.com" }
+      }
+    }
+  ]
+}

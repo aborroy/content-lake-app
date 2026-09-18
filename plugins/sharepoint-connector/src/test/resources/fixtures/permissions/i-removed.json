@@ -1,1 +1,15 @@
-{ "value": [] }
+{
+  "value": [
+    {
+      "id": "inherited-everyone-except-external",
+      "roles": [ "read" ],
+      "inheritedFrom": { "driveId": "b!mock-drive-id", "id": "root", "path": "/drive/root:" },
+      "grantedToV2": {
+        "group": {
+          "id": "everyone-except-external-guid",
+          "displayName": "Everyone except external users"
+        }
+      }
+    }
+  ]
+}

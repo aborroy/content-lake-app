@@ -115,7 +115,8 @@ class MockGraphServerTest {
 
         // An empty page here would be indistinguishable from "nothing changed", and a host that treated
         // its empty deleted list as authoritative would delete nothing while believing it had checked.
-        assertThat(response.body().get("error").get("code").asText()).isEqualTo("resyncRequired");
+        assertThat(response.body().get("error").get("code").asText())
+                .isEqualTo("resyncChangesApplyDifferences");
     }
 
     @Test

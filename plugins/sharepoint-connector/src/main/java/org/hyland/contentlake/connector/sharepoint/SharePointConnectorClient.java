@@ -69,10 +69,17 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     private static final int MAX_CACHED_PAGE_LINKS = 10_000;
 
+    /** How often the cost and ACL summary is emitted, after the first document. */
+    private static final int PROGRESS_EVERY = 100;
+
     private final SharePointConnectorSettings settings;
     private final GraphHttpClient graph;
     private final SharePointAclMapper aclMapper;
     private final ObjectMapper json = new ObjectMapper();
+
+    /** Documents mapped in this process, for the periodic progress report. */
+    private final java.util.concurrent.atomic.AtomicLong documentsMapped =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** {@code <containerNodeId>@<skip>} to the Graph link that serves that page. */
     private final Map<String, String> pageLinks = new ConcurrentHashMap<>();
@@ -366,6 +373,23 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     }
 
     /**
+     * Reports cost and ACL limitations as a pass runs, because nothing tells a connector a pass has ended.
+     *
+     * <p>{@code ContentSourceClient} has no end-of-pass hook, so a summary emitted only on completion would
+     * never be emitted at all: the host stops calling this client and that is that. Reporting periodically
+     * also answers the question earlier, which is the useful moment for both numbers. Cost per document
+     * after one document is what tells an operator whether a million will fit in the tenant's daily budget,
+     * and how many documents are retrievable by nobody is worth knowing before the crawl finishes rather
+     * than after.</p>
+     */
+    private void reportProgress() {
+        long mapped = documentsMapped.incrementAndGet();
+        if (mapped == 1 || mapped % PROGRESS_EVERY == 0) {
+            logSummary(mapped);
+        }
+    }
+
+    /**
      * Maps a Graph {@code driveItem} to a {@link SourceNode}, reading its permissions.
      *
      * @return {@code null} when the item must not be ingested, which today means only that its ACL could not
@@ -405,6 +429,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
             properties.put("sharepoint_uniquePermissions", true);
         }
 
+        reportProgress();
         return new SourceNode(
                 composite,
                 getSourceId(),

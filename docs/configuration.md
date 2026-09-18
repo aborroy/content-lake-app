@@ -183,6 +183,128 @@ Three limits, stated because they are properties of CMIS rather than of this imp
 twice, once through the native adapter and once over CMIS, compares the document sets, and asserts that a
 document restricted in Alfresco is not retrievable by a user the ACL excludes.
 
+### The SharePoint Online Connector
+
+`plugins/sharepoint-connector/` ingests SharePoint Online through Microsoft Graph. Graph is the only
+interface: Microsoft deprecated the SharePoint CMIS producer years ago, so the CMIS connector is not a route
+to SharePoint, and Graph is cloud-only, which puts SharePoint Server on premises out of scope rather than
+merely untested.
+
+```bash
+mvn -pl common/content-lake-spi -am install -DskipTests
+mvn -f plugins/sharepoint-connector/pom.xml package
+cp plugins/sharepoint-connector/target/sharepoint-connector-1.0.0.jar \
+   ../content-lake-app-deployment/connectors/
+```
+
+```bash
+# Against a tenant. Node ids are '<driveId>:<itemId>', so a single drive needs no CONNECTOR_ROOTS.
+SHAREPOINT_TENANT_ID=<directory-tenant-id> SHAREPOINT_CLIENT_ID=<application-client-id> \
+SHAREPOINT_CLIENT_SECRET=<secret> SHAREPOINT_DRIVE_IDS='b!<drive-id>' \
+CONNECTOR_SOURCE_TYPE=sharepoint \
+CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
+  docker compose --profile alfresco --profile connector up -d connector-batch-ingester
+```
+
+| Setting | Meaning |
+|---|---|
+| `sharepoint.drive-ids` | Drives to ingest, comma separated. Required, and what a run is scoped to |
+| `sharepoint.client-id` | Application (client) id of the Entra ID app registration. Required |
+| `sharepoint.tenant-id` | Directory (tenant) id; the authority is derived from it. Required for `client-credentials` unless `sharepoint.authority` is set |
+| `sharepoint.authority` | Entra ID authority, for a sovereign cloud only. Must be `https`: msal4j rejects any other scheme |
+| `sharepoint.auth-mode` | `client-credentials` (default, app-only) or `static-token`; see below |
+| `sharepoint.client-secret` | Client secret. Never printed. Supply this or a certificate, never both |
+| `sharepoint.certificate-path` / `sharepoint.certificate-password` | PKCS#12 client certificate. Preferred over a secret |
+| `sharepoint.access-token` | Bearer token for `static-token`. Development only, never printed |
+| `sharepoint.graph-base-url` | Graph endpoint. Defaults to `https://graph.microsoft.com/v1.0`; point it at the mock to run without a tenant |
+| `sharepoint.source-id` | Source alias stored in `cin_sourceId`. Defaults to the first drive id |
+| `sharepoint.include-paths` / `sharepoint.exclude-paths` | Path scope. Excludes are applied after includes and win |
+| `sharepoint.include-mime-types` / `sharepoint.exclude-mime-types` | MIME scope, `text/*` wildcards allowed |
+| `sharepoint.acl-fallback` | `fail-closed` (default) or `public`; see below |
+| `sharepoint.group-grants` | `map` (default) or `skip`; see below |
+| `sharepoint.everyone-claims` | Display names meaning every user in the tenant, for a tenant that words them differently |
+| `sharepoint.resource-units-per-minute` | Graph budget to spend per minute, default 1000. Zero disables metering |
+| `sharepoint.resource-unit-burst` | Units allowed to accumulate, default 200 |
+
+#### Graph application permissions an administrator has to grant
+
+Per Microsoft's reference for `driveItem: delta` and `List permissions`, the least privileged **application**
+permission for both is `Files.Read.All`, with `Files.ReadWrite.All`, `Sites.Read.All` and
+`Sites.ReadWrite.All` listed as higher privileged alternatives. The connector reads only, so `Files.Read.All`
+is the ask, and admin consent is required because app-only permissions cannot be user-consented.
+
+Two things worth raising with whoever grants it:
+
+- **`Sites.Selected` is not listed for either API.** It is the obvious way to narrow the request to one site,
+  and the reference tables for the two calls this connector depends on do not include it. Confirm it against
+  the tenant before promising a per-site grant, because reading `/permissions` is the whole point and a grant
+  that cannot do it is worse than none.
+- **`Sites.FullControl.All` is only needed for the cheap crawl.** Microsoft's note on the delta scanning
+  headers states that to process permissions correctly with `Prefer: deltashowsharingchanges` "your
+  application will need to request **Sites.FullControl.All** permissions". This connector does not send those
+  headers yet, so it does not need that permission and pays the per-item cost instead.
+
+#### Cost, which is metered rather than estimated
+
+Graph meters SharePoint in resource units, not requests, and the prices are uneven: 1 for a single-item get,
+a delta page with a token or a content download, 2 for a multi-item query, and **5 for any permission
+operation**. The permissions collection cannot be `$expand`ed onto a `driveItem` get, so an ACL read is
+always its own call.
+
+Measured against the mock, the first document of a crawl costs **7 units**. The connector reports its own
+spend and its cost per document as it runs, so the figure for a real corpus is a log line rather than an
+estimate. Against the documented per-application per-tenant cap of 1250 units a minute, that puts a naive
+crawl near 200,000 documents a day; the default budget is set below the cap because everything sharing the
+app registration draws on it.
+
+#### Enumeration is a change feed, and the first pass always walks
+
+`delta` is the only enumeration Graph guarantees is complete under concurrent writes, and it warns that
+paging a folder's `children` collection may miss items if writes happen during the walk. So the connector
+implements the SPI change feed: a `deltaLink` becomes the host's cursor, a `deleted` facet becomes a
+tombstone, and a `410 Gone` becomes an expired cursor that sends the host back to a walk.
+
+`connector.change-feed.enabled` is off by default, and even when on, a pass with no stored cursor walks the
+source in full and only then saves the position it read beforehand. So the walk is on the critical path for
+every deployment's first pass. Path scope cannot be enforced on feed results, because Graph omits
+`parentReference.path` from a delta response; a deployment that needs path scope enforced on every pass has
+to leave the feed off.
+
+#### ACLs, and the one limitation to state to users
+
+Permissions are mapped fail-closed. A user grant emits both the Entra object id and the userPrincipalName,
+which are one identity in the two forms that match before and after an Entra group resolver exists. A group
+emits `GROUP_<objectId>` and never a display name, because Entra display names are not unique. An
+organisation-scoped sharing link maps to everyone; an anonymous link grants nothing to any authenticated
+caller. An unrecognised role or shape grants nothing and is counted, so an item under-shares rather than
+over-shares.
+
+**A document granted only to an Entra ID group is retrievable by nobody.** Ingestion records the group
+correctly; expanding a caller's group membership at query time needs a `rag-service` resolver that does not
+exist yet. Each run logs how many documents this affects, and how many depend on site-local principals, which
+no resolver can ever expand. `sharepoint.group-grants=skip` omits group principals entirely instead; there is
+deliberately no setting that widens a group grant to the whole tenant.
+
+`sharepoint.acl-fallback` decides what happens to an item whose permissions cannot be read: `fail-closed`
+does not ingest it, `public` makes it readable by everyone. There is no `sync-account` option as there is for
+CMIS, because app-only auth has no user account whose access could stand in for a document's.
+
+#### Running it without a tenant
+
+`sharepoint.auth-mode=static-token` with `sharepoint.graph-base-url` pointed at the mock Graph service runs
+the whole connector locally: real protocol handling, real paging, real ACL mapping, real downloads. Only two
+things differ from the cloud, and both are configuration. msal4j refuses an authority that is not `https`, so
+the mock cannot double as an Entra ID and token acquisition is the one part a local run does not exercise;
+the connector's own tests cover it against the real library.
+
+A static token cannot be refreshed, so it is not a deployment mode and the connector says so at startup. It
+is also how a developer validates ACL mapping against their own OneDrive, which is the only environment where
+Graph returns a complete permission set to a non-administrator.
+
+`content-lake-app-deployment/test/test-sharepoint.sh` is the end-to-end check, and the assertions that matter
+are the ACL ones: a document granted to one named user is not returned to a caller its ACL excludes, and a
+group-only document is returned to nobody.
+
 ### Connector Schema And Startup Validation
 
 Each source connector publishes the settings it needs, and every ingester checks its configuration

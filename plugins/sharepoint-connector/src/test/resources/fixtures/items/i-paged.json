@@ -1,0 +1,10 @@
+{
+  "id": "i-paged",
+  "name": "widely-shared.txt",
+  "createdDateTime": "2026-08-01T09:00:00Z",
+  "lastModifiedDateTime": "2026-09-01T09:00:00Z",
+  "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/widely-shared.txt",
+  "size": 31,
+  "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public" },
+  "file": { "mimeType": "text/plain" }
+}

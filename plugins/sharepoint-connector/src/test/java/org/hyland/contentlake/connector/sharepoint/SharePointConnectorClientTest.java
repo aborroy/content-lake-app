@@ -296,6 +296,20 @@ class SharePointConnectorClientTest {
     }
 
     @Test
+    void readsEveryPageOfAPermissionsCollection() throws Exception {
+        SharePointConnectorClient client = clientFor(options());
+
+        SourceNode node = client.getNode(DRIVE + ":i-paged");
+
+        // A permissions collection read only as far as its first page silently drops grants, which is an
+        // ACL defect rather than a missing feature. The second page's grantee has to be here.
+        assertThat(node.readPrincipals()).containsExactlyInAnyOrder(
+                "user-guid-page-one", "page.one@contoso.com",
+                "user-guid-page-two", "page.two@contoso.com");
+        assertThat(mock.requestLog()).anySatisfy(entry -> assertThat(entry).contains("permissions?page=2"));
+    }
+
+    @Test
     void keepsCrawlingWhenTheTenantThrottlesMidWalk() throws Exception {
         SharePointConnectorClient client = clientFor(options().withThrottleEveryNthRequest(3, 1));
 

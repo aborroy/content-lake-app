@@ -242,7 +242,7 @@ class GraphHttpClientTest {
     @Test
     void returnsAGoneResponseToTheCallerInsteadOfThrowing() {
         handle("/v1.0/delta", exchange ->
-                respond(exchange, 410, "{\"error\":{\"code\":\"resyncRequired\"}}"));
+                respond(exchange, 410, "{\"error\":{\"code\":\"resyncChangesApplyDifferences\"}}"));
 
         GraphHttpClient client = clientWith(ResourceUnitMeter.unmetered());
         GraphHttpClient.GraphResponse response =
@@ -250,7 +250,8 @@ class GraphHttpClientTest {
 
         // A stale delta token is an ordinary event the SPI models as SourceChangePage.expired(), so it
         // must not arrive as an exception.
-        assertThat(response.body().get("error").get("code").asText()).isEqualTo("resyncRequired");
+        assertThat(response.body().get("error").get("code").asText())
+                .isEqualTo("resyncChangesApplyDifferences");
     }
 
     @Test

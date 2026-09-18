@@ -192,7 +192,7 @@ class SharePointAclMapperTest {
     void anEmptyPermissionsCollectionGrantsNobodyRatherThanEveryone() throws Exception {
         SharePointAclMapper mapper = SharePointAclMapper.withDefaults();
 
-        SharePointAclMapper.MappedAcl acl = mapper.map(fixture("i-removed"), true);
+        SharePointAclMapper.MappedAcl acl = mapper.map(fixture("i-empty"), true);
 
         // Read successfully and grants nothing: distinct from "could not be read", and still ingestable.
         assertThat(acl.ingestable()).isTrue();

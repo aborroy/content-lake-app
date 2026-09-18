@@ -7,10 +7,14 @@ by the Maven reactor**, and nothing here may be added to the root POM's `<module
 |---|---|---|
 | `archetype/` | Maven archetype that generates a connector skeleton | `org.hyland:content-lake-connector-archetype:1.0.0-SNAPSHOT` (`maven-archetype`) |
 | `cmis-connector/` | A shipped connector: any CMIS 1.1 repository as a source | `org.hyland.contentlake:cmis-connector:1.0.0` (jar) |
+| `sharepoint-connector/` | A shipped connector: SharePoint Online through Microsoft Graph | `org.hyland.contentlake:sharepoint-connector:1.0.0` (jar) |
 | `examples/sample-directory-connector/` | A worked example, not a supported source | `org.hyland.example:sample-directory-connector:1.0.0` (jar) |
 
-The three sit at three points in one lifecycle: `archetype/` generates a connector,
-`examples/sample-directory-connector/` is one to read, and `cmis-connector/` is one that ships.
+They sit at three points in one lifecycle: `archetype/` generates a connector,
+`examples/sample-directory-connector/` is one to read, and `cmis-connector/` and `sharepoint-connector/` are
+ones that ship. `cmis-connector/` is worth reading for how a dependency is shaded in; `sharepoint-connector/`
+for a connector that implements the change feed, meters what its source charges it, and carries a mock of
+that source so it can be run with no account anywhere.
 
 ## `plugins/` is not `connector/`
 
@@ -42,6 +46,7 @@ Each project builds on its own, with `content-lake-spi` installed in the local M
 mvn -pl common/content-lake-spi -am install -DskipTests
 
 mvn -f plugins/cmis-connector/pom.xml package
+mvn -f plugins/sharepoint-connector/pom.xml package
 mvn -f plugins/examples/sample-directory-connector/pom.xml package
 mvn -f plugins/archetype/pom.xml install
 ```

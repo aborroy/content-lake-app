@@ -50,7 +50,7 @@ import java.util.stream.Collectors;
  *       refused, and the JDK HTTP client does not strip the header across a redirect, so this is a real
  *       trap that only a faithful mock catches.</li>
  *   <li><strong>A delta token that this server does not recognise answers {@code 410 Gone} with
- *       {@code resyncRequired}</strong>, which is the case the SPI models as
+ *       {@code resyncChangesApplyDifferences}</strong>, which is the case the SPI models as
  *       {@code SourceChangePage.expired()}.</li>
  *   <li><strong>{@code Preference-Applied} lists only the preferences it was configured to honour.</strong>
  *       Whether a tenant honours {@code hierarchicalsharing} decides whether a crawl costs one unit per
@@ -157,6 +157,23 @@ public final class MockGraphServer implements AutoCloseable {
         this.baseUrl = "http://localhost:" + this.server.getAddress().getPort();
     }
 
+    /**
+     * The base URL to put in links this server hands back, taken from the caller's {@code Host} header.
+     *
+     * <p>Graph returns absolute URLs, so every {@code @odata.nextLink}, {@code deltaLink} and content
+     * redirect this server emits has to name a host the caller can actually reach. Deriving it from the
+     * request is what makes that true in every topology at once: {@code localhost:8099} for a test in the
+     * same JVM, {@code mock-graph:8099} for an ingester in another container. Hardcoding the host meant a
+     * container was told to fetch content from itself, and the download failed with connection refused.</p>
+     *
+     * <p>The same trap the CMIS connector has its own {@code HttpInvoker} for, from the other side: there,
+     * a repository advertised a hostname the client could not route to.</p>
+     */
+    private String selfBase(HttpExchange exchange) {
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        return host == null || host.isBlank() ? baseUrl : "http://" + host;
+    }
+
     /** Where the connector should point {@code sharepoint.graph-base-url}. */
     public String graphBaseUrl() {
         return baseUrl + API_PREFIX;
@@ -256,7 +273,7 @@ public final class MockGraphServer implements AutoCloseable {
                         return;
                     }
                     case "permissions" -> {
-                        serveFixture(exchange, "permissions/" + itemId + ".json", Set.of());
+                        servePermissions(exchange, segments.get(1), itemId, query);
                         return;
                     }
                     default -> { /* falls through to 404 */ }
@@ -283,7 +300,7 @@ public final class MockGraphServer implements AutoCloseable {
         if ("latest".equals(token)) {
             String deltaToken = issueDeltaToken();
             respondJson(exchange, 200, "{\"value\":[],\"@odata.deltaLink\":\""
-                    + deltaLink(driveId, deltaToken) + "\"}", applied);
+                    + deltaLink(exchange, driveId, deltaToken) + "\"}", applied);
             return;
         }
 
@@ -296,7 +313,14 @@ public final class MockGraphServer implements AutoCloseable {
                 return;
             } else {
                 // Aged out, or from a previous run of this server. Either way the host has to walk.
-                error(exchange, 410, "resyncRequired",
+                //
+                // The code is Microsoft's documented one, not an invented "resyncRequired": the reference
+                // defines resyncChangesApplyDifferences and resyncChangesUploadDifferences, and a 410 also
+                // carries a Location header with a fresh nextLink. The connector deliberately does not
+                // follow that Location, so it is here to be faithful rather than because anything reads it.
+                exchange.getResponseHeaders().add("Location",
+                        selfBase(exchange) + API_PREFIX + "/drives/" + driveId + "/root/delta");
+                error(exchange, 410, "resyncChangesApplyDifferences",
                         "The delta token is no longer valid; a full enumeration is required");
                 return;
             }
@@ -308,11 +332,11 @@ public final class MockGraphServer implements AutoCloseable {
         if (to < deltaOrder.size()) {
             String next = issuePageToken(to);
             body = "{\"value\":[" + itemsJson(page) + "],\"@odata.nextLink\":\""
-                    + deltaLink(driveId, next) + "\"}";
+                    + deltaLink(exchange, driveId, next) + "\"}";
         } else {
             String deltaToken = issueDeltaToken();
             body = "{\"value\":[" + itemsJson(page) + "],\"@odata.deltaLink\":\""
-                    + deltaLink(driveId, deltaToken) + "\"}";
+                    + deltaLink(exchange, driveId, deltaToken) + "\"}";
         }
         respondJson(exchange, 200, body, applied);
     }
@@ -332,7 +356,7 @@ public final class MockGraphServer implements AutoCloseable {
         String nextToken = issueDeltaToken();
         deltaGenerations.put(nextToken, generation);
         respondJson(exchange, 200, "{\"value\":[" + itemsJson(ids) + "],\"@odata.deltaLink\":\""
-                + deltaLink(driveId, nextToken) + "\"}", applied);
+                + deltaLink(exchange, driveId, nextToken) + "\"}", applied);
     }
 
     /**
@@ -363,13 +387,62 @@ public final class MockGraphServer implements AutoCloseable {
         String body;
         if (to < children.size()) {
             String next = issuePageToken(to);
-            String nextLink = baseUrl + API_PREFIX + "/drives/" + driveId + "/items/" + itemId
+            String nextLink = selfBase(exchange) + API_PREFIX + "/drives/" + driveId + "/items/" + itemId
                     + "/children?$top=" + top + "&$skiptoken=" + next;
             body = "{\"value\":[" + itemsJson(page) + "],\"@odata.nextLink\":\"" + nextLink + "\"}";
         } else {
             body = "{\"value\":[" + itemsJson(page) + "]}";
         }
         respondJson(exchange, 200, body, applyPreferences(exchange));
+    }
+
+    /**
+     * An item's permissions, paged the way Graph pages that collection.
+     *
+     * <p>Paging matters here more than anywhere else: a permissions collection read only as far as its
+     * first page silently drops grants, and a dropped grant is an ACL defect rather than a missing feature.
+     * So the fixture set holds one file per page, {@code permissions/<itemId>.json} then
+     * {@code permissions/<itemId>.2.json}, and this adds an {@code @odata.nextLink} while a further file
+     * exists. One file per page is also what Graph Explorer gives you, so it stays paste-friendly.</p>
+     *
+     * <p>The link has to be added here rather than left in the fixture: a page recorded from a real tenant
+     * carries a {@code nextLink} pointing at {@code graph.microsoft.com}, and serving that verbatim would
+     * send the connector under test to the real service.</p>
+     */
+    private void servePermissions(HttpExchange exchange, String driveId, String itemId,
+                                  Map<String, String> query) throws IOException {
+        int page = parsePositiveInt(query.get("page"), 1);
+        String body = readFixture(permissionsFixture(itemId, page));
+        String nextLink = null;
+        if (Files.isReadable(options.fixtures().resolve(permissionsFixture(itemId, page + 1)))) {
+            nextLink = selfBase(exchange) + API_PREFIX + "/drives/" + driveId + "/items/" + itemId
+                    + "/permissions?page=" + (page + 1);
+        }
+        respondJson(exchange, 200, withNextLink(body, nextLink), applyPreferences(exchange));
+    }
+
+    private static String permissionsFixture(String itemId, int page) {
+        return page <= 1 ? "permissions/" + itemId + ".json"
+                : "permissions/" + itemId + "." + page + ".json";
+    }
+
+    /**
+     * Splices an {@code @odata.nextLink} into a verbatim payload.
+     *
+     * <p>String surgery rather than parsing, because parsing is the one thing this server does not do: that
+     * is what lets every fixture be a payload copied straight out of Graph.</p>
+     */
+    private static String withNextLink(String body, String nextLink) {
+        if (nextLink == null) {
+            return body;
+        }
+        String trimmed = body.strip();
+        int close = trimmed.lastIndexOf('}');
+        if (close < 0) {
+            throw new FixtureMissingException("A permissions fixture is not a JSON object");
+        }
+        return trimmed.substring(0, close).stripTrailing()
+                + ",\"@odata.nextLink\":\"" + nextLink + "\"}";
     }
 
     /** 302 to a URL that carries its own signature, which is what Graph does. */
@@ -379,7 +452,7 @@ public final class MockGraphServer implements AutoCloseable {
             error(exchange, 404, "itemNotFound", "No content fixture for item " + itemId);
             return;
         }
-        String location = baseUrl + STORAGE_PREFIX + "/" + driveId + "/" + itemId
+        String location = selfBase(exchange) + STORAGE_PREFIX + "/" + driveId + "/" + itemId
                 + "?sig=mock-signature-" + tokenSequence.incrementAndGet();
         exchange.getResponseHeaders().add("Location", location);
         exchange.sendResponseHeaders(302, -1);
@@ -449,8 +522,8 @@ public final class MockGraphServer implements AutoCloseable {
         return token;
     }
 
-    private String deltaLink(String driveId, String token) {
-        return baseUrl + API_PREFIX + "/drives/" + driveId + "/root/delta?token=" + token;
+    private String deltaLink(HttpExchange exchange, String driveId, String token) {
+        return selfBase(exchange) + API_PREFIX + "/drives/" + driveId + "/root/delta?token=" + token;
     }
 
     /** Concatenates item fixtures verbatim; nothing here understands their contents. */
