@@ -22,7 +22,7 @@ import java.util.Set;
  * <h3>The settings are unchanged, deliberately</h3>
  * <p>Every setting keeps the name it had, so a deployment's existing {@code FILESYSTEM_*} environment
  * variables keep working. The migration is a different service to run, not a different thing to configure:
- * point the plugin host at this jar instead of running the retired filesystem service.</p>
+ * point the plugin runtime at this jar instead of running the retired filesystem service.</p>
  *
  * <h3>What it does not do</h3>
  * <ul>

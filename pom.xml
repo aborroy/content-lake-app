@@ -21,7 +21,7 @@
         <module>common</module>
         <module>alfresco</module>
         <module>nuxeo</module>
-        <module>plugin-host</module>
+        <module>plugin-runtime</module>
     </modules>
 
     <properties>

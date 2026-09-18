@@ -107,10 +107,10 @@ flowchart TD
 | `content-lake-source-nuxeo` | `nuxeo/` | -- | Nuxeo REST clients, scope resolver, auth abstraction, and text extraction |
 | `nuxeo-batch-ingester` | `nuxeo/` | 9093 | Nuxeo full-batch discovery and one-shot sync using NXQL |
 | `nuxeo-live-ingester` | `nuxeo/` | 9094 | Nuxeo audit-stream listener using a persisted watermark |
-| `plugin-batch-ingester` | `plugin-host/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
+| `plugin-batch-ingester` | `plugin-runtime/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
 
 Eleven modules in four groups, all built by `mvn clean package` at the root. A new source does not add to
-this table: it ships as a jar under `plugins/` and runs on the plugin host, which is what #148 made the
+this table: it ships as a jar under `plugins/` and runs on the plugin runtime, which is what #148 made the
 single route.
 
 ### Plugins
@@ -504,14 +504,14 @@ mvn spring-boot:run -pl nuxeo/nuxeo-live-ingester -am
 java -jar nuxeo/nuxeo-live-ingester/target/nuxeo-live-ingester-1.0.0-SNAPSHOT.jar
 
 # Plugin host (runs whichever connector jar is in the plugin directory)
-mvn spring-boot:run -pl plugin-host/plugin-batch-ingester -am
+mvn spring-boot:run -pl plugin-runtime/plugin-batch-ingester -am
 # or
-java -jar plugin-host/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
+java -jar plugin-runtime/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
 
 # Connector Batch Ingester (refuses to start without a connector jar in its plugin directory)
-mvn spring-boot:run -pl plugin-host/plugin-batch-ingester -am
+mvn spring-boot:run -pl plugin-runtime/plugin-batch-ingester -am
 # or
-java -jar plugin-host/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
+java -jar plugin-runtime/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
 
 # RAG Service
 mvn spring-boot:run -pl common/rag-service -am

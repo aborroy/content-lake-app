@@ -69,7 +69,7 @@ content-lake-app/                   Reactor: five module groups, thirteen leaf m
         nuxeo-live-ingester/        Spring Boot app: audit-driven Nuxeo sync
             org.hyland.nuxeo.contentlake.live
 
-    plugin-host/                    No source adapter: its connector arrives as a jar at runtime
+    plugin-runtime/                    No source adapter: its connector arrives as a jar at runtime
         plugin-batch-ingester/      Spring Boot app: batch sync driven by a ConnectorRegistry connector
             org.hyland.contentlake.pluginhost.batch
 ```
@@ -122,12 +122,12 @@ is what the plugin mechanism is for, and it is why `plugins/` exists.
 
 If a module is genuinely required:
 
-1. Create the directory under `common/`, `alfresco/`, `nuxeo/` or `plugin-host/`.
+1. Create the directory under `common/`, `alfresco/`, `nuxeo/` or `plugin-runtime/`.
 2. Add its `pom.xml` with `<parent>` pointing at the **root** POM. Every leaf module in this build
    parents directly to the root; the group POMs aggregate but contribute no inheritance. Set
    `<relativePath>../../pom.xml</relativePath>`.
 3. Register it in the group's aggregator POM (`common/pom.xml`, `alfresco/pom.xml`, `nuxeo/pom.xml`,
-   or `plugin-host/pom.xml`).
+   or `plugin-runtime/pom.xml`).
 4. Update **every** service Dockerfile in the `content-lake-app-deployment` repository, under
    `dockerfiles/`. Each one enumerates the reactor's modules explicitly in two places: a
    `COPY --from=code <group>/<module>/pom.xml ...` line before `dependency:go-offline`, and a

@@ -12,7 +12,7 @@ which has scope patterns, exclusions, ACL configuration and a reconciliation sto
 
 #148 asked whether this example should survive that connector, since the two ingest the same thing. It does,
 for one reason: it is deliberately two classes, which makes it the shortest complete thing to read and the
-cheapest fixture for proving the plugin host loads a jar at all. The moment it grows a third class it has
+cheapest fixture for proving the plugin runtime loads a jar at all. The moment it grows a third class it has
 stopped earning that and should go.
 
 ## Build
