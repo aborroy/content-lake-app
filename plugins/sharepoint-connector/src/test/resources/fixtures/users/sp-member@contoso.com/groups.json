@@ -1,0 +1,6 @@
+{
+  "value": [
+    { "id": "group-guid-finance", "displayName": "Finance" },
+    { "id": "group-guid-all-staff", "displayName": "All Staff" }
+  ]
+}

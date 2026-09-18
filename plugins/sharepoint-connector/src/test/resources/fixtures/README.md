@@ -16,6 +16,7 @@ JSON, so anything recorded from a real tenant can be dropped in unchanged. That 
 | `order.txt` | the order the delta feed reports items in |
 | `children.txt` | the tree, as `<parentId>: <childId> <childId> ...` |
 | `changes/<n>/order.txt` | what the n-th incremental delta call reports |
+| `users/<identity>/groups.json` | `GET /v1.0/users/{identity}/transitiveMemberOf/microsoft.graph.group` |
 
 `<key>` is the file name, which is normally the item id. The one case where they differ is
 `items/i-removed-deleted.json`, whose payload carries `"id": "i-removed"` and a `deleted` facet: two
@@ -47,13 +48,25 @@ The five payloads worth replacing first, because each one is an assumption the A
 |---|---|
 | `i-quarterly`, `i-incident` | inherited permissions; `i-incident` is markdown, which the pipeline short-circuits before any extractor |
 | `i-named` | inheritance broken, granted to one named user, with `siteUser` alongside |
-| `i-group` | granted to a security group only, which is fail-closed and retrievable by nobody until an Entra group resolver ships |
+| `i-group` | granted to a security group only, so it retrieves for a member of that group and for nobody else |
 | `i-orgwide` | an organisation-scoped link, which maps to everyone, next to an anonymous link, which grants nothing |
 | `i-deep` | two levels down, to prove traversal descends; also a `users`-scoped link with `grantedToIdentitiesV2` |
 | `i-removed` | present in `order.txt` and deleted in `changes/1`, so a tombstone is reachable |
 | `root` | a `siteGroup` grant, which no Entra resolver can expand and which therefore has to be counted and reported rather than silently dropped |
 | `i-noacl` | an item whose permissions cannot be read, for the fail-closed path |
+| `i-report` | a PDF, the only fixture whose text an extractor has to recover |
+| `i-paged` | permissions spread over two pages, so the collection pager is exercised |
+| `users/sp-member@contoso.com` | in Finance, so this user retrieves the group-granted document |
+| `users/sp-outsider@contoso.com` | not in Finance, so this user must not |
 
 `i-noacl` is deliberately absent from `order.txt`, `children.txt` and `permissions/`, so a `/permissions`
 call for it answers 404 while the item itself resolves. It is reachable only through `getNode`, which keeps
 it out of the way of every test that counts what a walk or a delta pass returns.
+
+## Group membership, for the query path
+
+`users/<identity>/groups.json` serves the transitive membership the RAG service's Entra resolver reads, so
+one fixture set answers both halves of an ACL claim: the directory that grants `group-grant.txt` to Finance is
+the same directory that says who is in Finance. A missing fixture is a 404, which the resolver reads as "no
+such identity" rather than as "in no groups"; the two are different answers and collapsing them either
+blacks out a caller or quietly downgrades a fail-closed deployment.

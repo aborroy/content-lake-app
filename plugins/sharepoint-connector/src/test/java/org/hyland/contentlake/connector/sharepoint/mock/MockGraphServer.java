@@ -246,6 +246,15 @@ public final class MockGraphServer implements AutoCloseable {
             return;
         }
 
+        // /users/{id}/transitiveMemberOf/microsoft.graph.group, for the query-path group resolver rather
+        // than for ingestion. Served here because a run that proves ACLs are mapped correctly and a run that
+        // proves they are actionable need the same directory to agree with itself.
+        if (segments.size() >= 3 && segments.get(0).equals("users")
+                && segments.get(2).equals("transitiveMemberOf")) {
+            serveGroupMembership(exchange, segments.get(1));
+            return;
+        }
+
         if (!segments.isEmpty() && segments.get(0).equals("drives")) {
             // /drives/{driveId}
             if (segments.size() == 2) {
@@ -419,6 +428,24 @@ public final class MockGraphServer implements AutoCloseable {
                     + "/permissions?page=" + (page + 1);
         }
         respondJson(exchange, 200, withNextLink(body, nextLink), applyPreferences(exchange));
+    }
+
+    /**
+     * A user's transitive group membership, from {@code users/<identity>/groups.json}.
+     *
+     * <p>A missing fixture is a 404 rather than an empty list, because those mean different things to the
+     * resolver: 404 is "this directory has no such identity", which costs the caller only this source's group
+     * grants, while an empty list is "known here, in no groups". Collapsing the two would either blackout a
+     * caller or silently downgrade a fail-closed deployment.</p>
+     */
+    private void serveGroupMembership(HttpExchange exchange, String identity) throws IOException {
+        String fixture = "users/" + identity + "/groups.json";
+        if (!Files.isReadable(options.fixtures().resolve(fixture))) {
+            error(exchange, 404, "Request_ResourceNotFound",
+                    "Entra holds no identity '" + identity + "'");
+            return;
+        }
+        respondJson(exchange, 200, readFixture(fixture), Set.of());
     }
 
     private static String permissionsFixture(String itemId, int page) {

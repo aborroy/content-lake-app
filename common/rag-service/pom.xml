@@ -26,6 +26,18 @@
             <artifactId>content-lake-spi</artifactId>
             <version>${project.version}</version>
         </dependency>
+
+        <!--
+            Entra ID tokens for the query-path group resolver, and nothing else. Deliberately not the Graph
+            client the SharePoint connector uses: that one lives inside a shaded plugin jar this service never
+            loads, and its resource-unit meter and tenant-wide throttle pause are built for a crawl. This
+            makes one cheap call per user per cache window, so what it needs from msal4j is the token cache.
+        -->
+        <dependency>
+            <groupId>com.microsoft.azure</groupId>
+            <artifactId>msal4j</artifactId>
+            <version>1.26.0</version>
+        </dependency>
         <!-- Spring AI RAG module: DocumentRetriever, RetrievalAugmentationAdvisor, Query.
              Version managed by spring-ai-bom (imported in the root pom). The Advisor API
              (BaseAdvisor, CallAdvisor, StreamAdvisor) comes transitively via spring-ai-client-chat. -->

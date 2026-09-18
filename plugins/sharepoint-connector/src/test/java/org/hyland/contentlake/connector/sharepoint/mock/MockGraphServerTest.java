@@ -230,6 +230,34 @@ class MockGraphServerTest {
     }
 
     @Test
+    void servesTransitiveGroupMembershipForTheQueryPathResolver() throws Exception {
+        GraphHttpClient client = clientFor(options());
+
+        GraphHttpClient.GraphResponse response = client.getJson(
+                "/users/sp-member@contoso.com/transitiveMemberOf/microsoft.graph.group?$select=id",
+                ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+
+        // The same directory that grants a document to Finance has to agree that this user is in Finance, or
+        // a run can prove ACLs are mapped and still not prove they are actionable.
+        assertThat(GraphHttpClient.array(response.body(), "value"))
+                .extracting(node -> node.get("id").asText())
+                .containsExactly("group-guid-finance", "group-guid-all-staff");
+    }
+
+    @Test
+    void answers404ForAnIdentityTheDirectoryDoesNotHold() throws Exception {
+        GraphHttpClient client = clientFor(options());
+
+        // 404 and an empty list are different answers: the first costs a caller only this source's group
+        // grants, the second says they are known here and in no groups.
+        assertThatThrownBy(() -> client.getJson(
+                "/users/stranger@contoso.com/transitiveMemberOf/microsoft.graph.group",
+                ResourceUnitMeter.MULTI_ITEM_QUERY, List.of()))
+                .isInstanceOf(GraphException.class)
+                .hasMessageContaining("404");
+    }
+
+    @Test
     void refusesARequestThatCarriesNoBearerToken() throws Exception {
         mock = new MockGraphServer(options());
 
