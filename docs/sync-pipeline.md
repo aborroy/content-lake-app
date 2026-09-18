@@ -54,7 +54,7 @@ words and is classified `PROSE`.
 engine is asked for markdown, and markdown is requested only where the engine advertises that
 transform. Every source can use it: `TransformEngineTextExtractor` speaks the
 `alfresco-transform-core` `/transform` protocol directly rather than going through a repository, so
-the same engine serves the Alfresco, Nuxeo and filesystem connectors. Extractors are composed by
+the same engine serves the Alfresco, Nuxeo and plugin connectors. Extractors are composed by
 `ChainingTextExtractor`, which falls through on a `null` return or an exception, so extraction
 degrades to in-process Tika and never fails an ingest.
 
@@ -279,7 +279,7 @@ maxItems)`, and the contract on that method has two clauses a caller has to hono
 
 - **A page shorter than `maxItems` does not mean the container is exhausted. Only an empty page does.**
   An implementation may return fewer entries than asked for: several apply the source's own page window
-  and then drop what they cannot represent as a `SourceNode`. The filesystem client drops an entry that is
+  and then drop what they cannot represent as a `SourceNode`. The filesystem connector drops an entry that is
   no longer there, the CMIS connector drops an object that is neither a folder nor a document, and the
   sample directory connector drops one it cannot map. So a full window can arrive as a short page with
   more still to come.
@@ -292,7 +292,7 @@ document: a discovery pass that reports itself complete hands the reconciliation
 treats as authoritative, so the dropped tail is deleted from the index rather than merely missed. On the
 Nuxeo live path the same truncation leaves the tail of a folder holding the ACLs it had before the change.
 
-`connector-batch-ingester` adds one bound the others do not need, because it drives whatever a third-party
+`plugin-batch-ingester` adds one bound the others do not need, because it drives whatever a third-party
 jar implements: a container that returns 10 000 non-empty pages without exhausting has its listing
 abandoned and the pass marked incomplete, rather than spinning on a connector that ignores `skip`.
 
@@ -390,12 +390,12 @@ accumulated drift genuinely has many documents to remove, and the guard cannot t
 discovery pass. That is correct behaviour: read the logged figures, satisfy yourself the deletions are
 genuine, raise the ratio for one run, then lower it again.
 
-The filesystem source has no live ingester, so a batch sync is the only path that writes and this sweep
+The filesystem connector has no live ingester, so a batch sync is the only path that writes and this sweep
 is the only path that ever deletes: without it, a file removed from the mounted directory stays
 searchable indefinitely.
 
-`connector-batch-ingester` has no live path either, but its sweep is off by default and warrants more
-caution than the filesystem one. The sweep's scope comes from the source paths discovery resolved, and a
+`plugin-batch-ingester` has no live path either, but its sweep is off by default and warrants more
+caution than for a mounted directory. The sweep's scope comes from the source paths discovery resolved, and a
 plugin connector's `SourceNode.path()` is whatever the connector decided: one reporting `/` would hand the
 sweep everything under that source's target path. Read `resolvedRootPaths` from a completed run before
 enabling it. Its walk also reports an incomplete pass whenever a container could not be listed, which is
@@ -407,7 +407,7 @@ feed-capable connector `full-walk-every` is what decides how often the sweep act
 ## Incremental Discovery (Change Feeds)
 
 Walking a source is authoritative but proportional to its size. A source that can report what changed since
-a previous pass can be read instead, and `connector-batch-ingester` is the only host that does this: the
+a previous pass can be read instead, and `plugin-batch-ingester` is the only host that does this: the
 Alfresco and Nuxeo batch ingesters do not discover through `ContentSourceClient` at all, both live ingesters
 are already event- or cursor-driven, and the filesystem source has no feed.
 

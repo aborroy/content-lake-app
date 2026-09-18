@@ -65,15 +65,13 @@ Leverages **hxpr** as a Content Lake to enable high-quality AI search while:
 flowchart TD
     ALF["Alfresco Repository + Event2<br/>REST API + ActiveMQ topic"]
     NX["Nuxeo + Audit Stream<br/>REST API + audit log watermark"]
-    FS["Filesystem<br/>local or mounted directory"]
-    PLG["Any source via connector plugin<br/>jar in the plugin directory"]
+    PLG["Any source via connector plugin<br/>SharePoint, CMIS, a mounted directory"]
 
     ALFB["alfresco-batch-ingester<br/>:9090"]
     ALFL["alfresco-live-ingester<br/>:9092"]
     NXB["nuxeo-batch-ingester<br/>NXQL discovery, :9093"]
     NXL["nuxeo-live-ingester<br/>audit watermark, :9094"]
-    FSB["filesystem-batch-ingester<br/>:9095"]
-    CONB["connector-batch-ingester<br/>:9096"]
+    CONB["plugin-batch-ingester<br/>:9096"]
 
     CORE["content-lake-core<br/>Node sync, Transform, Chunk, Embed, ACL<br/>source_modifiedAt idempotency guard"]
     HXPR["hxpr Content Lake"]
@@ -83,14 +81,12 @@ flowchart TD
     ALF --> ALFL
     NX --> NXB
     NX --> NXL
-    FS --> FSB
     PLG --> CONB
 
     ALFB --> CORE
     ALFL --> CORE
     NXB --> CORE
     NXL --> CORE
-    FSB --> CORE
     CONB --> CORE
 
     CORE --> HXPR
@@ -111,11 +107,11 @@ flowchart TD
 | `content-lake-source-nuxeo` | `nuxeo/` | -- | Nuxeo REST clients, scope resolver, auth abstraction, and text extraction |
 | `nuxeo-batch-ingester` | `nuxeo/` | 9093 | Nuxeo full-batch discovery and one-shot sync using NXQL |
 | `nuxeo-live-ingester` | `nuxeo/` | 9094 | Nuxeo audit-stream listener using a persisted watermark |
-| `content-lake-source-filesystem` | `filesystem/` | -- | Filesystem source: local/mounted directory client, scope resolver (glob/extension filters); uses the Tika extractor |
-| `filesystem-batch-ingester` | `filesystem/` | 9095 | Filesystem directory discovery and one-shot sync via `/api/sync/configured` |
-| `connector-batch-ingester` | `connector/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
+| `plugin-batch-ingester` | `plugin-host/` | 9096 | Batch discovery and one-shot sync driven by a connector plugin: no source adapter, its client comes from the plugin directory |
 
-Thirteen modules in five groups, all built by `mvn clean package` at the root.
+Eleven modules in four groups, all built by `mvn clean package` at the root. A new source does not add to
+this table: it ships as a jar under `plugins/` and runs on the plugin host, which is what #148 made the
+single route.
 
 ### Plugins
 
@@ -127,6 +123,8 @@ makes them. Each builds on its own, and none may be added to the root POM's `<mo
 |---------|------|-------------|
 | `content-lake-connector-archetype` | `plugins/archetype/` | Maven archetype generating a connector skeleton |
 | `cmis-connector` | `plugins/cmis-connector/` | Shipped connector: any CMIS 1.1 repository as a source, with OpenCMIS shaded in |
+| `filesystem-connector` | `plugins/filesystem-connector/` | Shipped connector: a local or mounted directory. The only one with no runtime dependency at all, so nothing is shaded |
+| `sharepoint-connector` | `plugins/sharepoint-connector/` | Shipped connector: SharePoint Online through Microsoft Graph, with msal4j shaded in and Jackson relocated |
 | `sample-directory-connector` | `plugins/examples/sample-directory-connector/` | Worked example: ingests a mounted directory. Not a supported source |
 
 Do not confuse `plugins/` with the reactor group `connector/`, which holds the host application that
@@ -363,9 +361,9 @@ REST API authentication is source-specific:
 - Alfresco ingesters validate incoming credentials or tickets against Alfresco.
 - `nuxeo-batch-ingester` uses HTTP Basic auth with the configured Nuxeo service credentials.
 - `nuxeo-live-ingester` does not expose sync APIs; health and metrics come from Spring Actuator.
-- `filesystem-batch-ingester` has no source repository to authenticate against, so it uses one
-  configured account (`filesystem.batch.security.username` / `.password`, from
-  `FILESYSTEM_SYNC_USERNAME` / `FILESYSTEM_SYNC_PASSWORD`). Both are required: startup fails when
+- `plugin-batch-ingester` has no source repository to authenticate against, so it uses one
+  configured account (`connector.sync.username` / `.password`, from
+  `CONNECTOR_SYNC_USERNAME` / `CONNECTOR_SYNC_PASSWORD`). Both are required: startup fails when
   either is blank rather than falling back to a default credential on an endpoint that triggers a
   full re-ingest.
 
@@ -505,15 +503,15 @@ mvn spring-boot:run -pl nuxeo/nuxeo-live-ingester -am
 # or
 java -jar nuxeo/nuxeo-live-ingester/target/nuxeo-live-ingester-1.0.0-SNAPSHOT.jar
 
-# Filesystem Batch Ingester
-mvn spring-boot:run -pl filesystem/filesystem-batch-ingester -am
+# Plugin host (runs whichever connector jar is in the plugin directory)
+mvn spring-boot:run -pl plugin-host/plugin-batch-ingester -am
 # or
-java -jar filesystem/filesystem-batch-ingester/target/filesystem-batch-ingester-1.0.0-SNAPSHOT.jar
+java -jar plugin-host/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
 
 # Connector Batch Ingester (refuses to start without a connector jar in its plugin directory)
-mvn spring-boot:run -pl connector/connector-batch-ingester -am
+mvn spring-boot:run -pl plugin-host/plugin-batch-ingester -am
 # or
-java -jar connector/connector-batch-ingester/target/connector-batch-ingester-1.0.0-SNAPSHOT.jar
+java -jar plugin-host/plugin-batch-ingester/target/plugin-batch-ingester-1.0.0-SNAPSHOT.jar
 
 # RAG Service
 mvn spring-boot:run -pl common/rag-service -am

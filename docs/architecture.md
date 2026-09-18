@@ -69,18 +69,9 @@ content-lake-app/                   Reactor: five module groups, thirteen leaf m
         nuxeo-live-ingester/        Spring Boot app: audit-driven Nuxeo sync
             org.hyland.nuxeo.contentlake.live
 
-    filesystem/
-        content-lake-source-filesystem/  Filesystem adapter
-            org.hyland.filesystem.contentlake
-                client/             FileSystemSourceClient (impl ContentSourceClient)
-                config/             FileSystemProperties
-                service/            FileSystemScopeResolver (impl ScopeResolver)
-        filesystem-batch-ingester/  Spring Boot app: directory walk + one-shot sync (uses TikaTextExtractor)
-            org.hyland.filesystem.contentlake.batch
-
-    connector/                      No source adapter: its connector arrives as a jar at runtime
-        connector-batch-ingester/   Spring Boot app: batch sync driven by a ConnectorRegistry connector
-            org.hyland.connector.contentlake.batch
+    plugin-host/                    No source adapter: its connector arrives as a jar at runtime
+        plugin-batch-ingester/      Spring Boot app: batch sync driven by a ConnectorRegistry connector
+            org.hyland.contentlake.pluginhost.batch
 ```
 
 Everything the reactor builds is above. Everything below is deliberately outside it, in one place:
@@ -91,6 +82,11 @@ content-lake-app/
         archetype/                  Maven archetype (packaging maven-archetype) generating a
                                     connector skeleton, plus the templated project under
                                     src/main/resources/archetype-resources/
+        filesystem-connector/       Shipped connector (#148): a local or mounted directory in
+                                    org.hyland.contentlake.connector.filesystem. Was the in-tree
+                                    filesystem/ module group with a service image of its own
+        sharepoint-connector/       Shipped connector (#145): SharePoint Online through Microsoft Graph
+                                    in org.hyland.contentlake.connector.sharepoint
         cmis-connector/             Shipped connector (#125): a CMIS 1.1 source in
                                     org.hyland.contentlake.connector.cmis, built standalone against
                                     content-lake-spi with OpenCMIS shaded into its jar
@@ -121,17 +117,17 @@ alfresco-content-app/
 ## Adding a Maven Module
 
 Before adding one, check whether the work belongs in a module at all. A new **source** should not need
-any of this: ship it as a connector jar under `plugins/` and run it on `connector-batch-ingester`. That
+any of this: ship it as a connector jar under `plugins/` and run it on `plugin-batch-ingester`. That
 is what the plugin mechanism is for, and it is why `plugins/` exists.
 
 If a module is genuinely required:
 
-1. Create the directory under `common/`, `alfresco/`, `nuxeo/`, `filesystem/` or `connector/`.
+1. Create the directory under `common/`, `alfresco/`, `nuxeo/` or `plugin-host/`.
 2. Add its `pom.xml` with `<parent>` pointing at the **root** POM. Every leaf module in this build
    parents directly to the root; the group POMs aggregate but contribute no inheritance. Set
    `<relativePath>../../pom.xml</relativePath>`.
 3. Register it in the group's aggregator POM (`common/pom.xml`, `alfresco/pom.xml`, `nuxeo/pom.xml`,
-   `filesystem/pom.xml` or `connector/pom.xml`).
+   or `plugin-host/pom.xml`).
 4. Update **every** service Dockerfile in the `content-lake-app-deployment` repository, under
    `dockerfiles/`. Each one enumerates the reactor's modules explicitly in two places: a
    `COPY --from=code <group>/<module>/pom.xml ...` line before `dependency:go-offline`, and a
@@ -284,10 +280,10 @@ the jar and skipped; only a configuration problem can abort startup, under the s
 `content-lake.connector.validation` rule as an in-tree connector.
 
 Consequence worth stating: an ingester whose pipeline is wired to a concrete client -- the Alfresco, Nuxeo
-and filesystem ones -- does not ingest from a plugin connector. For them a mounted jar is discovered,
+ones -- does not ingest from a plugin connector. For them a mounted jar is discovered,
 configured, validated and published, and then inert.
 
-### `connector-batch-ingester` -- the host that does ingest from one
+### `plugin-batch-ingester` -- the host that does ingest from one
 
 The service that asks the registry for its connector rather than naming a client. `SelectedConnector` picks
 it (`connector.source-type`, or `ConnectorRegistry.single()` when one jar is mounted) and fills in the host's
@@ -300,7 +296,7 @@ An empty registry fails startup. This service has no source of its own, so a jar
 misconfiguration rather than an idle one, and a container that says so is easier to diagnose than a sync API
 reporting zero documents.
 
-`ConnectorDiscoveryService` walks containers through the SPI alone, and differs from the filesystem walker in
+`ConnectorDiscoveryService` walks containers through the SPI alone, and differs from the in-tree walkers in
 three ways that all follow from not knowing the source:
 
 - **Node ids are visited once.** CMIS multi-filing puts one document under several folders; without a visited
@@ -552,7 +548,7 @@ prose noise.
   stored submitter into every listing query. The aggregate view the evaluation harness needs is a
   separate method restricted to `rag.feedback.operator-users`, empty by default, because "authenticated"
   and "may read everyone's questions" are different things
-- **`filesystem-batch-ingester` authenticates against one configured account** -- the other ingesters
+- **`plugin-batch-ingester` authenticates against one configured account** -- the other ingesters
   validate callers against their source repository, but a filesystem has no user directory. Both
   `filesystem.batch.security.username` and `.password` are required and startup fails when either is
   blank, because the alternative is a default credential on an endpoint that triggers a full re-ingest

@@ -31,6 +31,8 @@
     <modules>
         <module>archetype</module>
         <module>cmis-connector</module>
+        <module>filesystem-connector</module>
+        <module>sharepoint-connector</module>
         <module>examples/sample-directory-connector</module>
     </modules>
 </project>

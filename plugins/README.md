@@ -7,6 +7,7 @@ by the Maven reactor**, and nothing here may be added to the root POM's `<module
 |---|---|---|
 | `archetype/` | Maven archetype that generates a connector skeleton | `org.hyland:content-lake-connector-archetype:1.0.0-SNAPSHOT` (`maven-archetype`) |
 | `cmis-connector/` | A shipped connector: any CMIS 1.1 repository as a source | `org.hyland.contentlake:cmis-connector:1.0.0` (jar) |
+| `filesystem-connector/` | A shipped connector: a local or mounted directory | `org.hyland.contentlake:filesystem-connector:1.0.0` (jar) |
 | `sharepoint-connector/` | A shipped connector: SharePoint Online through Microsoft Graph | `org.hyland.contentlake:sharepoint-connector:1.0.0` (jar) |
 | `examples/sample-directory-connector/` | A worked example, not a supported source | `org.hyland.example:sample-directory-connector:1.0.0` (jar) |
 
@@ -20,7 +21,7 @@ that source so it can be run with no account anywhere.
 
 Two directories at the repository root sound alike and are not:
 
-- `connector/` is a **reactor module group**. It holds `connector-batch-ingester`, the Spring Boot host
+- `connector/` is a **reactor module group**. It holds `plugin-batch-ingester`, the Spring Boot host
   application (port 9096) that loads plugin jars at runtime. It has no source adapter of its own.
 - `plugins/` is **this directory**: the plugins themselves, which the reactor never builds.
 
@@ -46,6 +47,7 @@ Each project builds on its own, with `content-lake-spi` installed in the local M
 mvn -pl common/content-lake-spi -am install -DskipTests
 
 mvn -f plugins/cmis-connector/pom.xml package
+mvn -f plugins/filesystem-connector/pom.xml package
 mvn -f plugins/sharepoint-connector/pom.xml package
 mvn -f plugins/examples/sample-directory-connector/pom.xml package
 mvn -f plugins/archetype/pom.xml install
@@ -58,13 +60,13 @@ cp plugins/cmis-connector/target/cmis-connector-1.0.0.jar \
    ../content-lake-app-deployment/connectors/
 ```
 
-Only `connector-batch-ingester` **ingests** with a plugin. The Alfresco, Nuxeo and filesystem ingesters each
+Only `plugin-batch-ingester` **ingests** with a plugin. The Alfresco, Nuxeo and filesystem ingesters each
 drive a client they were compiled against, so they only list what they found in the plugin directory.
 
 They still load it, so a jar is not inert: with fail-closed validation, one whose settings are configured
-for `connector-batch-ingester` alone would stop those five at startup. They default
+for `plugin-batch-ingester` alone would stop those five at startup. They default
 `content-lake.connector.validation` to `warn` for that reason, reporting the jar under `problems[]` on
-`GET /api/connectors` and starting anyway. `connector-batch-ingester` keeps the `fail` default, since a
+`GET /api/connectors` and starting anyway. `plugin-batch-ingester` keeps the `fail` default, since a
 connector it cannot load leaves it with nothing to ingest.
 
 ## Writing a new one

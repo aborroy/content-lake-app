@@ -47,7 +47,7 @@ the one to read for the details that are easy to get wrong (why `downloadContent
 
 A jar in an ingester's plugin directory is discovered, validated and listed at `GET /api/connectors` by
 every ingester, but the Alfresco, Nuxeo and filesystem ingesters each drive a client they were compiled
-against and never ask the registry for one. `connector-batch-ingester` is the service that does: it takes
+against and never ask the registry for one. `plugin-batch-ingester` is the service that does: it takes
 its client, scope rules and optionally its extractor from the connector, and it is what a plugin connector
 should be pointed at.
 

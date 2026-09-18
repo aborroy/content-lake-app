@@ -56,23 +56,23 @@ upper-cased, which makes `cmis.page-size` reachable as `CMIS_PAGE_SIZE`.
 
 ### Ingesting Through A Plugin Connector
 
-Every ingester loads a connector; `connector-batch-ingester` is the one that ingests with it. The Alfresco,
-Nuxeo and filesystem ingesters each drive a client they were compiled against, so they never ingest from a
+Every ingester loads a connector; `plugin-batch-ingester` is the one that ingests with it. The Alfresco,
+Nuxeo ingesters each drive a client they were compiled against, so they never ingest from a
 mounted jar and only list what they found.
 
 Loading is not the same as being inert, though. Validation is fail-closed by default, so a jar whose
-required settings are supplied only to `connector-batch-ingester` would otherwise stop the other five
+required settings are supplied only to `plugin-batch-ingester` would otherwise stop the other five
 ingesters at startup over a connector they were never going to use. They therefore default
 `content-lake.connector.validation` to `warn`: the jar and the reason it did not load appear under
 `problems[]` on `GET /api/connectors`, and ingestion continues. Set `CONNECTOR_VALIDATION=fail` on one of
 those services (or `CONNECTOR_VALIDATION_INGESTERS=fail` for all five in the deployment stack) to make it
-refuse to start instead. `connector-batch-ingester` still defaults to `fail`, because for it a connector
+refuse to start instead. `plugin-batch-ingester` still defaults to `fail`, because for it a connector
 that will not load means there is nothing to ingest.
 
 ```bash
 # From content-lake-app-deployment, on top of any base profile
 CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
-  docker compose --profile alfresco --profile connector up -d --build connector-batch-ingester
+  docker compose --profile alfresco --profile connector up -d --build plugin-batch-ingester
 
 curl -u admin:admin -X POST http://localhost:9096/api/sync/configured
 curl -u admin:admin http://localhost:9096/api/status
@@ -152,7 +152,7 @@ cp plugins/cmis-connector/target/cmis-connector-1.0.0.jar \
 CMIS_URL=http://alfresco:8080/alfresco/api/-default-/public/cmis/versions/1.1/browser \
 CMIS_USERNAME=admin CMIS_PASSWORD=admin CMIS_ROOT_PATH=/Sites \
 CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
-  docker compose --profile alfresco --profile connector up -d connector-batch-ingester
+  docker compose --profile alfresco --profile connector up -d plugin-batch-ingester
 ```
 
 | Setting | Meaning |
@@ -183,6 +183,53 @@ Three limits, stated because they are properties of CMIS rather than of this imp
 twice, once through the native adapter and once over CMIS, compares the document sets, and asserts that a
 document restricted in Alfresco is not retrievable by a user the ACL excludes.
 
+### The Filesystem Connector
+
+`plugins/filesystem-connector/` ingests a local or mounted directory. It was an in-tree module group with a
+service image, a Dockerfile stage pair and an opt-in compose profile of its own until #148, which is the
+change that made the plugin jar the single route for a new source. Nothing about the source needed any of
+that: it is the only connector with no runtime dependency at all, since the source is the filesystem the JDK
+already talks to, so its jar carries its own classes and nothing else.
+
+```bash
+mvn -pl common/content-lake-spi -am install -DskipTests
+mvn -f plugins/filesystem-connector/pom.xml package
+cp plugins/filesystem-connector/target/filesystem-connector-1.0.0.jar \
+   ../content-lake-app-deployment/connectors/
+```
+
+```bash
+CONNECTOR_SOURCE_TYPE=filesystem FILESYSTEM_ROOT_PATH=/data/connector \
+CONNECTOR_HOST_PATH=./filesystem-data \
+CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
+  docker compose --profile alfresco --profile connector up -d
+```
+
+| Setting | Meaning |
+|---|---|
+| `filesystem.root-path` | Absolute directory to ingest. Required, and validated at startup as a directory that exists |
+| `filesystem.source-id` | Source alias stored as the second half of `cin_sourceId`; defaults to `filesystem` |
+| `filesystem.read-principals` | Who may retrieve the ingested files; defaults to everyone |
+| `filesystem.include-extensions` | Extensions to ingest, without the dot; empty means every file |
+| `filesystem.exclude-patterns` | Path fragments that exclude a file or directory. Hidden entries are always skipped |
+| `filesystem.page-size` | Entries fetched per directory listing |
+
+**The setting names are unchanged from the in-tree module**, so an existing `FILESYSTEM_*` configuration keeps
+working: what changed is the service that reads them. A deployment migrates by building the jar into
+`connectors/` and using the `connector` profile instead of the retired `filesystem` one.
+
+Two things worth stating where an operator will hit them:
+
+- **A filesystem has no permissions to map**, so `filesystem.read-principals` is the only thing deciding who
+  can retrieve the content, and it defaults to everyone. That is right for a corpus already shared with
+  everyone who can reach the search endpoint, and wrong for anything else.
+- **`root-path` is validated as a directory that must exist.** It is the one startup check here with real
+  teeth: an ingester pointed at a path that was never mounted reports zero documents and reads as an empty
+  source rather than as a misconfiguration.
+
+There is no change feed, so every pass is a walk. Because the reconciliation sweep is then the only thing
+that ever deletes, a deployment replacing a mounted file expects the sweep to be on.
+
 ### The SharePoint Online Connector
 
 `plugins/sharepoint-connector/` ingests SharePoint Online through Microsoft Graph. Graph is the only
@@ -203,7 +250,7 @@ SHAREPOINT_TENANT_ID=<directory-tenant-id> SHAREPOINT_CLIENT_ID=<application-cli
 SHAREPOINT_CLIENT_SECRET=<secret> SHAREPOINT_DRIVE_IDS='b!<drive-id>' \
 CONNECTOR_SOURCE_TYPE=sharepoint \
 CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
-  docker compose --profile alfresco --profile connector up -d connector-batch-ingester
+  docker compose --profile alfresco --profile connector up -d plugin-batch-ingester
 ```
 
 | Setting | Meaning |
@@ -309,7 +356,7 @@ group-only document is returned to nobody.
 
 Each source connector publishes the settings it needs, and every ingester checks its configuration
 against that schema before it starts serving. A missing or malformed setting is reported by name instead
-of surfacing later as a downstream symptom, such as a filesystem ingester that finds no documents because
+of surfacing later as a downstream symptom, such as a filesystem connector that finds no documents because
 its root path was never mounted.
 
 ```bash
@@ -483,7 +530,7 @@ rag:
 
 Group expansion itself is per source type, not global: `rag-service` holds one `SourceGroupResolver`
 bean per type and ships `alfresco` and `nuxeo`. A source of any other type, which today means the
-filesystem source or any plugin connector, contributes a clause built from the caller's own authorities
+any plugin connector, contributes a clause built from the caller's own authorities
 only, so its group-granted documents are retrievable by nobody. That is logged once per source at WARN
 and is settings-independent: there is no flag that turns it on, only a resolver bean for that type.
 Cache hit-rate is exposed as `cache.gets{cache=rag.security.groups}` under `/actuator/metrics`.

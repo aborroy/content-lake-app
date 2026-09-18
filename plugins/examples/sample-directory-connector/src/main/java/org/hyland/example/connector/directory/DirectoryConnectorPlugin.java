@@ -17,7 +17,7 @@ import java.util.Set;
  * is whatever is in the folder.</p>
  *
  * <p>It is a worked example, not a supported source. The in-tree filesystem connector
- * ({@code filesystem-batch-ingester}) is what a deployment should use for a mounted directory: it has scope
+ * ({@code plugins/filesystem-connector}) is what a deployment should use for a mounted directory: it has scope
  * patterns, exclusions and real ACL configuration. This one is deliberately about a hundred lines.</p>
  *
  * <h3>Running it</h3>

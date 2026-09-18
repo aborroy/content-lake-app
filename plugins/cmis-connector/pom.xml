@@ -21,7 +21,7 @@
             mvn -f pom.xml package
 
         The result is target/cmis-connector-1.0.0.jar, to be dropped into the deployment's connectors/
-        directory and run on connector-batch-ingester.
+        directory and run on plugin-batch-ingester.
     -->
     <groupId>org.hyland.contentlake</groupId>
     <artifactId>cmis-connector</artifactId>

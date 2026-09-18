@@ -213,7 +213,7 @@ Before any deployment reachable by someone else:
       replayable secret in a header. Basic over plaintext HTTP on a shared network hands out both the
       caller's repository password and, on the internal hop, the index service account.
 - [ ] **Keep the ingester sync endpoints closed.** They trigger full re-ingests.
-      `filesystem-batch-ingester` requires an explicit username and password and refuses to start
+      `plugin-batch-ingester` requires an explicit username and password and refuses to start
       without them, precisely because it has no source repository to authenticate against.
 - [ ] **Review `rag.security.admin-bypass.enabled`.** It defaults to `false`. The development stack
       opts in, because `admin` is its working account. A deployment where administrators must not see

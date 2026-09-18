@@ -7,8 +7,13 @@ loads but discovers nothing, which demonstrates the plugin mechanism and not an 
 actually ingests, which makes it the thing to read when writing a connector and the thing the deployment
 suite uses to prove the connector host works.
 
-It is an example, not a supported source. For a real mounted directory use the in-tree filesystem
-connector (`filesystem-batch-ingester`), which has scope patterns, exclusions and real ACL configuration.
+It is an example, not a supported source. For a real mounted directory use `plugins/filesystem-connector`,
+which has scope patterns, exclusions, ACL configuration and a reconciliation story.
+
+#148 asked whether this example should survive that connector, since the two ingest the same thing. It does,
+for one reason: it is deliberately two classes, which makes it the shortest complete thing to read and the
+cheapest fixture for proving the plugin host loads a jar at all. The moment it grows a third class it has
+stopped earning that and should go.
 
 ## Build
 
@@ -39,7 +44,7 @@ curl -u admin:admin -X POST http://localhost:9096/api/sync/configured
 curl -u admin:admin http://localhost:9096/api/status
 ```
 
-The directory has to be mounted into the `connector-batch-ingester` container at the path the setting
+The directory has to be mounted into the `plugin-batch-ingester` container at the path the setting
 names. `CONNECTOR_HOST_PATH` is the compose variable for that mount.
 
 ## Settings
