@@ -1,6 +1,14 @@
 {
   "value": [
     {
+      "id": "inherited-site-owners-role",
+      "roles": [ "owner" ],
+      "inheritedFrom": { "driveId": "b!mock-drive-id", "id": "root", "path": "/drive/root:" },
+      "grantedToV2": {
+        "siteGroup": { "id": "3", "displayName": "Content Lake Owners", "loginName": "Content Lake Owners" }
+      }
+    },
+    {
       "id": "inherited-everyone-except-external",
       "roles": [ "read" ],
       "inheritedFrom": { "driveId": "b!mock-drive-id", "id": "root", "path": "/drive/root:" },

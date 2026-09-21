@@ -35,14 +35,21 @@ class SharePointConnectorClientTest {
     }
 
     private SharePointConnectorClient clientFor(MockGraphServer.Options options) throws IOException {
+        return clientFor(options, SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+    }
+
+    private SharePointConnectorClient clientFor(MockGraphServer.Options options,
+                                                SharePointConnectorSettings.PermissionsMode mode)
+            throws IOException {
         mock = new MockGraphServer(options);
-        SharePointConnectorSettings settings = settings(mock.graphBaseUrl());
+        SharePointConnectorSettings settings = settings(mock.graphBaseUrl(), mode);
         return new SharePointConnectorClient(settings,
                 new GraphHttpClient(mock.graphBaseUrl(), settings.tokenProvider(),
                         ResourceUnitMeter.unmetered()));
     }
 
-    private static SharePointConnectorSettings settings(String graphBaseUrl) {
+    private static SharePointConnectorSettings settings(String graphBaseUrl,
+                                                        SharePointConnectorSettings.PermissionsMode mode) {
         return new SharePointConnectorSettings(
                 graphBaseUrl,
                 SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
@@ -53,6 +60,7 @@ class SharePointConnectorClientTest {
                 List.of(), List.of(), List.of(), List.of(),
                 SharePointAclMapper.AclFallback.FAIL_CLOSED,
                 SharePointAclMapper.GroupGrants.MAP,
+                mode,
                 Set.of(),
                 0, 1);
     }
@@ -80,6 +88,7 @@ class SharePointConnectorClientTest {
                 List.of(DRIVE, "b!second-drive"), null,
                 List.of(), List.of(), List.of(), List.of(),
                 SharePointAclMapper.AclFallback.FAIL_CLOSED, SharePointAclMapper.GroupGrants.MAP,
+                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
                 Set.of(), 0, 1);
         SharePointConnectorClient client = new SharePointConnectorClient(twoDrives,
                 new GraphHttpClient(mock.graphBaseUrl(), twoDrives.tokenProvider(),
@@ -285,6 +294,7 @@ class SharePointConnectorClientTest {
                 null, null, null, null, null, "mock-token",
                 List.of(DRIVE), null, List.of(), List.of(), List.of(), List.of(),
                 SharePointAclMapper.AclFallback.PUBLIC, SharePointAclMapper.GroupGrants.MAP,
+                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
                 Set.of(), 0, 1);
         SharePointConnectorClient client = new SharePointConnectorClient(explicitlyPublic,
                 new GraphHttpClient(mock.graphBaseUrl(), explicitlyPublic.tokenProvider(),
@@ -329,5 +339,154 @@ class SharePointConnectorClientTest {
 
         assertThat(client.connectorSchema().sourceType()).isEqualTo("sharepoint");
         assertThat(client.connectorSchema().fields()).isNotEmpty();
+    }
+
+    @Test
+    void readsOnePermissionsCollectionForAWholeInheritingFolderInHierarchicalMode() throws Exception {
+        SharePointConnectorClient client =
+                clientFor(options(), SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        client.getChildren(DRIVE + ":root", 0, 100);
+        List<SourceNode> files = client.getChildren(DRIVE + ":f-public", 0, 100);
+
+        // Five folders and four files resolved, and Graph was asked for exactly one permissions collection:
+        // the drive root's, which every one of them inherits. Per item this would be nine calls at five
+        // resource units each.
+        assertThat(files).hasSize(4);
+        assertThat(permissionRequests()).containsExactly("/drives/" + DRIVE + "/items/root/permissions");
+        assertThat(client.permissionHierarchy().inheritedResolutions()).isEqualTo(9);
+    }
+
+    @Test
+    void neverServesAnAncestorAclToAnItemThatHasItsOwnInHierarchicalMode() throws Exception {
+        SharePointConnectorClient client =
+                clientFor(options(), SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        client.getChildren(DRIVE + ":root", 0, 100);
+        SourceNode named = client.getNode(DRIVE + ":i-named");
+
+        // The correctness risk in the whole optimisation. i-named is granted to Bob alone and sits under a
+        // folder the whole tenant may read, so serving it the folder's ACL would publish it to everyone.
+        assertThat(named.readPrincipals())
+                .containsExactlyInAnyOrder("user-guid-bob", "bob@contoso.com");
+        assertThat(named.readPrincipals()).doesNotContain(SharePointAclMapper.EVERYONE_AUTHORITY);
+        assertThat(named.sourceProperties()).containsEntry("sharepoint_uniquePermissions", true);
+        assertThat(permissionRequests())
+                .contains("/drives/" + DRIVE + "/items/i-named/permissions");
+    }
+
+    @Test
+    void bothModesGrantAnInheritingDocumentToTheSamePrincipals() throws Exception {
+        SourceNode perItem = quarterlyReview(SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+        SourceNode hierarchical = quarterlyReview(SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        // The invariant the whole optimisation rests on: who may read a document must not depend on how the
+        // connector found out. It holds because an inheriting item's own permissions collection reports every
+        // entry it inherits, which is what the ancestor's collection says too.
+        assertThat(hierarchical.readPrincipals()).isEqualTo(perItem.readPrincipals());
+        assertThat(hierarchical.readPrincipals())
+                .containsExactlyInAnyOrder("GROUP_SITEGROUP_3", SharePointAclMapper.EVERYONE_AUTHORITY);
+
+        // Both also agree that it inherits, and neither marks it as having permissions of its own: that
+        // property is how the index answers "why is this one document readable by someone else".
+        assertThat(hierarchical.security().inheritanceEnabled()).isTrue();
+        assertThat(perItem.security().inheritanceEnabled()).isTrue();
+        assertThat(hierarchical.sourceProperties()).doesNotContainKey("sharepoint_uniquePermissions");
+        assertThat(perItem.sourceProperties()).doesNotContainKey("sharepoint_uniquePermissions");
+    }
+
+    /** One inheriting document, reached the way a walk reaches it, in whichever mode. */
+    private SourceNode quarterlyReview(SharePointConnectorSettings.PermissionsMode mode) throws IOException {
+        if (mock != null) {
+            mock.close();
+        }
+        SharePointConnectorClient client = clientFor(options(), mode);
+        // Through the folder rather than straight at the file, so hierarchical mode has its ancestor cached
+        // the way a real pass would.
+        client.getChildren(DRIVE + ":root", 0, 100);
+        return client.getNode(DRIVE + ":i-quarterly");
+    }
+
+    @Test
+    void refusesHierarchicalModeWhenTheTenantDoesNotHonourThePreference() throws Exception {
+        // A tenant that cannot grant Sites.FullControl.All, which is a one-line change here and an
+        // administrator's decision in reality.
+        SharePointConnectorClient client = clientFor(options().withHonouredPreferences(Set.of()),
+                SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        // Refuses rather than degrading. A silent fallback to per-item would multiply the crawl's cost by
+        // about five against a daily cap, without saying so anywhere an operator would look.
+        assertThatThrownBy(() -> client.getChildren(DRIVE + ":root", 0, 100))
+                .isInstanceOf(GraphException.class)
+                .hasMessageContaining("hierarchicalsharing")
+                .hasMessageContaining("Sites.FullControl.All")
+                .hasMessageContaining("sharepoint.permissions-mode=per-item");
+    }
+
+    @Test
+    void stillReportsAnExpiredCursorInHierarchicalModeRatherThanAnUnhonouredPreference() throws Exception {
+        SharePointConnectorClient client =
+                clientFor(options(), SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        SourceChangePage page = client.changesSince(
+                "{\"" + DRIVE + "\":\"" + mock.graphBaseUrl() + "/drives/" + DRIVE
+                        + "/root/delta?token=delta-from-a-previous-run\"}", 100);
+
+        // A 410 carries an error envelope and no Preference-Applied header, so a preference check ahead of
+        // the resync check would report a stale cursor as a tenant that does not honour hierarchical sharing
+        // and the host would never walk.
+        assertThat(page.cursorExpired()).isTrue();
+    }
+
+    @Test
+    void spendsFewerResourceUnitsPerDocumentInHierarchicalModeThanPerItem() throws Exception {
+        long perItem = unitsForAWalk(SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+        long hierarchical = unitsForAWalk(SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+
+        // Measured over the same tree rather than estimated, which is what the issue asks for. Reported so a
+        // run of this test is the evidence, not just a green tick.
+        System.out.println("Resource units over the fixture tree: per-item=" + perItem
+                + ", hierarchical=" + hierarchical);
+        assertThat(hierarchical).isLessThan(perItem);
+        // Permission reads are five units of every six, so removing most of them has to be a large cut
+        // rather than a marginal one, or the mode is not worth the Sites.FullControl.All it costs.
+        assertThat(hierarchical).isLessThan(perItem / 2);
+    }
+
+    /** Units spent walking the whole fixture tree in one mode, with the two Graph seams unchanged. */
+    private long unitsForAWalk(SharePointConnectorSettings.PermissionsMode mode) throws IOException {
+        if (mock != null) {
+            mock.close();
+        }
+        mock = new MockGraphServer(options());
+        SharePointConnectorSettings settings = settings(mock.graphBaseUrl(), mode);
+        ResourceUnitMeter meter = ResourceUnitMeter.unmetered();
+        SharePointConnectorClient client = new SharePointConnectorClient(settings,
+                new GraphHttpClient(mock.graphBaseUrl(), settings.tokenProvider(), meter));
+
+        walk(client, DRIVE + ":root");
+        client.logSummary(1);
+        return meter.unitsSpent();
+    }
+
+    /** Depth-first, the way the host's discovery service walks a container. */
+    private static void walk(SharePointConnectorClient client, String containerId) {
+        for (SourceNode child : client.getChildren(containerId, 0, 100)) {
+            if (child.folder()) {
+                walk(client, child.nodeId());
+            }
+        }
+    }
+
+    /** Just the {@code /permissions} calls the connector made, so they can be counted exactly. */
+    private List<String> permissionRequests() {
+        List<String> permissionCalls = new ArrayList<>();
+        for (String entry : mock.requestLog()) {
+            if (entry.contains("/permissions")) {
+                // The method prefix and any paging query are noise for a count of which items were read.
+                permissionCalls.add(entry.substring(entry.indexOf(' ') + 1).replace("/v1.0", ""));
+            }
+        }
+        return permissionCalls;
     }
 }

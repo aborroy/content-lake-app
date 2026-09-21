@@ -6,5 +6,6 @@
   "webUrl": "https://contoso.sharepoint.com/sites/lake/Shared%20Documents/widely-shared.txt",
   "size": 31,
   "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-public" },
+  "shared": { "scope": "users", "sharedBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams" } }, "sharedDateTime": "2026-09-01T09:05:00Z" },
   "file": { "mimeType": "text/plain" }
 }

@@ -93,10 +93,17 @@ what that one account may read, which is not the caller's answer.
   the two would blank out a source for every site-local principal that legitimately exists in one
   repository and not another.
 - **A source type with no resolver expands no groups.** `SourceGroupResolverRegistry` selects by source
-  type and ships `alfresco` and `nuxeo`; any other type gets the caller's own authorities only, so
-  group-granted documents on it are retrievable by nobody rather than by everybody. Exactly one
-  resolver may claim a type, and the registry refuses to start otherwise: which of two wins would
-  decide who reads what, and bean ordering must not settle that.
+  type and ships three, for `alfresco`, `nuxeo` and `sharepoint`; any other type gets the caller's own
+  authorities only, so group-granted documents on it are retrievable by nobody rather than by everybody.
+  Exactly one resolver may claim a type, and the registry refuses to start otherwise: which of two wins
+  would decide who reads what, and bean ordering must not settle that.
+- **The `sharepoint` resolver is conditional, and its absence fails closed.** `EntraGroupResolver` exists
+  only where `rag.security.entra.enabled` is true, so a SharePoint source on a deployment that has not
+  configured it behaves exactly like a source type with no resolver: group-granted documents retrieve for
+  nobody. That is deliberate rather than an oversight. A resolver that exists and cannot reach Entra would
+  follow the failure policy above and cost callers the whole source, which is worse than losing the group
+  grants alone. Site-local `siteUser` and `siteGroup` principals are unresolvable by any resolver, enabled
+  or not, and the connector counts them separately at ingest for that reason.
 - **Resolved membership is cached, failures are not.** `rag.security.group-cache.ttl-seconds` (300 by
   default) bounds how stale a caller's membership may be, keyed by source type and username so no
   entry is shared between callers. A directory failure is never cached, so an outage is retried on the
@@ -225,6 +232,10 @@ Before any deployment reachable by someone else:
 - [ ] **Set `rag.security.group-cache.ttl-seconds` to what your revocation window allows.** 300 by
       default. A revoked group membership stays effective for up to that long; `0` disables the cache
       and asks the directory on every query.
+- [ ] **Decide `rag.security.entra.enabled` before ingesting a SharePoint source.** Off by default, and
+      while it is off every group-granted SharePoint document is retrievable by nobody. Turning it on is
+      what makes those ACLs actionable; leaving it off is a defensible choice, but it should be a choice
+      rather than a discovery after a crawl.
 - [ ] **Do not expose `/actuator/metrics` or `/actuator/prometheus` publicly.** They require
       authentication already; a scraper needs an account valid in one of the configured sources.
 - [ ] **Leave `rag.observability.capture-content` at `false`** unless the trace backend sits inside the

@@ -25,14 +25,21 @@ import java.util.Set;
  *   <li><strong>Batch only.</strong> Graph supports webhook subscriptions on a drive, but there is no live
  *       host for a plugin connector and the SPI has no hook for one. Incremental passes come from the change
  *       feed instead, which is a batch pass that reads {@code delta} rather than walking.</li>
- *   <li><strong>A document granted only to an Entra group is retrievable by nobody.</strong> Ingestion
- *       records the group faithfully; expanding a caller's group membership at query time is a
- *       {@code rag-service} resolver that does not exist yet. The run reports how many documents this
- *       affects rather than leaving it to be discovered.</li>
- *   <li><strong>Permissions are read per item, at five resource units each.</strong> That is about six units
- *       per document all in, and the {@code Prefer: hierarchicalsharing} optimisation is deliberately a
- *       separate change: whether a tenant honours it decides whether a crawl is bounded near 200,000 or
- *       1,000,000 documents a day, and assuming the cheap path would spend a tenant's budget to find out.</li>
+ *   <li><strong>A document granted only to an Entra group needs the group resolver switched on.</strong>
+ *       Ingestion records the group faithfully, and {@code rag-service} expands a caller's membership at
+ *       query time only where {@code rag.security.entra.enabled} is true. Without it such a document is
+ *       retrievable by nobody, so the run reports how many are affected rather than leaving it to be
+ *       discovered.</li>
+ *   <li><strong>Site-local principals are retrievable by nobody, whatever is configured.</strong> A
+ *       {@code siteUser} or {@code siteGroup} grant with no directory identity alongside it names an
+ *       identity that exists only inside the site collection, and no Entra resolver can expand one. Counted
+ *       and reported separately for that reason.</li>
+ *   <li><strong>Permissions are read per item by default, at five resource units each</strong>, which is
+ *       about six units per document all in. {@code sharepoint.permissions-mode=hierarchical} reads them
+ *       only where the sharing hierarchy says they are set, at about one unit per document, and needs
+ *       {@code Sites.FullControl.All}. The choice is never inferred: whether a tenant honours the
+ *       {@code Prefer} header decides whether a crawl is bounded near 200,000 or 1,000,000 documents a
+ *       day.</li>
  *   <li><strong>No server-side extraction.</strong> {@link #createTextExtractor} returns null, so the host's
  *       in-process Tika chain is used unless {@code EXTRACTION_ENGINE_URLS} is set. Graph does not convert
  *       content the way Nuxeo does.</li>
@@ -66,6 +73,7 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
     static final String EXCLUDE_MIME_TYPES_SETTING = SOURCE_TYPE + ".exclude-mime-types";
     static final String ACL_FALLBACK_SETTING = SOURCE_TYPE + ".acl-fallback";
     static final String GROUP_GRANTS_SETTING = SOURCE_TYPE + ".group-grants";
+    static final String PERMISSIONS_MODE_SETTING = SOURCE_TYPE + ".permissions-mode";
     static final String EVERYONE_CLAIMS_SETTING = SOURCE_TYPE + ".everyone-claims";
     static final String RESOURCE_UNITS_PER_MINUTE_SETTING = SOURCE_TYPE + ".resource-units-per-minute";
     static final String RESOURCE_UNIT_BURST_SETTING = SOURCE_TYPE + ".resource-unit-burst";
@@ -142,6 +150,14 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                                 + "(omit group principals, so a group-only item is readable by nobody). There "
                                 + "is deliberately no option that widens a group grant to the whole tenant",
                         false, List.of("map", "skip"))
+                .enumeration(PERMISSIONS_MODE_SETTING,
+                        "How to obtain an item's permissions: per-item (the default, one 5-unit call per "
+                                + "item, about six resource units per document) or hierarchical (read them "
+                                + "only where the sharing hierarchy says they are set, about one unit per "
+                                + "document). Hierarchical needs the Sites.FullControl.All application "
+                                + "permission, and refuses to run rather than degrade if the tenant does not "
+                                + "honour it",
+                        false, List.of("per-item", "hierarchical"))
                 .optional(EVERYONE_CLAIMS_SETTING, ConnectorSchema.FieldType.LIST,
                         "Display names that mean every user in the tenant, for a tenant that words 'Everyone "
                                 + "except external users' differently. Empty uses the documented English names")
@@ -222,6 +238,7 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                 context.listProperty(EXCLUDE_MIME_TYPES_SETTING),
                 SharePointAclMapper.AclFallback.of(context.property(ACL_FALLBACK_SETTING)),
                 SharePointAclMapper.GroupGrants.of(context.property(GROUP_GRANTS_SETTING)),
+                SharePointConnectorSettings.PermissionsMode.of(context.property(PERMISSIONS_MODE_SETTING)),
                 everyoneClaims(context),
                 context.intProperty(RESOURCE_UNITS_PER_MINUTE_SETTING, DEFAULT_RESOURCE_UNITS_PER_MINUTE),
                 context.intProperty(RESOURCE_UNIT_BURST_SETTING, DEFAULT_RESOURCE_UNIT_BURST));

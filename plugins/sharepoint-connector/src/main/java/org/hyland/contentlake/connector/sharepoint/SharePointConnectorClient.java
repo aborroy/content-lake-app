@@ -69,13 +69,35 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     private static final int MAX_CACHED_PAGE_LINKS = 10_000;
 
-    /** How often the cost and ACL summary is emitted, after the first document. */
+    /** How often the cost and ACL summary is emitted, once past {@link #PROGRESS_SECOND}. */
     private static final int PROGRESS_EVERY = 100;
+
+    /**
+     * A second report this early, because the first one's cost per document is not a rate.
+     *
+     * <p>At one document the figure is that document plus whatever the pass had to read to place it -- the
+     * drive root's permissions, in {@code hierarchical} mode -- so it reads the same in both permission modes
+     * and tells an operator nothing about which is cheaper. By ten it has amortised, and on a corpus smaller
+     * than {@link #PROGRESS_EVERY} it is otherwise the report that never happens.
+     */
+    private static final int PROGRESS_SECOND = 10;
+
+    /**
+     * The {@code Prefer} token that makes Graph report sharing only at permission-hierarchy roots.
+     *
+     * <p>Requested only in {@code hierarchical} mode, and its absence from {@code Preference-Applied} is a
+     * refusal rather than a warning; see {@link #requirePreferences}.
+     */
+    private static final String HIERARCHICAL_SHARING = "hierarchicalsharing";
 
     private final SharePointConnectorSettings settings;
     private final GraphHttpClient graph;
     private final SharePointAclMapper aclMapper;
+    private final PermissionHierarchyCache permissions;
     private final ObjectMapper json = new ObjectMapper();
+
+    /** {@code Prefer} tokens sent on every request that returns {@code driveItem}s, possibly empty. */
+    private final List<String> itemPreferences;
 
     /** Documents mapped in this process, for the periodic progress report. */
     private final java.util.concurrent.atomic.AtomicLong documentsMapped =
@@ -95,7 +117,14 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         this.graph = graph;
         this.aclMapper = new SharePointAclMapper(settings.aclFallback(), settings.groupGrants(),
                 settings.everyoneClaims());
-        log.info("SharePoint connector ready: " + graph.describe() + ", drives " + settings.driveIds());
+        this.itemPreferences =
+                settings.permissionsMode() == SharePointConnectorSettings.PermissionsMode.HIERARCHICAL
+                        ? List.of(HIERARCHICAL_SHARING)
+                        : List.of();
+        this.permissions = new PermissionHierarchyCache(settings.permissionsMode(), this::readAcl,
+                this::fetchItem);
+        log.info("SharePoint connector ready: " + graph.describe() + ", drives " + settings.driveIds()
+                + ", permissions mode " + settings.permissionsMode().settingValue());
     }
 
     @Override
@@ -138,7 +167,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     @Override
     public SourceNode getNode(String nodeId) {
         Composite composite = Composite.parse(nodeId);
-        JsonNode item = graph.getJson(itemPath(composite), ResourceUnitMeter.SINGLE_ITEM, List.of()).body();
+        JsonNode item = getItems(itemPath(composite), ResourceUnitMeter.SINGLE_ITEM).body();
         return toSourceNode(composite.driveId(), item);
     }
 
@@ -165,8 +194,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         }
 
         String url = link != null ? link : childrenPath(composite, top);
-        GraphHttpClient.GraphResponse response =
-                graph.getJson(url, ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+        GraphHttpClient.GraphResponse response = getItems(url, ResourceUnitMeter.MULTI_ITEM_QUERY);
 
         String next = GraphHttpClient.text(response.body(), "@odata.nextLink");
         if (next != null) {
@@ -195,8 +223,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         log.fine(() -> "Re-paging " + containerId + " from the start to reach skip=" + skip);
         String url = childrenPath(composite, top);
         for (int position = 0; position < skip; position += top) {
-            GraphHttpClient.GraphResponse response =
-                    graph.getJson(url, ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+            GraphHttpClient.GraphResponse response = getItems(url, ResourceUnitMeter.MULTI_ITEM_QUERY);
             String next = GraphHttpClient.text(response.body(), "@odata.nextLink");
             if (next == null) {
                 return null;
@@ -242,9 +269,9 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         }
         Map<String, String> positions = new LinkedHashMap<>();
         for (String driveId : settings.driveIds()) {
-            GraphHttpClient.GraphResponse response = graph.getJson(
+            GraphHttpClient.GraphResponse response = getItems(
                     "/drives/" + driveId + "/root/delta?token=latest",
-                    ResourceUnitMeter.DELTA_WITH_TOKEN, List.of());
+                    ResourceUnitMeter.DELTA_WITH_TOKEN);
             String deltaLink = GraphHttpClient.text(response.body(), "@odata.deltaLink");
             if (deltaLink == null) {
                 log.warning("Drive " + driveId + " returned no deltaLink for token=latest; this source will "
@@ -278,13 +305,17 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         for (Map.Entry<String, String> position : positions.entrySet()) {
             String driveId = position.getKey();
             GraphHttpClient.GraphResponse response =
-                    graph.getJson(position.getValue(), ResourceUnitMeter.DELTA_WITH_TOKEN, List.of());
+                    graph.getJson(position.getValue(), ResourceUnitMeter.DELTA_WITH_TOKEN, itemPreferences);
 
             if (isResyncRequired(response.body())) {
                 log.warning("Drive " + driveId + " reports its delta token expired; the whole cursor is "
                         + "discarded and the host will walk");
                 return SourceChangePage.expired();
             }
+            // Checked after the resync test, never before it: a 410 carries an error envelope and no
+            // Preference-Applied header, so enforcing the preference first would report an expired cursor as
+            // a tenant that does not honour hierarchical sharing.
+            requirePreferences(position.getValue(), response);
 
             for (JsonNode item : GraphHttpClient.array(response.body(), "value")) {
                 String itemId = GraphHttpClient.text(item, "id");
@@ -366,10 +397,19 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         return aclMapper;
     }
 
-    /** One line each for the ACL limitations and the Graph spend. */
+    /** The permission hierarchy's counters, so a pass can report what the mode actually saved. */
+    PermissionHierarchyCache permissionHierarchy() {
+        return permissions;
+    }
+
+    /** One line each for the ACL limitations, the permission mode's effect, and the Graph spend. */
     public void logSummary(long documents) {
         aclMapper.logSummary("SharePoint source " + getSourceId());
-        graph.meter().logSummary("SharePoint source " + getSourceId(), documents);
+        permissions.logSummary("SharePoint source " + getSourceId());
+        // The mode is in the cost line as well as in the line above it, because the cost per document is
+        // meaningless without it: 7 units a document is correct for per-item and a bug for hierarchical.
+        graph.meter().logSummary("SharePoint source " + getSourceId() + " in "
+                + settings.permissionsMode().settingValue() + " permissions mode", documents);
     }
 
     /**
@@ -384,7 +424,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     private void reportProgress() {
         long mapped = documentsMapped.incrementAndGet();
-        if (mapped == 1 || mapped % PROGRESS_EVERY == 0) {
+        if (mapped == 1 || mapped == PROGRESS_SECOND || mapped % PROGRESS_EVERY == 0) {
             logSummary(mapped);
         }
     }
@@ -404,7 +444,7 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         boolean folder = item.hasNonNull("folder");
         String composite = nodeId(driveId, itemId);
 
-        SharePointAclMapper.MappedAcl acl = readAcl(driveId, itemId);
+        SharePointAclMapper.MappedAcl acl = permissions.resolve(driveId, item);
         if (!acl.ingestable()) {
             log.warning("Not ingesting " + composite + ": its permissions could not be read and "
                     + "sharepoint.acl-fallback is fail-closed");
@@ -447,13 +487,57 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     }
 
     /**
-     * Reads and maps one item's permissions.
+     * GETs something that returns {@code driveItem}s, requesting this mode's {@code Prefer} tokens.
      *
-     * <p>Per item, which is the naive mode and costs 5 resource units each. The
-     * {@code Prefer: hierarchicalsharing} optimisation is a separate change, and it is deliberately not
-     * attempted silently: whether a tenant honours that header decides whether a crawl costs about one unit
-     * per document or about six, and a connector that assumed the cheap path and got the expensive one would
-     * quietly spend the tenant's daily budget.</p>
+     * <p>Every enumeration path goes through here so that {@code hierarchical} mode cannot be half applied:
+     * a walk that asked for the preference on a folder listing but not on a single-item get would read the
+     * {@code shared} facet as meaningful in one response and not in the other.</p>
+     */
+    private GraphHttpClient.GraphResponse getItems(String pathOrUrl, int units) {
+        GraphHttpClient.GraphResponse response = graph.getJson(pathOrUrl, units, itemPreferences);
+        requirePreferences(pathOrUrl, response);
+        return response;
+    }
+
+    /**
+     * Refuses to continue when Graph did not honour a preference the mode depends on.
+     *
+     * <p>{@code GraphHttpClient} only logs an unapplied preference, deliberately: whether it matters is the
+     * caller's judgement. Here it matters absolutely. Without {@code hierarchicalsharing}, Graph reports the
+     * {@code shared} facet on inheriting items as well as on hierarchy roots, so its absence stops meaning
+     * "this item inherits" and the resolution this mode is built on becomes a guess about who may read
+     * what.</p>
+     *
+     * <p>Refusing rather than falling back to {@code per-item} is the point of the setting being explicit.
+     * A silent fallback would multiply the crawl's cost by about five without saying so, which against a
+     * daily cap is the difference between a crawl that finishes and one that does not.</p>
+     */
+    private void requirePreferences(String pathOrUrl, GraphHttpClient.GraphResponse response) {
+        if (response.requestedPreferences().isEmpty() || response.allPreferencesApplied()) {
+            return;
+        }
+        throw new GraphException("Graph did not apply " + response.unappliedPreferences() + " for "
+                + pathOrUrl + ", so " + SharePointConnectorPlugin.PERMISSIONS_MODE_SETTING
+                + "=hierarchical cannot tell an item with its own permissions from one that inherits. That "
+                + "preference needs the Sites.FullControl.All application permission. Grant it, or set "
+                + SharePointConnectorPlugin.PERMISSIONS_MODE_SETTING + "=per-item and accept about five "
+                + "times the Graph resource-unit cost per document.");
+    }
+
+    /** One {@code driveItem}, for the permission hierarchy walking up a parent chain. Costs 1 unit. */
+    private JsonNode fetchItem(String driveId, String itemId) {
+        return getItems(itemPath(new Composite(driveId, itemId)), ResourceUnitMeter.SINGLE_ITEM).body();
+    }
+
+    /**
+     * Reads and maps one item's own permissions, at 5 resource units plus one per extra page.
+     *
+     * <p>Called for every item in {@code per-item} mode, and in {@code hierarchical} mode only where the
+     * sharing hierarchy says an item has permissions of its own. {@link PermissionHierarchyCache} owns that
+     * decision; this method only ever reads what it is asked to.</p>
+     *
+     * <p>No {@code Prefer} token is sent here. {@code hierarchicalsharing} changes which {@code driveItem}s
+     * carry sharing information, not what a permissions collection contains.</p>
      */
     private SharePointAclMapper.MappedAcl readAcl(String driveId, String itemId) {
         List<JsonNode> entries = new ArrayList<>();

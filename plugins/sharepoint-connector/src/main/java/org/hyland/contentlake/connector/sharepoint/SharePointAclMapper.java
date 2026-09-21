@@ -45,8 +45,9 @@ import java.util.logging.Logger;
  * <p>Four of those are decisions rather than details:</p>
  * <ul>
  *   <li><strong>Emitting both an object id and a UPN for one user is not a widening.</strong> They name the
- *       same identity. The UPN is what matches today, because {@code rag-service} compares the caller's own
- *       username; the object id is what an Entra group resolver will match.</li>
+ *       same identity, and {@code rag-service} matches a document against the caller's own username. Which
+ *       of the two that username is depends on the deployment's identity provider, so emitting both is what
+ *       makes a named grant work whether callers are known by UPN or by object id.</li>
  *   <li><strong>A group is never emitted by display name.</strong> Entra display names are not unique, so
  *       {@code GROUP_<displayName>} is a real leak vector: two groups called "Finance" in different parts
  *       of a directory would share a principal.</li>
@@ -62,12 +63,16 @@ import java.util.logging.Logger;
  * form wins and the site-local form is ignored. Only an entry whose <em>only</em> identity is site-local
  * produces a site-local principal, which is the case no resolver can ever expand.</p>
  *
- * <h3>The group-grant gap, stated rather than papered over</h3>
- * <p>{@code rag-service} expands group membership through a source-type resolver registry, and there is no
- * Entra resolver in the tree yet. Until there is, a document granted only to an Entra group is ingested
- * with correct principals and retrievable by nobody. That is the right behaviour here: emit the group ids
- * faithfully and report how many documents depend on them. Widening a group grant to everyone so that a
- * demonstration works is the exact failure this class is built to prevent.</p>
+ * <h3>Group grants depend on something outside this connector</h3>
+ * <p>{@code rag-service} expands group membership through a source-type resolver registry, and its Entra
+ * resolver is a conditional bean: with {@code rag.security.entra.enabled} unset there is no resolver for
+ * this source type, and a document granted only to an Entra group is ingested with correct principals and
+ * retrievable by nobody.</p>
+ *
+ * <p>This class behaves the same either way, which is the point: emit the group ids faithfully and report how
+ * many documents depend on them, so enabling the resolver is a deployment decision rather than a re-ingest.
+ * Widening a group grant to everyone so that a demonstration works is the exact failure this class is built
+ * to prevent.</p>
  */
 public final class SharePointAclMapper {
 
@@ -148,6 +153,25 @@ public final class SharePointAclMapper {
         static MappedAcl notIngestable() {
             return new MappedAcl(Set.of(), new SecurityConfig(false, List.of()), false, false);
         }
+
+        /**
+         * The same grants, marked as inherited: what a descendant of a permission-hierarchy root gets.
+         *
+         * <p>Two fields have to change rather than be copied. {@code inheritanceEnabled} becomes true,
+         * because from the descendant's point of view every one of these rules came from above it, whatever
+         * the ancestor's own collection said. And {@code hasUniquePermissions} becomes false, or the
+         * descendant would be stored with the {@code sharepoint_uniquePermissions} marker that exists to
+         * answer "why is this one document readable by someone else".</p>
+         *
+         * <p>{@code ingestable} is carried across unchanged, which is what makes a fail-closed ancestor
+         * refuse its descendants too instead of them falling back to something more permissive.</p>
+         */
+        MappedAcl asInherited() {
+            return new MappedAcl(readPrincipals,
+                    new SecurityConfig(true, securityConfig == null ? List.of() : securityConfig.permissions()),
+                    ingestable,
+                    false);
+        }
     }
 
     /**
@@ -212,7 +236,8 @@ public final class SharePointAclMapper {
         if (principals.isEmpty()) {
             documentsGrantedToNobody.incrementAndGet();
         } else if (!anyEveryone && !anyUserPrincipal && anyGroupPrincipal) {
-            // Retrievable only by expanding an Entra group, which nothing does yet.
+            // Retrievable only where the query path expands Entra group membership, which is off unless
+            // rag.security.entra.enabled is set.
             documentsGroupOnly.incrementAndGet();
         }
         if (anySiteLocalPrincipal && !anyDirectoryPrincipal && !anyEveryone) {
@@ -444,7 +469,7 @@ public final class SharePointAclMapper {
      */
     public void logSummary(String context) {
         log.info(() -> context + ": mapped ACLs for " + documentsMapped.get() + " item(s); "
-                + documentsGroupOnly.get() + " retrievable only by expanding an Entra group, "
+                + documentsGroupOnly.get() + " retrievable only where Entra group expansion is enabled, "
                 + documentsSiteLocalOnly.get() + " granted only to site-local principals that no resolver "
                 + "can expand, " + documentsGrantedToNobody.get() + " granted to nobody, "
                 + documentsWithNoReadableAcl.get() + " with an unreadable ACL");

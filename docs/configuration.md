@@ -269,6 +269,7 @@ CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
 | `sharepoint.include-mime-types` / `sharepoint.exclude-mime-types` | MIME scope, `text/*` wildcards allowed |
 | `sharepoint.acl-fallback` | `fail-closed` (default) or `public`; see below |
 | `sharepoint.group-grants` | `map` (default) or `skip`; see below |
+| `sharepoint.permissions-mode` | `per-item` (default, one 5-unit call per item) or `hierarchical` (resolve inherited ACLs from the sharing hierarchy, needs `Sites.FullControl.All`); see below |
 | `sharepoint.everyone-claims` | Display names meaning every user in the tenant, for a tenant that words them differently |
 | `sharepoint.resource-units-per-minute` | Graph budget to spend per minute, default 1000. Zero disables metering |
 | `sharepoint.resource-unit-burst` | Units allowed to accumulate, default 200 |
@@ -288,8 +289,10 @@ Two things worth raising with whoever grants it:
   that cannot do it is worse than none.
 - **`Sites.FullControl.All` is only needed for the cheap crawl.** Microsoft's note on the delta scanning
   headers states that to process permissions correctly with `Prefer: deltashowsharingchanges` "your
-  application will need to request **Sites.FullControl.All** permissions". This connector does not send those
-  headers yet, so it does not need that permission and pays the per-item cost instead.
+  application will need to request **Sites.FullControl.All** permissions". The connector sends
+  `Prefer: hierarchicalsharing` only when `sharepoint.permissions-mode` is `hierarchical`, so a deployment
+  that cannot get that grant leaves the setting at its default and pays the per-item cost instead. It is not
+  needed for correctness, only for cost.
 
 #### Cost, which is metered rather than estimated
 
@@ -298,11 +301,35 @@ a delta page with a token or a content download, 2 for a multi-item query, and *
 operation**. The permissions collection cannot be `$expand`ed onto a `driveItem` get, so an ACL read is
 always its own call.
 
-Measured against the mock, the first document of a crawl costs **7 units**. The connector reports its own
-spend and its cost per document as it runs, so the figure for a real corpus is a log line rather than an
-estimate. Against the documented per-application per-tenant cap of 1250 units a minute, that puts a naive
-crawl near 200,000 documents a day; the default budget is set below the cap because everything sharing the
-app registration draws on it.
+The connector reports its own spend and its cost per document as it runs -- at the first document, at the
+tenth, and every hundred after that -- so the figure for a real corpus is a log line rather than an estimate.
+The default budget is set below the documented per-application per-tenant cap of 1250 units a minute, because
+everything sharing the app registration draws on the same cap.
+
+`sharepoint.permissions-mode` is what decides the figure, and it is the one setting to think about before a
+first crawl:
+
+| Mode | How an item's ACL is obtained | Measured, not estimated |
+|---|---|---|
+| `per-item` (default) | one 5-unit `/permissions` call each | **5.60 units per document**. The daily cap binds near 200,000 documents |
+| `hierarchical` | read only where the sharing hierarchy says permissions are set; everything else inherits from the nearest ancestor | **1.10 units per document**, from **one** permissions call serving nine items. Roughly a fivefold cut, and bounded at sixfold because the 1-unit content download is then the whole cost |
+
+Both figures are the ingester's own `Graph resource units ... per document` line at the tenth document of a
+pass over the same fixture tree, from `test/test-sharepoint.sh` in the deployment repository (S25 and S26).
+
+`hierarchical` sends `Prefer: hierarchicalsharing`, which makes Graph report the `shared` facet only on a
+permission-hierarchy root rather than on every item that inherits from one. That facet's presence is then the
+only signal distinguishing the two, which has three consequences worth knowing:
+
+- It needs **`Sites.FullControl.All`**, and the connector **refuses to run** rather than fall back if
+  `Preference-Applied` does not come back. A silent fallback would quintuple a crawl's spend without saying
+  so, which against a daily cap is the difference between a crawl that finishes and one that does not. The
+  refusal names the setting to change.
+- The saving depends on how the tenant is administered, not on corpus size. A tenant where users share
+  individual files heavily has more hierarchy roots and less to inherit, so measure rather than quote.
+- Who may read a document does not change with the mode. An inheriting item's own permissions collection
+  reports every entry it inherits, which is the same set the ancestor's collection reports, and there is a
+  test asserting the two modes agree.
 
 #### Enumeration is a change feed, and the first pass always walks
 
@@ -326,11 +353,13 @@ organisation-scoped sharing link maps to everyone; an anonymous link grants noth
 caller. An unrecognised role or shape grants nothing and is counted, so an item under-shares rather than
 over-shares.
 
-**A document granted only to an Entra ID group is retrievable by nobody.** Ingestion records the group
-correctly; expanding a caller's group membership at query time needs a `rag-service` resolver that does not
-exist yet. Each run logs how many documents this affects, and how many depend on site-local principals, which
-no resolver can ever expand. `sharepoint.group-grants=skip` omits group principals entirely instead; there is
-deliberately no setting that widens a group grant to the whole tenant.
+**A document granted only to an Entra ID group is retrievable by nobody until the query-path resolver is
+switched on.** Ingestion records the group correctly either way; expanding a caller's group membership at
+query time is `rag-service`'s `EntraGroupResolver`, a conditional bean that exists only where
+`rag.security.entra.enabled` is true (see [Entra ID group expansion](#entra-id-group-expansion)). Each run
+logs how many documents this affects, and how many depend on site-local principals, which no resolver can ever
+expand. `sharepoint.group-grants=skip` omits group principals entirely instead; there is deliberately no
+setting that widens a group grant to the whole tenant.
 
 `sharepoint.acl-fallback` decides what happens to an item whose permissions cannot be read: `fail-closed`
 does not ingest it, `public` makes it readable by everyone. There is no `sync-account` option as there is for
@@ -528,12 +557,54 @@ rag:
 | `group-cache.ttl-seconds` | How long a resolved membership is reused, and therefore the ceiling on how stale it may be: a caller removed from a group keeps reading that group's documents until the entry expires |
 | `group-cache.max-size` | Entry bound on that cache. Entries are keyed by source type and username, so the working set is roughly one per active caller per source type |
 
-Group expansion itself is per source type, not global: `rag-service` holds one `SourceGroupResolver`
-bean per type and ships `alfresco` and `nuxeo`. A source of any other type, which today means the
-any plugin connector, contributes a clause built from the caller's own authorities
-only, so its group-granted documents are retrievable by nobody. That is logged once per source at WARN
-and is settings-independent: there is no flag that turns it on, only a resolver bean for that type.
-Cache hit-rate is exposed as `cache.gets{cache=rag.security.groups}` under `/actuator/metrics`.
+Group expansion itself is per source type, not global: `rag-service` holds one `SourceGroupResolver` bean per
+type and ships three, for `alfresco`, `nuxeo` and `sharepoint`. A source of any other type contributes a
+clause built from the caller's own authorities only, so its group-granted documents are retrievable by
+nobody. That is logged once per source at WARN, and the remedy is a resolver bean for that type rather than a
+setting. Cache hit-rate is exposed as `cache.gets{cache=rag.security.groups}` under `/actuator/metrics`.
+
+##### Entra ID group expansion
+
+`EntraGroupResolver` is the `sharepoint` one, and unlike the other two it is a **conditional bean**: with
+`rag.security.entra.enabled` unset there is no resolver for that source type at all. That is deliberate. A
+resolver that exists and cannot reach its directory is worse than none, because `group-resolution-failure`
+would then cost every caller the whole source rather than only its group-granted documents.
+
+It calls `GET /users/{identity}/transitiveMemberOf/microsoft.graph.group` -- transitive, because nested group
+grants are ordinary in Entra -- and emits `GROUP_<objectId>`, matching what the SharePoint connector's ACL
+mapper writes at ingest. Never a display name on either side: Entra display names are not unique, so a
+principal built from one would match documents granted to a different group of the same name.
+
+```yaml
+rag:
+  security:
+    entra:
+      enabled: ${RAG_SECURITY_ENTRA_ENABLED:false}
+      source-type: ${RAG_SECURITY_ENTRA_SOURCE_TYPE:sharepoint}
+      graph-base-url: ${RAG_SECURITY_ENTRA_GRAPH_BASE_URL:https://graph.microsoft.com/v1.0}
+      tenant-id: ${RAG_SECURITY_ENTRA_TENANT_ID:}
+      client-id: ${RAG_SECURITY_ENTRA_CLIENT_ID:}
+      client-secret: ${RAG_SECURITY_ENTRA_CLIENT_SECRET:}
+      certificate-path: ${RAG_SECURITY_ENTRA_CERTIFICATE_PATH:}
+      certificate-password: ${RAG_SECURITY_ENTRA_CERTIFICATE_PASSWORD:}
+      auth-mode: ${RAG_SECURITY_ENTRA_AUTH_MODE:client-credentials}
+      access-token: ${RAG_SECURITY_ENTRA_ACCESS_TOKEN:}
+      username-suffix: ${RAG_SECURITY_ENTRA_USERNAME_SUFFIX:}
+```
+
+| Setting | Effect |
+|---|---|
+| `enabled` | Whether the bean exists at all. Without it, a SharePoint document granted only to a group is retrievable by nobody |
+| `source-type` | Which source type this resolver answers for. Only worth changing if a connector reports a different type |
+| `tenant-id` / `client-id` | Required when enabled. A separate app registration from the connector's is fine, and needs `GroupMember.Read.All` or equivalent to read membership |
+| `client-secret` / `certificate-path` | Exactly one of the two. A certificate is preferred: a secret expires on a date nobody diarises |
+| `auth-mode` | `client-credentials` (app-only) or `static-token`, the latter for a local run against the mock Graph service, since msal4j refuses an authority that is not `https` |
+| `username-suffix` | Appended to a bare username to form the Entra identity, so a caller known to the repository as `sarah` is looked up as `sarah@contoso.com`. Anything already containing `@` is left alone |
+
+It consumes the same `group-cache` and `group-resolution-failure` settings as the other two resolvers, so a
+membership change takes effect within the cache TTL and a Graph outage costs what
+`group-resolution-failure` says it costs. A 404 for an identity is "no such user here", which costs that
+caller only this source's group grants; anything else is a failure and is never cached.
 
 #### Optional Retrieval and Generation Features
 

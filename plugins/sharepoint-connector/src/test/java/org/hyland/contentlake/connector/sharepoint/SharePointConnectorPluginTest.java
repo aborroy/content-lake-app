@@ -191,4 +191,27 @@ class SharePointConnectorPluginTest {
 
         assertThat(fallbackValues).containsExactlyInAnyOrder("fail-closed", "public");
     }
+
+    @Test
+    void defaultsToTheExpensivePermissionsModeBecauseTheCheapOneNeedsAPrivilegedGrant() {
+        ConnectorSchema schema = new SharePointConnectorPlugin().schema();
+
+        List<String> modes = schema.fields().stream()
+                .filter(field -> field.name().equals("sharepoint.permissions-mode"))
+                .flatMap(field -> field.allowedValues().stream())
+                .toList();
+
+        assertThat(modes).containsExactlyInAnyOrder("per-item", "hierarchical");
+        // Unset, a typo and an unrecognised value all read as per-item. The other direction would make a
+        // configuration mistake refuse to start on a tenant that was working, because hierarchical needs
+        // Sites.FullControl.All and refuses rather than degrading without it.
+        assertThat(SharePointConnectorSettings.PermissionsMode.of(null))
+                .isEqualTo(SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+        assertThat(SharePointConnectorSettings.PermissionsMode.of("  "))
+                .isEqualTo(SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+        assertThat(SharePointConnectorSettings.PermissionsMode.of("hierarchial"))
+                .isEqualTo(SharePointConnectorSettings.PermissionsMode.PER_ITEM);
+        assertThat(SharePointConnectorSettings.PermissionsMode.of("HIERARCHICAL"))
+                .isEqualTo(SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+    }
 }

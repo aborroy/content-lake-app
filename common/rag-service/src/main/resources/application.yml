@@ -237,6 +237,35 @@ rag:
     group-cache:
       ttl-seconds: ${RAG_SECURITY_GROUP_CACHE_TTL_SECONDS:300}
       max-size: ${RAG_SECURITY_GROUP_CACHE_MAX_SIZE:10000}
+    # Entra ID group expansion, for a SharePoint source. Off by default, and the bean does not exist while
+    # it is: a resolver that cannot reach its directory is worse than none, because group-resolution-failure
+    # would then cost every caller the whole source rather than only its group-granted documents. While it
+    # is off, a SharePoint document granted only to a group is retrievable by nobody, which the connector
+    # counts and reports at ingest.
+    #
+    # Reads transitive membership, because a nested group grant is ordinary in Entra, and matches on
+    # GROUP_<objectId> rather than on a display name: Entra display names are not unique, so a principal
+    # built from one would match documents granted to a different group of the same name.
+    entra:
+      enabled: ${RAG_SECURITY_ENTRA_ENABLED:false}
+      source-type: ${RAG_SECURITY_ENTRA_SOURCE_TYPE:sharepoint}
+      graph-base-url: ${RAG_SECURITY_ENTRA_GRAPH_BASE_URL:https://graph.microsoft.com/v1.0}
+      # Required when enabled. A separate app registration from the connector's is fine; it needs to be able
+      # to read group membership rather than content.
+      tenant-id: ${RAG_SECURITY_ENTRA_TENANT_ID:}
+      client-id: ${RAG_SECURITY_ENTRA_CLIENT_ID:}
+      # Exactly one of the secret and the certificate. The certificate is preferred: a secret expires on a
+      # date nobody diarises.
+      client-secret: ${RAG_SECURITY_ENTRA_CLIENT_SECRET:}
+      certificate-path: ${RAG_SECURITY_ENTRA_CERTIFICATE_PATH:}
+      certificate-password: ${RAG_SECURITY_ENTRA_CERTIFICATE_PASSWORD:}
+      # static-token is for a local run against the mock Graph service: msal4j refuses an authority that is
+      # not https, so a mock cannot stand in for Entra ID and a token has to be supplied directly.
+      auth-mode: ${RAG_SECURITY_ENTRA_AUTH_MODE:client-credentials}
+      access-token: ${RAG_SECURITY_ENTRA_ACCESS_TOKEN:}
+      # Appended to a bare username to form the Entra identity, since a caller's repository username is not
+      # necessarily their Entra one. Anything already containing @ is left alone.
+      username-suffix: ${RAG_SECURITY_ENTRA_USERNAME_SUFFIX:}
   # User feedback capture (#74). Enabled by default; POST /api/rag/feedback persists a rating for an
   # answer as an hxpr document under base-path, feeding the offline evaluation corpus.
   feedback:

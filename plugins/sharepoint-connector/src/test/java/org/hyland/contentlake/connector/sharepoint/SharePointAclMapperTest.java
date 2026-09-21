@@ -49,8 +49,9 @@ class SharePointAclMapperTest {
         SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults()
                 .map(fixture("i-named"), true);
 
-        // Not a widening: they name one identity. The UPN is what rag-service matches on today, the object
-        // id is what an Entra resolver will match.
+        // Not a widening: they name one identity. Which of the two rag-service matches depends on what the
+        // deployment's identity provider calls a caller, so emitting both is what makes the grant work
+        // either way.
         assertThat(acl.readPrincipals()).containsExactlyInAnyOrder("user-guid-bob", "bob@contoso.com");
         assertThat(acl.ingestable()).isTrue();
     }
@@ -76,7 +77,8 @@ class SharePointAclMapperTest {
         assertThat(acl.readPrincipals()).containsExactly("GROUP_group-guid-finance");
         // Entra display names are not unique, so GROUP_Finance would be a leak vector.
         assertThat(acl.readPrincipals()).noneMatch(principal -> principal.contains("Finance"));
-        // Countable, because until an Entra resolver ships this document is retrievable by nobody.
+        // Countable, because this document is retrievable by nobody unless the query path's Entra group
+        // resolver is switched on.
         assertThat(mapper.counters().get("documentsGroupOnly")).isEqualTo(1);
     }
 
@@ -85,7 +87,11 @@ class SharePointAclMapperTest {
         SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults()
                 .map(fixture("i-quarterly"), true);
 
-        assertThat(acl.readPrincipals()).containsExactly(SharePointAclMapper.EVERYONE_AUTHORITY);
+        // The fixture inherits both of the drive root's entries, as a real inheriting item does, so this
+        // names the claim it is about rather than asserting the whole set.
+        assertThat(acl.readPrincipals()).contains(SharePointAclMapper.EVERYONE_AUTHORITY);
+        assertThat(acl.readPrincipals())
+                .noneMatch(principal -> principal.toLowerCase(java.util.Locale.ROOT).contains("everyone "));
     }
 
     @Test

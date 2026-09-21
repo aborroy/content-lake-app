@@ -269,7 +269,11 @@ public final class MockGraphServer implements AutoCloseable {
             if (segments.size() >= 4 && segments.get(2).equals("items")) {
                 String itemId = segments.get(3);
                 if (segments.size() == 4) {
-                    serveFixture(exchange, "items/" + itemId + ".json", Set.of());
+                    // Preferences are echoed here as well as on the collections, because a single-item get
+                    // returns a driveItem and hierarchicalsharing changes what a driveItem carries. A mock
+                    // that echoed it only on the listings would let a connector treat the shared facet as
+                    // meaningful in one response and not in the other.
+                    serveFixture(exchange, "items/" + itemId + ".json", applyPreferences(exchange));
                     return;
                 }
                 switch (segments.get(4)) {

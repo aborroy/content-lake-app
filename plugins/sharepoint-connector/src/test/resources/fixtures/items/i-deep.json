@@ -8,6 +8,7 @@
   "cTag": "\"c:{i-deep},1\"",
   "size": 84,
   "parentReference": { "driveId": "b!mock-drive-id", "driveType": "documentLibrary", "id": "f-level-two", "siteId": "contoso.sharepoint.com,site-guid,web-guid" },
+  "shared": { "scope": "users", "sharedBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams" } }, "sharedDateTime": "2026-09-01T09:05:00Z" },
   "file": { "mimeType": "text/plain", "hashes": { "quickXorHash": "mock-hash-i-deep" } },
   "fileSystemInfo": { "createdDateTime": "2026-08-01T09:00:00Z", "lastModifiedDateTime": "2026-09-01T09:00:00Z" },
   "createdBy": { "user": { "id": "user-guid-alice", "displayName": "Alice Adams", "email": "alice@contoso.com" } },
