@@ -2,7 +2,9 @@
   "value": [
     {
       "id": "named-user-grant",
-      "roles": [ "read" ],
+      "roles": [
+        "read"
+      ],
       "shareId": "u!mock-share-named",
       "grantedToV2": {
         "user": {
@@ -11,8 +13,13 @@
           "userPrincipalName": "bob@contoso.com",
           "email": "bob@contoso.com"
         },
-        "siteUser": { "id": "12", "displayName": "Bob Brown", "loginName": "i:0#.f|membership|bob@contoso.com" }
-      }
+        "siteUser": {
+          "id": "12",
+          "displayName": "Bob Brown",
+          "loginName": "i:0#.f|membership|bob@contoso.com"
+        }
+      },
+      "inheritedFrom": {}
     }
   ]
 }

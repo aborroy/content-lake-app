@@ -25,6 +25,37 @@ different payloads for one item id cannot both be keyed by the id.
 `children.txt` states the tree instead of deriving it from each item's `parentReference`, because deriving
 it would mean parsing. Keep the two consistent by hand when adding a fixture.
 
+## Shapes confirmed against a real tenant
+
+Recorded from a developer's own OneDrive for Business via Graph Explorer, 2026-09-21, as part of #142. **No
+payload from that tenant is committed here or anywhere else**, deliberately: it carries real names, addresses,
+Entra object ids, site and drive ids. What is recorded below is the *shape*, and the fixtures were corrected
+to match it with invented values.
+
+| Shape | Confirmed |
+|---|---|
+| `"inheritedFrom": {}` on an item's **own** permission | An empty object, not an absent key. This one was wrong here and was a defect in the connector; see below |
+| `grantedToV2.user` and `grantedToV2.siteUser` in one entry | Yes, routinely, so preferring the directory form is right |
+| `siteUser.id` | A small integer as a string, e.g. `"3"` |
+| `siteUser.loginName` | `i:0#.f\|membership\|<upn>` |
+| Legacy `grantedTo` alongside `grantedToV2` | Present, so reading V2 first is right |
+| Identity objects | Carry `"@odata.type": "#microsoft.graph.sharePointIdentity"`, which nothing here reads |
+| A permission's `id` and `shareId` | Base64 of the site claim, not opaque random text |
+| An owner grant's `roles` | `["owner"]` |
+| A drive root in a delta response | `"name": "root"` with a `"root": {}` facet, and a `parentReference` carrying only `driveType` and `driveId`, **no `id`** |
+| A `driveItem` | Carries `isAuthoritative`, which nothing here reads |
+
+**The one that mattered: an empty `inheritedFrom` is not inheritance.** These fixtures omitted the key
+entirely when an item had its own permissions, so nothing exercised the empty-object case, and
+`JsonNode.hasNonNull` is true for `{}`. The mapper therefore read an item's own owner grant as inherited,
+inverting both answers it gives about inheritance, so `sharepoint_uniquePermissions` was absent on exactly
+the documents it exists to flag. Not an over-share, since #140's hierarchy keys on the `shared` facet rather
+than on this. Fixed in `SharePointAclMapper.isInherited`, and the own-permission fixtures now carry
+`"inheritedFrom": {}` so the mock reproduces it.
+
+Note the empty object was added only to entries granting a named identity, which is where the evidence is. A
+sharing-link entry's shape is unconfirmed, so those are left alone rather than encoding a guess.
+
 ## Two invariants a new fixture has to keep
 
 **An item carries the `shared` facet if and only if it has permissions of its own.** Under

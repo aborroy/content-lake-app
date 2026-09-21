@@ -229,4 +229,31 @@ class PermissionHierarchyCacheTest {
                 new SecurityConfig(false, List.of(new PermissionRule(principal, "user", principal, "READ"))),
                 true, true);
     }
+
+    /**
+     * An <em>empty</em> {@code shared} object marks a hierarchy root, because presence is the whole signal
+     * (#142).
+     *
+     * <p>Confirmed against a real tenant: with {@code Prefer: hierarchicalsharing} the drive root came back
+     * carrying {@code "shared": {}} where the same request without the preference carried no facet at all.
+     * So the facet can be empty, and reading anything inside it -- {@code scope}, {@code sharedBy} -- would
+     * work against these fixtures and fail against the cloud.</p>
+     *
+     * <p>Note the deliberate asymmetry with {@code inheritedFrom}, where an empty object means the opposite:
+     * there it names no ancestor and therefore is <em>not</em> inheritance. Presence is the signal for one
+     * and content is the signal for the other, which is worth knowing before tidying either.</p>
+     */
+    @Test
+    void anEmptySharedFacetStillMarksAHierarchyRoot() {
+        JsonNode emptySharedFacet = item("own-file-empty-facet", "folder", false, false);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) emptySharedFacet)
+                .putObject("shared");
+        PermissionHierarchyCache cache = cache(SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
+        cache.resolve(DRIVE, items.get("folder"));
+
+        SharePointAclMapper.MappedAcl resolved = cache.resolve(DRIVE, emptySharedFacet);
+
+        assertThat(permissionReads).contains("own-file-empty-facet");
+        assertThat(resolved.readPrincipals()).containsExactly("granted-on-own-file-empty-facet");
+    }
 }

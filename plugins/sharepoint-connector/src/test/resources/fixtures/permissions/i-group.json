@@ -2,11 +2,21 @@
   "value": [
     {
       "id": "security-group-grant",
-      "roles": [ "read" ],
+      "roles": [
+        "read"
+      ],
       "grantedToV2": {
-        "group": { "id": "group-guid-finance", "displayName": "Finance" },
-        "siteGroup": { "id": "14", "displayName": "Finance", "loginName": "c:0o.c|federateddirectoryclaimprovider|group-guid-finance" }
-      }
+        "group": {
+          "id": "group-guid-finance",
+          "displayName": "Finance"
+        },
+        "siteGroup": {
+          "id": "14",
+          "displayName": "Finance",
+          "loginName": "c:0o.c|federateddirectoryclaimprovider|group-guid-finance"
+        }
+      },
+      "inheritedFrom": {}
     }
   ]
 }

@@ -314,4 +314,50 @@ class SharePointAclMapperTest {
         // A tenant that words these differently is a configuration change, not a release.
         assertThat(acl.readPrincipals()).containsExactly(SharePointAclMapper.EVERYONE_AUTHORITY);
     }
+
+    /**
+     * Graph sends {@code "inheritedFrom": {}} on an item's own permission, and an empty object is not
+     * inheritance (#142).
+     *
+     * <p>Confirmed against a real tenant, and it is the assumption these fixtures got wrong: they omit the
+     * key entirely when an item has its own permissions, so nothing exercised the empty-object case.
+     * {@code hasNonNull} is true for an empty object, so such an entry read as inherited, which inverted
+     * both answers this record carries about inheritance. Not an over-share -- who may read the item is
+     * unaffected -- but {@code sharepoint_uniquePermissions} was then absent on exactly the documents it
+     * exists to flag.</p>
+     *
+     * <p>The rule is that inheritance requires an ancestor to inherit from, so the object has to name one.</p>
+     */
+    @Test
+    void anEmptyInheritedFromIsNotInheritance() throws Exception {
+        SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults().map(entries("""
+                {"id":"1","roles":["owner"],"inheritedFrom":{},
+                 "grantedToV2":{"user":{"id":"user-guid-owner","userPrincipalName":"owner@contoso.com"}}}"""), true);
+
+        assertThat(acl.hasUniquePermissions()).isTrue();
+        assertThat(acl.securityConfig().inheritanceEnabled()).isFalse();
+    }
+
+    /** An inheritedFrom that names an ancestor is inheritance, which is the ordinary case. */
+    @Test
+    void anInheritedFromNamingAnAncestorIsInheritance() throws Exception {
+        SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults().map(entries("""
+                {"id":"1","roles":["read"],
+                 "inheritedFrom":{"driveId":"b!drive","id":"root","path":"/drive/root:"},
+                 "grantedToV2":{"user":{"id":"user-guid-bob","userPrincipalName":"bob@contoso.com"}}}"""), true);
+
+        assertThat(acl.hasUniquePermissions()).isFalse();
+        assertThat(acl.securityConfig().inheritanceEnabled()).isTrue();
+    }
+
+    /** A null inheritedFrom is not inheritance either, and was already handled. */
+    @Test
+    void aNullInheritedFromIsNotInheritance() throws Exception {
+        SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults().map(entries("""
+                {"id":"1","roles":["read"],"inheritedFrom":null,
+                 "grantedToV2":{"user":{"id":"user-guid-bob","userPrincipalName":"bob@contoso.com"}}}"""), true);
+
+        assertThat(acl.hasUniquePermissions()).isTrue();
+        assertThat(acl.securityConfig().inheritanceEnabled()).isFalse();
+    }
 }

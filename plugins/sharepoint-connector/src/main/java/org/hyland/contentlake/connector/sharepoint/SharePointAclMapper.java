@@ -141,9 +141,10 @@ public final class SharePointAclMapper {
      * @param securityConfig      the structured form, one rule per emitted principal
      * @param ingestable          whether the item should be ingested at all. Only ever {@code false} when
      *                            the ACL could not be read and the fallback is fail-closed
-     * @param hasUniquePermissions whether any entry lacked {@code inheritedFrom}, so this item's
-     *                            permissions are its own rather than an ancestor's. The permission
-     *                            hierarchy cache keys on this
+     * @param hasUniquePermissions whether any entry named no ancestor in {@code inheritedFrom}, so this
+     *                            item's permissions are its own rather than one it inherited. Note an
+     *                            empty {@code inheritedFrom} object counts as naming none: Graph sends one
+     *                            on an item's own permission
      */
     public record MappedAcl(Set<String> readPrincipals,
                             SecurityConfig securityConfig,
@@ -209,7 +210,7 @@ public final class SharePointAclMapper {
             if (entry == null || entry.isNull()) {
                 continue;
             }
-            if (entry.hasNonNull("inheritedFrom")) {
+            if (isInherited(entry)) {
                 anyInherited = true;
             } else {
                 anyUnique = true;
@@ -262,6 +263,29 @@ public final class SharePointAclMapper {
             case FAIL_CLOSED -> null;
             case PUBLIC -> Set.of(EVERYONE_AUTHORITY);
         };
+    }
+
+    /**
+     * Whether this entry was inherited, which needs an ancestor for it to have come from.
+     *
+     * <p>Not simply "the key is present and not null". Confirmed against a real tenant in #142: Graph sends
+     * {@code "inheritedFrom": {}} on an item's <em>own</em> permission, an empty object rather than an
+     * absent key, and {@code hasNonNull} is true for that. Reading it as inheritance inverted both answers
+     * this mapper gives about inheritance, so an item with permissions of its own was stored without the
+     * {@code sharepoint_uniquePermissions} marker that exists to flag exactly that.</p>
+     *
+     * <p>Requiring an identifying field is what distinguishes the two, and it fails safe in the direction
+     * that matters: an unfamiliar shape reads as "this item has its own permissions", which over-reports
+     * uniqueness rather than hiding it.</p>
+     */
+    private static boolean isInherited(JsonNode entry) {
+        JsonNode inheritedFrom = entry.get("inheritedFrom");
+        if (inheritedFrom == null || inheritedFrom.isNull() || !inheritedFrom.isObject()) {
+            return false;
+        }
+        return text(inheritedFrom, "id") != null
+                || text(inheritedFrom, "driveId") != null
+                || text(inheritedFrom, "path") != null;
     }
 
     /** Whether this entry's roles grant read, counting any role it does not recognise. */
