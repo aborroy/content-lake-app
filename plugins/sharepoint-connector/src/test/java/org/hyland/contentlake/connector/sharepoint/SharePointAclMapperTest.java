@@ -360,4 +360,61 @@ class SharePointAclMapperTest {
         assertThat(acl.hasUniquePermissions()).isTrue();
         assertThat(acl.securityConfig().inheritanceEnabled()).isFalse();
     }
+
+    /**
+     * A group granted through a {@code users}-scoped sharing link, which is how a real tenant delivered one
+     * (#142).
+     *
+     * <p>Confirmed against a real tenant, and it is not the shape these fixtures assumed. Sharing a folder
+     * with a group in the OneDrive UI does not produce a direct {@code grantedToV2.group}: it produces a
+     * link entry whose {@code grantedToIdentitiesV2} lists the recipients, and a group sits in there
+     * alongside users. So the mapper has to find a group by expanding the link, which it does.</p>
+     *
+     * <p>Two details of the real payload are traps for anything reading the legacy fields, and both are why
+     * only the V2 ones are read. A group's site-local sibling arrives as {@code siteUser} rather than
+     * {@code siteGroup}, distinguishable only by a {@code federateddirectoryclaimprovider} login name; and
+     * legacy {@code grantedToIdentities} represents the group as a {@code user}, so anything falling back to
+     * it would emit a group's object id as a user principal and match nobody.</p>
+     */
+    @Test
+    void findsAGroupInsideAUsersScopedSharingLink() throws Exception {
+        SharePointAclMapper mapper = SharePointAclMapper.withDefaults();
+
+        SharePointAclMapper.MappedAcl acl = mapper.map(entries("""
+                {"id":"link-1","roles":["read"],
+                 "link":{"scope":"users","type":"view"},
+                 "grantedToIdentitiesV2":[
+                   {"user":{"@odata.type":"#microsoft.graph.sharePointIdentity",
+                            "displayName":"A Named User","email":"named@contoso.com",
+                            "id":"user-guid-named"},
+                    "siteUser":{"id":"938","displayName":"A Named User",
+                                "loginName":"i:0#.f|membership|named@contoso.com"}},
+                   {"group":{"@odata.type":"#microsoft.graph.sharePointIdentity",
+                             "displayName":"Portfolio Group","email":"group@contoso.com",
+                             "id":"group-guid-portfolio"},
+                    "siteUser":{"id":"940","displayName":"Portfolio Group",
+                                "loginName":"c:0o.c|federateddirectoryclaimprovider|group-guid-portfolio"}}],
+                 "grantedToIdentities":[
+                   {"user":{"displayName":"A Named User","id":"user-guid-named"}},
+                   {"user":{"displayName":"Portfolio Group","id":"group-guid-portfolio"}}]}"""), true);
+
+        // The group is emitted by object id, which is what the query-path Entra resolver matches. The
+        // siteUser beside it is ignored, being the same identity described twice.
+        assertThat(acl.readPrincipals()).contains("GROUP_group-guid-portfolio");
+        assertThat(acl.readPrincipals()).doesNotContain("SITEUSER_940", "GROUP_SITEGROUP_940");
+        // And the named user still gets both of their forms.
+        assertThat(acl.readPrincipals()).contains("user-guid-named", "named@contoso.com");
+        // Never by display name: Entra display names are not unique.
+        assertThat(acl.readPrincipals()).noneMatch(p -> p.contains("Portfolio"));
+    }
+
+    /** {@code roles: ["read"]} is what a real view-only share carries, so it must grant read. */
+    @Test
+    void aViewOnlyShareGrantsRead() throws Exception {
+        SharePointAclMapper.MappedAcl acl = SharePointAclMapper.withDefaults().map(entries("""
+                {"id":"1","roles":["read"],
+                 "grantedToV2":{"user":{"id":"user-guid-bob","userPrincipalName":"bob@contoso.com"}}}"""), true);
+
+        assertThat(acl.readPrincipals()).contains("user-guid-bob", "bob@contoso.com");
+    }
 }

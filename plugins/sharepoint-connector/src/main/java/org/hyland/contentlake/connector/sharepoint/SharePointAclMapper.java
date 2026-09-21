@@ -32,7 +32,7 @@ import java.util.logging.Logger;
  * <table>
  *   <caption>Graph permission shapes and what they emit</caption>
  *   <tr><th>Shape</th><th>Emitted</th></tr>
- *   <tr><td>{@code grantedToV2.user}</td><td>both the Entra object id and the {@code userPrincipalName}</td></tr>
+ *   <tr><td>{@code grantedToV2.user}</td><td>the Entra object id, plus {@code userPrincipalName} and {@code email} where present</td></tr>
  *   <tr><td>{@code grantedToV2.group}</td><td>{@code GROUP_<entra-object-id>}</td></tr>
  *   <tr><td>{@code grantedToV2.siteUser} or {@code siteGroup}, alone</td><td>a site-local form that resolves for nobody, counted and reported</td></tr>
  *   <tr><td>an "Everyone" or "Everyone except external users" claim</td><td>{@code GROUP_EVERYONE}</td></tr>
@@ -44,10 +44,12 @@ import java.util.logging.Logger;
  *
  * <p>Four of those are decisions rather than details:</p>
  * <ul>
- *   <li><strong>Emitting both an object id and a UPN for one user is not a widening.</strong> They name the
- *       same identity, and {@code rag-service} matches a document against the caller's own username. Which
- *       of the two that username is depends on the deployment's identity provider, so emitting both is what
- *       makes a named grant work whether callers are known by UPN or by object id.</li>
+ *   <li><strong>Emitting an object id and every address for one user is not a widening.</strong> They name
+ *       the same identity, and {@code rag-service} matches a document against the caller's own username.
+ *       Which of them that username is depends on the deployment's identity provider, so emitting all of
+ *       them is what makes a named grant work at all. Note a real {@code sharePointIdentity} carries
+ *       {@code email} and <em>no</em> {@code userPrincipalName}, so reading only the latter left a
+ *       named-user grant matchable by nobody but an object id.</li>
  *   <li><strong>A group is never emitted by display name.</strong> Entra display names are not unique, so
  *       {@code GROUP_<displayName>} is a real leak vector: two groups called "Finance" in different parts
  *       of a directory would share a principal.</li>
@@ -389,13 +391,20 @@ public final class SharePointAclMapper {
 
         if (user != null && !user.isNull()) {
             String objectId = text(user, "id");
-            String principalName = text(user, "userPrincipalName");
             String display = displayName(user);
             if (objectId != null) {
                 principals.add(new Principal(objectId, "user", display));
             }
-            if (principalName != null) {
-                principals.add(new Principal(principalName, "user", display));
+            // Both address fields, because a real tenant sends one or the other and not reliably the same
+            // one. Confirmed in #142: a sharePointIdentity carries "email" and no "userPrincipalName" at
+            // all, so reading only the latter stored the object id alone and a caller known by their
+            // address matched nothing. They name one identity, so emitting both is not a widening -- the
+            // same reasoning as emitting the object id beside it.
+            for (String field : List.of("userPrincipalName", "email")) {
+                String address = text(user, field);
+                if (address != null) {
+                    principals.add(new Principal(address, "user", display));
+                }
             }
             if (!principals.isEmpty()) {
                 return new Emitted(principals, true, false, false, true, false);

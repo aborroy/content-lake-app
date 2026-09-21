@@ -44,6 +44,13 @@ to match it with invented values.
 | An owner grant's `roles` | `["owner"]` |
 | A drive root in a delta response | `"name": "root"` with a `"root": {}` facet, and a `parentReference` carrying only `driveType` and `driveId`, **no `id`** |
 | A `driveItem` | Carries `isAuthoritative`, which nothing here reads |
+| `grantedToV2.user` | Carries `email` and **no `userPrincipalName`** at all. This was wrong here and was a defect in the connector; see below |
+| A group grant | Arrives inside a `users`-scoped link's `grantedToIdentitiesV2`, not as a direct `grantedToV2.group`. Sharing a folder with a group in the OneDrive UI produces a link |
+| `grantedToV2.group` | Carries a real Entra object id, so `GROUP_<objectId>` matches what the query-path resolver resolves |
+| A group's site-local sibling | Arrives as `siteUser`, **not** `siteGroup`, distinguishable only by a `c:0o.c\|federateddirectoryclaimprovider\|<guid>` login name |
+| Legacy `grantedToIdentities` | Represents a **group** as a `user`, so anything falling back to it emits a group's object id as a user principal and matches nobody |
+| A view-only share's `roles` | `["read"]` |
+| `inheritedFrom` on an own permission | Sometimes `{}` and sometimes absent entirely, depending on how the item was addressed. Both mean the same thing |
 
 **The one that mattered: an empty `inheritedFrom` is not inheritance.** These fixtures omitted the key
 entirely when an item had its own permissions, so nothing exercised the empty-object case, and
@@ -55,6 +62,13 @@ than on this. Fixed in `SharePointAclMapper.isInherited`, and the own-permission
 
 Note the empty object was added only to entries granting a named identity, which is where the evidence is. A
 sharing-link entry's shape is unconfirmed, so those are left alone rather than encoding a guess.
+
+**The second defect: a user grant carried no address at all.** A real `sharePointIdentity` has `email` and no
+`userPrincipalName`, and the mapper read only the latter, so a named-user grant stored the Entra object id
+alone. `rag-service` matches a document against the caller's own username, so where callers are known by their
+address -- which is what the end-to-end suite does through the username-suffix mapping -- such a document was
+retrievable by nobody. Under-share rather than leak, but named-user grants did not work. These fixtures gave
+the user *both* fields, which is why nothing caught it. The mapper now emits every address present.
 
 ## Two invariants a new fixture has to keep
 
