@@ -126,18 +126,134 @@ class TextSegmenterTest {
     }
 
     /**
-     * Two prose lines that each happen to carry two pipes are read as a table, which exempts them
-     * from noise reduction. Pinned deliberately: the conservative pipe threshold trades this false
-     * positive for never splitting a real table mid-row.
+     * Two prose lines carrying two pipes each are not a table (#150).
+     *
+     * <p>They used to be, and the consequence was not cosmetic: a table block is exempted from noise
+     * reduction and kept atomic as a {@code TABLE} chunk, so incidental prose was both protected from
+     * deduplication and reported to callers as tabular. What separates a table row from prose with pipes
+     * in it is delimitation, not the pipe count: both lines below carry exactly two pipes, so a rule about
+     * counting or about consistency between rows would not have told them apart.</p>
      */
     @Test
-    void isTableLine_twoPipesInProseIsAKnownFalsePositive() {
+    void detectTableBlocks_ignoresProseThatHappensToCarryPipes() {
         String text = """
                 Pass the | flag | to enable it.
                 Then the | other | flag follows.
                 """;
 
-        assertThat(TextSegmenter.detectTableBlocks(text)).hasSize(1);
+        assertThat(TextSegmenter.detectTableBlocks(text)).isEmpty();
+    }
+
+    /** The case that made this likelier once markdown extraction arrived: shell pipelines. */
+    @Test
+    void detectTableBlocks_ignoresAdjacentShellPipelinesInProse() {
+        String text = """
+                Use `grep foo | sort | uniq` to collapse duplicates.
+                Use `cut -f2 | sort -n | head` to rank them.
+                """;
+
+        assertThat(TextSegmenter.detectTableBlocks(text)).isEmpty();
+    }
+
+    /**
+     * A table whose rows omit the outer pipes is still a table, anchored by its separator row.
+     *
+     * <p>GFM makes the outer pipes optional and some converters leave them out, so requiring delimitation
+     * of every row would lose a real table. A separator row anchors the run instead, and an un-delimited
+     * pipe row can join a run without being able to start one.</p>
+     */
+    @Test
+    void detectTableBlocks_findsATableWhoseRowsOmitTheOuterPipes() {
+        String text = """
+                Region | Opening FTE | Joiners
+                --- | --- | ---
+                United Kingdom | 1,840 | 310
+                North America | 1,120 | 402
+                """;
+
+        List<int[]> blocks = TextSegmenter.detectTableBlocks(text);
+
+        assertThat(blocks).hasSize(1);
+        assertThat(text.substring(blocks.get(0)[0], blocks.get(0)[1]))
+                .contains("Region | Opening FTE")
+                .contains("United Kingdom")
+                .contains("North America");
+    }
+
+    /**
+     * A markdown table inside a fenced code block is documentation about tables, not a table.
+     *
+     * <p>Without fence tracking these rows are indistinguishable from a real table: they are delimited and
+     * they carry a separator row. A document explaining markdown is exactly the corpus this pipeline
+     * ingests.</p>
+     */
+    @Test
+    void detectTableBlocks_ignoresATableInsideAFencedCodeBlock() {
+        String text = """
+                Write a table like this:
+
+                ```markdown
+                | Region | FTE |
+                | --- | --- |
+                | UK | 1,840 |
+                ```
+
+                That renders as a table.
+                """;
+
+        assertThat(TextSegmenter.detectTableBlocks(text)).isEmpty();
+    }
+
+    /** A real table after a fenced block is still found, so fence tracking closes its fence. */
+    @Test
+    void detectTableBlocks_findsATableFollowingAFencedCodeBlock() {
+        String text = """
+                ```bash
+                cat a | sort | uniq
+                ```
+
+                | Region | FTE |
+                | --- | --- |
+                | UK | 1,840 |
+                """;
+
+        List<int[]> blocks = TextSegmenter.detectTableBlocks(text);
+
+        assertThat(blocks).hasSize(1);
+        assertThat(text.substring(blocks.get(0)[0], blocks.get(0)[1])).contains("| UK | 1,840 |");
+    }
+
+    /**
+     * A two-column separator row carries one pipe, and must not break the run it anchors.
+     *
+     * <p>Caught while reviewing the fix rather than by a test: gating run membership on the pipe count
+     * alone dropped {@code ---|---} out of the run, so a table with delimited data rows and an
+     * un-delimited separator was detected before the change and lost after it. Nothing in the suite
+     * covered that combination.</p>
+     */
+    @Test
+    void detectTableBlocks_keepsATableWhoseSeparatorCarriesOneUndelimitedPipe() {
+        String text = """
+                | Region | FTE |
+                ---|---
+                | UK | 1,840 |
+                """;
+
+        List<int[]> blocks = TextSegmenter.detectTableBlocks(text);
+
+        assertThat(blocks).hasSize(1);
+        assertThat(text.substring(blocks.get(0)[0], blocks.get(0)[1]))
+                .contains("| Region | FTE |")
+                .contains("| UK | 1,840 |");
+    }
+
+    /** An un-delimited pipe row cannot anchor a run on its own, whatever its neighbours look like. */
+    @Test
+    void isTableLine_anUndelimitedPipeRowIsNotATableLineByItself() {
+        assertThat(TextSegmenter.isTableLine("Pass the | flag | to enable it.")).isFalse();
+        assertThat(TextSegmenter.isTableLine("Region | Opening FTE | Joiners")).isFalse();
+        // Delimited, so it can.
+        assertThat(TextSegmenter.isTableLine("| Region | Opening FTE |")).isTrue();
     }
 
     @Test

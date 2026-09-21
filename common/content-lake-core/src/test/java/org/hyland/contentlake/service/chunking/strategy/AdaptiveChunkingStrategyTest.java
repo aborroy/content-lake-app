@@ -205,4 +205,28 @@ class AdaptiveChunkingStrategyTest {
     private List<Chunk> chunk(List<Chunk> chunks) {
         return chunks;
     }
+
+    /**
+     * Prose carrying pipes is chunked and reported as prose, not as a table (#150).
+     *
+     * <p>This is the symptom the fix is about, at the level a caller sees it. A table chunk is kept atomic
+     * and labelled {@code TABLE}, which both UIs render as tabular and which exempts the text from noise
+     * reduction upstream. Technical documentation full of shell pipelines was getting both.</p>
+     */
+    @Test
+    void proseCarryingPipes_isNotReportedAsATable() {
+        String text = """
+                Collapsing duplicates in a log file takes two steps that are worth knowing.
+
+                Use `grep failure | sort | uniq` to collapse duplicate lines together.
+                Use `cut -f2 | sort -n | head` to rank what is left by frequency.
+
+                Both pipelines read from standard input, so they compose with anything upstream.
+                """;
+
+        List<Chunk> chunks = strategy.chunk(text, NODE_ID, config);
+
+        assertThat(chunks).isNotEmpty();
+        assertThat(chunks).allSatisfy(c -> assertThat(c.getChunkType()).isEqualTo(ChunkType.PROSE));
+    }
 }

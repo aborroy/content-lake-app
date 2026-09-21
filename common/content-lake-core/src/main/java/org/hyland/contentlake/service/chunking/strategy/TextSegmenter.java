@@ -41,34 +41,86 @@ public final class TextSegmenter {
     /** Minimum consecutive table-like lines that constitute a table block. */
     private static final int MIN_TABLE_LINES = 2;
 
+    /** Minimum pipes for a line to be considered part of a table at all. */
+    private static final int MIN_TABLE_PIPES = 2;
+
+    /** Opening or closing fence of a code block, which table detection skips entirely. */
+    private static final Pattern CODE_FENCE = Pattern.compile("^\\s*(?:`{3,}|~{3,})");
+
     private TextSegmenter() {}
 
     /**
-     * A line is table-like if it is a markdown separator row or a pipe-delimited row (two or more
-     * pipes). Pipe-delimited detection is deliberately conservative: it is the one signal common
-     * text extractors emit reliably, and over-detecting would wrongly exempt prose from noise
-     * reduction. Fixed-width column tables are not attempted for the same reason.
+     * Whether a line can <em>anchor</em> a table: a markdown separator row, or a delimited pipe row.
+     *
+     * <p>A delimited row begins and ends with a pipe. That is what distinguishes a table row from prose
+     * that happens to contain pipes, and counting them does not: {@code Pass the | flag | to enable it.}
+     * carries exactly two pipes, as does a genuine two-column row, so a threshold or a
+     * consistent-count-across-rows rule cannot tell the two apart (#150). Treating such prose as a table
+     * exempted it from noise reduction and reported it to callers as tabular.</p>
+     *
+     * <p>Fixed-width column tables are still not attempted, for the original reason: the pipe is the one
+     * signal common text extractors emit reliably.</p>
      */
     static boolean isTableLine(String line) {
+        return isSeparatorRow(line) || isDelimitedPipeRow(line);
+    }
+
+    private static boolean isSeparatorRow(String line) {
+        return line != null && TABLE_SEPARATOR_ROW.matcher(line).matches();
+    }
+
+    /** A pipe row that begins and ends with a pipe, so it cannot be prose with pipes in the middle. */
+    private static boolean isDelimitedPipeRow(String line) {
         if (line == null) {
             return false;
         }
-        if (TABLE_SEPARATOR_ROW.matcher(line).matches()) {
-            return true;
-        }
+        String trimmed = line.strip();
+        return trimmed.length() > 1
+                && trimmed.charAt(0) == '|'
+                && trimmed.charAt(trimmed.length() - 1) == '|'
+                && countPipes(trimmed) >= MIN_TABLE_PIPES;
+    }
+
+    /**
+     * Whether a line may <em>join</em> a table run, whether or not it can anchor one.
+     *
+     * <p>GFM makes the outer pipes optional and some converters leave them out, so requiring delimitation
+     * of every row would lose a real table whose rows read {@code Region | FTE | Joiners}. Such a row
+     * joins a run that some other line anchors -- in practice the separator row -- and on its own it is
+     * indistinguishable from prose, so it never starts one.</p>
+     *
+     * <p>A separator row joins regardless of its pipe count, which matters for the two-column case: the
+     * separator of a two-column table is {@code ---|---}, carrying a single pipe. Gating on the pipe count
+     * alone would break the run at exactly the line that proves it is a table, losing a table whose data
+     * rows are delimited and whose separator is not.</p>
+     */
+    private static boolean isTableCandidateLine(String line) {
+        return line != null && (isSeparatorRow(line) || countPipes(line) >= MIN_TABLE_PIPES);
+    }
+
+    private static int countPipes(String line) {
         int pipes = 0;
         for (int i = 0; i < line.length(); i++) {
             if (line.charAt(i) == '|') {
                 pipes++;
             }
         }
-        return pipes >= 2;
+        return pipes;
     }
 
     /**
      * Detects table blocks in {@code text}, returned as line-aligned {@code [start, end)} character
-     * ranges in document order. A block is a run of at least {@link #MIN_TABLE_LINES} consecutive
-     * table-like lines. Ranges never overlap and are sorted by start offset.
+     * ranges in document order. Ranges never overlap and are sorted by start offset.
+     *
+     * <p>A block is a run of at least {@link #MIN_TABLE_LINES} consecutive pipe-bearing lines that
+     * contains at least one line able to <em>anchor</em> it: a separator row, or a row delimited by
+     * pipes. Without that requirement any two adjacent prose lines carrying two pipes each were a table,
+     * and the cost was real rather than cosmetic: a table block is exempted from noise reduction and kept
+     * atomic as a {@code TABLE} chunk (#150).</p>
+     *
+     * <p>Lines inside a fenced code block are skipped, because a document that explains markdown contains
+     * rows that are delimited and a separator row that is genuine, and no rule about their shape can tell
+     * them from the real thing.</p>
      */
     public static List<int[]> detectTableBlocks(String text) {
         List<int[]> blocks = new ArrayList<>();
@@ -76,10 +128,12 @@ public final class TextSegmenter {
             return blocks;
         }
 
-        int runStart = -1;   // char offset of the first line in the current table run
-        int runLines = 0;    // number of consecutive table-like lines in the current run
-        int runEnd = 0;      // char offset just past the last table-like line's text
+        int runStart = -1;      // char offset of the first line in the current run
+        int runLines = 0;       // number of consecutive pipe-bearing lines in the current run
+        int runEnd = 0;         // char offset just past the last such line's text
+        boolean anchored = false; // whether the run holds a separator or a delimited row
         int lineStart = 0;
+        boolean inCodeFence = false;
 
         int i = 0;
         int n = text.length();
@@ -88,25 +142,38 @@ public final class TextSegmenter {
             char c = atEnd ? '\n' : text.charAt(i);
             if (c == '\n' || atEnd) {
                 String line = text.substring(lineStart, i);
-                if (isTableLine(line)) {
-                    if (runStart < 0) {
-                        runStart = lineStart;
-                        runLines = 0;
-                    }
-                    runLines++;
-                    runEnd = i;
-                } else {
-                    if (runLines >= MIN_TABLE_LINES) {
+
+                if (CODE_FENCE.matcher(line).find()) {
+                    // A fence both ends any run in progress and toggles the skip.
+                    if (runLines >= MIN_TABLE_LINES && anchored) {
                         blocks.add(new int[]{runStart, runEnd});
                     }
                     runStart = -1;
                     runLines = 0;
+                    anchored = false;
+                    inCodeFence = !inCodeFence;
+                } else if (!inCodeFence && isTableCandidateLine(line)) {
+                    if (runStart < 0) {
+                        runStart = lineStart;
+                        runLines = 0;
+                        anchored = false;
+                    }
+                    runLines++;
+                    runEnd = i;
+                    anchored |= isTableLine(line);
+                } else {
+                    if (runLines >= MIN_TABLE_LINES && anchored) {
+                        blocks.add(new int[]{runStart, runEnd});
+                    }
+                    runStart = -1;
+                    runLines = 0;
+                    anchored = false;
                 }
                 lineStart = i + 1;
             }
             i++;
         }
-        if (runLines >= MIN_TABLE_LINES) {
+        if (runLines >= MIN_TABLE_LINES && anchored) {
             blocks.add(new int[]{runStart, runEnd});
         }
         return blocks;
