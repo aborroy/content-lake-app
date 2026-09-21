@@ -1099,7 +1099,8 @@ public class NodeSyncService {
      * redundant rather than load-bearing.</p>
      *
      * <p>{@code sourceProperties} is applied last, so an adapter that wants a different value for one
-     * of these keys still wins and the in-tree sources are unaffected.</p>
+     * of these keys still wins and the in-tree sources are unaffected. {@code source_modifiedAt} is the
+     * one exception, for the reason below.</p>
      */
     private Map<String, Object> buildIngestProperties(SourceNode node) {
         Map<String, Object> props = new LinkedHashMap<>();
@@ -1110,6 +1111,21 @@ public class NodeSyncService {
         props.put(ContentLakeIngestProperties.SOURCE_MIME_TYPE, node.mimeType());
         props.put(P_SOURCE_MODIFIED_AT, formatSourceModifiedAt(node.modifiedAt()));
         props.putAll(node.sourceProperties());
+
+        // Re-applied after the source's own map, unlike every other seeded key, because this one is not
+        // descriptive: the modifiedAfter / modifiedBefore filters compare it as text, so a single format
+        // across every source in the index is a query contract rather than a preference (#149). Both
+        // in-tree adapters used to overwrite it with OffsetDateTime.toString(), which elides zero seconds,
+        // and a document modified on a whole second was then excluded from ranges it fell inside.
+        //
+        // A source's value is kept when the record carries no timestamp, since something beats nothing:
+        // the staleness check parses rather than compares, so such a document still short-circuits
+        // correctly, and only its range behaviour is imprecise.
+        String canonicalModifiedAt = formatSourceModifiedAt(node.modifiedAt());
+        if (canonicalModifiedAt != null) {
+            props.put(P_SOURCE_MODIFIED_AT, canonicalModifiedAt);
+        }
+
         props.values().removeIf(Objects::isNull);
         return props;
     }

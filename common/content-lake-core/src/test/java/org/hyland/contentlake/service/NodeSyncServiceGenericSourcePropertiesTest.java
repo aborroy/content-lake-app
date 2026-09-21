@@ -101,6 +101,9 @@ class NodeSyncServiceGenericSourcePropertiesTest {
     /**
      * An adapter that sets one of these keys itself still wins, so the three in-tree sources are
      * unaffected and their hand-duplicated values are redundant rather than load-bearing.
+     *
+     * <p>{@code source_modifiedAt} is the one exception; see
+     * {@link #theTimestampCannotBeOverriddenByASourceBecauseItsFormatIsAQueryContract}.</p>
      */
     @Test
     void anAdapterSuppliedValueOverridesTheRecord() {
@@ -113,6 +116,76 @@ class NodeSyncServiceGenericSourcePropertiesTest {
                 .containsEntry(ContentLakeIngestProperties.SOURCE_NAME, "a-name-the-adapter-prefers.txt")
                 // Not overridden, so still the record's.
                 .containsEntry(ContentLakeIngestProperties.SOURCE_TYPE, SOURCE_TYPE);
+    }
+
+    /**
+     * The timestamp is the one seeded key a source cannot override, and that is deliberate (#149).
+     *
+     * <p>Every other {@code source_*} key is descriptive: whatever a source puts there is read back as-is,
+     * and only that source cares. This one is a <em>query contract</em>. The {@code modifiedAfter} and
+     * {@code modifiedBefore} filters emit HXQL range predicates over the stored text, so ordering is
+     * lexicographic, and that only works if every value in the index has the same width and offset
+     * regardless of which source wrote it.</p>
+     *
+     * <p>Both in-tree adapters used to supply {@code OffsetDateTime.toString()} here, which elides zero
+     * seconds: a document modified at exactly {@code 10:00:00} stored as {@code 2026-09-17T10:00Z}, whose
+     * {@code Z} (0x5A) sorts after the {@code :} (0x3A) of any bound carrying seconds, so it was excluded
+     * from ranges it plainly fell in. Fixing the adapters was necessary and not sufficient: as a convention
+     * it would have come back the first time anyone wrote a connector that helpfully set the key.</p>
+     */
+    @Test
+    void theTimestampCannotBeOverriddenByASourceBecauseItsFormatIsAQueryContract() {
+        SourceNode node = new SourceNode(
+                NODE_ID, SOURCE_ID, SOURCE_TYPE,
+                "quarterly-review.txt", "/data/connector", "text/plain",
+                OffsetDateTime.parse("2026-09-17T10:00:00Z"),
+                false,
+                Set.of("__Everyone__"), Set.of(),
+                // Exactly what the two adapters used to do, and what a well-meaning connector might.
+                Map.of(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, "2026-09-17T10:00Z"));
+
+        assertThat(ingestPropertiesOf(node))
+                .containsEntry(ContentLakeIngestProperties.SOURCE_MODIFIED_AT,
+                        "2026-09-17T10:00:00.000000000Z");
+    }
+
+    /**
+     * A source's own value is kept when the record has no timestamp, since something beats nothing.
+     *
+     * <p>The enforcement above is about format, not about ownership. A source that knows a modification
+     * time but does not populate the record still has it stored, and the staleness check parses rather than
+     * compares, so it works; only the range predicates are imprecise for such a document, which is strictly
+     * better than having no timestamp at all.</p>
+     */
+    @Test
+    void aSourceSuppliedTimestampSurvivesWhenTheRecordHasNone() {
+        SourceNode node = new SourceNode(
+                NODE_ID, SOURCE_ID, SOURCE_TYPE,
+                "quarterly-review.txt", "/data/connector", "text/plain",
+                null,
+                false,
+                Set.of("__Everyone__"), Set.of(),
+                Map.of(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, "2026-09-17T10:00Z"));
+
+        assertThat(ingestPropertiesOf(node))
+                .containsEntry(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, "2026-09-17T10:00Z");
+    }
+
+    /**
+     * The whole-second case, which is the one {@code OffsetDateTime.toString()} got wrong.
+     *
+     * <p>The existing width test uses a fractional second, where {@code toString()} happens to produce a
+     * sortable value. This one would have failed before the fix and is the failure an operator saw.</p>
+     */
+    @Test
+    void aTimestampOnAWholeSecondSortsBeforeALaterOneInTheSameMinute() {
+        String onTheMinute = storedTimestampOf(OffsetDateTime.parse("2026-09-17T10:00:00Z"));
+        String thirtySecondsLater = storedTimestampOf(OffsetDateTime.parse("2026-09-17T10:00:30Z"));
+
+        assertThat(onTheMinute).isLessThan(thirtySecondsLater);
+        // And it falls inside a bound between the two, which is what was broken: "2026-09-17T10:00Z"
+        // compared greater than "2026-09-17T10:00:30Z" because 'Z' sorts after ':'.
+        assertThat(onTheMinute).isLessThan("2026-09-17T10:00:30Z");
     }
 
     /**

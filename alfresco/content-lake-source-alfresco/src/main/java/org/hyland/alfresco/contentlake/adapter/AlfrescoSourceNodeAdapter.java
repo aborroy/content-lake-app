@@ -93,7 +93,10 @@ public final class AlfrescoSourceNodeAdapter {
         props.put(ContentLakeIngestProperties.SOURCE_NAME,        node.getName());
         props.put(ContentLakeIngestProperties.SOURCE_PATH,        path);
         props.put(ContentLakeIngestProperties.SOURCE_MIME_TYPE,   mimeType);
-        props.put(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, modified);
+        // source_modifiedAt is deliberately absent: core seeds it from the record in a fixed-width form,
+        // because the modifiedAfter / modifiedBefore filters compare it as text (#149). The value here was
+        // OffsetDateTime.toString(), which elides zero seconds, so a node modified on a whole second stored
+        // as "2026-09-17T10:00Z" and sorted after any bound carrying seconds.
 
         // Alfresco-specific keys (preserved for adapter-aware consumers)
         props.put(ContentLakeIngestProperties.ALFRESCO_NODE_ID,       node.getId());
@@ -101,6 +104,10 @@ public final class AlfrescoSourceNodeAdapter {
         props.put(ContentLakeIngestProperties.ALFRESCO_NAME,          node.getName());
         props.put(ContentLakeIngestProperties.ALFRESCO_PATH,          path);
         props.put(ContentLakeIngestProperties.ALFRESCO_MIME_TYPE,     mimeType);
+        // The raw source form, on purpose: adapter-aware consumers expect what Alfresco reported, and
+        // NodeSyncService.getStoredModifiedAt falls back to this key for documents ingested before the
+        // generic one existed. Both parse it, so its width does not matter. Never put it in a range
+        // predicate, which is the trap the generic key above exists to avoid.
         props.put(ContentLakeIngestProperties.ALFRESCO_MODIFIED_AT,   modified);
 
         props.values().removeIf(Objects::isNull);

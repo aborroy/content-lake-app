@@ -117,10 +117,11 @@ class NodeSyncServiceContentReuseTest {
                 false,
                 readPrincipals,
                 denyPrincipals,
+                // No source_modifiedAt: since #149 a source does not supply it, because core owns the
+                // format that the modifiedAfter / modifiedBefore range predicates compare as text.
                 Map.of(
                         "source_nodeId", NODE_ID,
-                        "source_type", "alfresco",
-                        P_MODIFIED_AT, INCOMING_MODIFIED_AT
+                        "source_type", "alfresco"
                 )
         );
     }
@@ -204,8 +205,16 @@ class NodeSyncServiceContentReuseTest {
         List<HxprDocument> writes = sync(service, node(), indexedDocument(fingerprintOf(TEXT), TEXT), TEXT);
 
         verify(embeddingService, never()).embedChunks(any(), any());
-        assertThat(writes).allSatisfy(write ->
-                assertThat(write.getCinIngestProperties()).containsEntry(P_MODIFIED_AT, INCOMING_MODIFIED_AT));
+        // Asserted as an instant rather than as a literal, because the stored text is core's fixed-width
+        // form and not the shape a caller or a source would have written (#149). What this test is about is
+        // that the timestamp advanced past the stored one even though nothing was re-embedded.
+        assertThat(writes).allSatisfy(write -> {
+            Object stored = write.getCinIngestProperties().get(P_MODIFIED_AT);
+            assertThat(stored).isNotNull();
+            assertThat(OffsetDateTime.parse(stored.toString()))
+                    .isEqualTo(OffsetDateTime.parse(INCOMING_MODIFIED_AT))
+                    .isAfter(OffsetDateTime.parse(STORED_MODIFIED_AT));
+        });
     }
 
     /**

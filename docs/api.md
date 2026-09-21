@@ -455,9 +455,31 @@ Response example:
 | `sourceType` | String | -- | Optional source filter: `alfresco` or `nuxeo` |
 | `metadata.mimeType` | String | -- | MIME type filter (for example `application/pdf`) |
 | `metadata.pathPrefix` | String | -- | Path prefix filter (starts-with match) |
-| `metadata.modifiedAfter` | String | -- | Inclusive lower bound for `source_modifiedAt` |
-| `metadata.modifiedBefore` | String | -- | Inclusive upper bound for `source_modifiedAt` |
+| `metadata.modifiedAfter` | String | -- | Inclusive lower bound for `source_modifiedAt`; see the note below |
+| `metadata.modifiedBefore` | String | -- | Inclusive upper bound for `source_modifiedAt`; see the note below |
 | `metadata.properties` | Map<String,String> | -- | Exact-match filters on `cin_ingestProperties.<key>` |
+
+#### The date bounds are string comparisons, so they depend on how a document was stored
+
+`modifiedAfter` and `modifiedBefore` become HXQL range predicates over the stored text of
+`source_modifiedAt`, not over a parsed instant. Ingestion writes that value in one fixed-width UTC form,
+`uuuu-MM-dd'T'HH:mm:ss.SSSSSSSSS'Z'`, precisely so the comparison orders correctly, and a source cannot
+override the format.
+
+**A document ingested before that was enforced may still hold a variable-width value, and is filtered
+imprecisely.** Until this was fixed (#149) the Alfresco and Nuxeo adapters wrote
+`OffsetDateTime.toString()`, which elides zero seconds: a document modified at exactly `10:00:00` was stored
+as `2026-09-17T10:00Z`, whose `Z` sorts after the `:` of any bound carrying seconds, so it was excluded from
+ranges it plainly fell inside.
+
+**Re-running a sync does not repair it**, and this is the part worth knowing before planning around it. The
+staleness check parses the stored value rather than comparing it, so an untouched document is correctly
+judged current and its metadata is never rewritten. A document's stored form is therefore normalised only
+when the source genuinely modifies it, or when the index is rebuilt from empty. Bound a query you need to
+be exact to whole minutes, or re-ingest.
+
+Pass bounds in the same shape you would store: a full `uuuu-MM-ddTHH:mm:ssZ` at minimum. A bound with no
+seconds has the mirror-image problem against correctly stored values.
 
 | Response Field | Type | Description |
 |---------------|------|-------------|

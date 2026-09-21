@@ -42,7 +42,6 @@ public final class NuxeoSourceNodeAdapter {
         String fullPath = document.getPath();
         String nodePath = folder ? fullPath : document.getParentPath();
         String mimeType = folder ? null : document.getBlobMimeType(blobXpath);
-        String modifiedAt = document.getModifiedAt() != null ? document.getModifiedAt().toString() : null;
 
         Map<String, Object> props = new LinkedHashMap<>();
         props.put(ContentLakeIngestProperties.SOURCE_NODE_ID, document.getUid());
@@ -50,7 +49,12 @@ public final class NuxeoSourceNodeAdapter {
         props.put(ContentLakeIngestProperties.SOURCE_PATH, nodePath);
         props.put(ContentLakeIngestProperties.SOURCE_NAME, document.getDisplayName());
         props.put(ContentLakeIngestProperties.SOURCE_MIME_TYPE, mimeType);
-        props.put(ContentLakeIngestProperties.SOURCE_MODIFIED_AT, modifiedAt);
+        // source_modifiedAt is deliberately absent: core seeds it from the record in a fixed-width form,
+        // because the modifiedAfter / modifiedBefore filters compare it as text (#149). The value here was
+        // OffsetDateTime.toString(), which elides zero seconds, so a document modified on a whole second
+        // stored as "2026-03-24T09:15Z" and sorted after any bound carrying seconds. There is no
+        // nuxeo_modifiedAt to keep the raw form in, and none is needed: dc:modified is in the document's
+        // own properties already.
         props.put(ContentLakeIngestProperties.NUXEO_PATH, fullPath);
         props.put(ContentLakeIngestProperties.NUXEO_DOCUMENT_TYPE, document.getType());
         props.put(ContentLakeIngestProperties.NUXEO_LIFECYCLE_STATE, document.getState());

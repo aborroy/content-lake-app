@@ -1,10 +1,12 @@
 package org.hyland.nuxeo.contentlake.adapter;
 
+import org.hyland.contentlake.model.ContentLakeIngestProperties;
 import org.hyland.nuxeo.contentlake.model.NuxeoDocument;
 import org.hyland.contentlake.spi.PermissionRule;
 import org.hyland.contentlake.spi.SourceNode;
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetDateTime;
 import java.util.Map;
 import java.util.Set;
 
@@ -100,5 +102,40 @@ class NuxeoSourceNodeAdapterTest {
                         new PermissionRule("Administrator", "user", "Administrator", "READ"),
                         new PermissionRule("GROUP_members", "group", "GROUP_members", "READ"),
                         new PermissionRule("GROUP_archived", "group", "GROUP_archived", "READ_DENY"));
+    }
+
+    /**
+     * The generic timestamp is core's to write, not this adapter's (#149).
+     *
+     * <p>Same defect as the Alfresco adapter had, from the same cause: {@code source_modifiedAt} is
+     * compared as text by the {@code modifiedAfter} and {@code modifiedBefore} range predicates, and
+     * {@code OffsetDateTime.toString()} elides zero seconds, so a document modified on a whole second was
+     * stored in a form that sorts after any bound carrying seconds. Core seeds the key from the record in a
+     * fixed-width form, so this adapter supplies nothing.</p>
+     *
+     * <p>There is no {@code nuxeo_modifiedAt} vendor key to keep the raw form in, and nothing wanted one:
+     * {@code dc:modified} is already in the document's own properties if a consumer needs what Nuxeo
+     * reported.</p>
+     */
+    @Test
+    void toSourceNode_leavesTheGenericTimestampToCoreSoItIsFixedWidth() {
+        NuxeoDocument document = new NuxeoDocument();
+        document.setUid("doc-456");
+        document.setType("File");
+        document.setTitle("On A Whole Second");
+        document.setPath("/default-domain/workspaces/finance/whole-second.pdf");
+        document.setState("project");
+        document.setProperties(Map.of(
+                "dc:modified", "2026-03-24T09:15:00Z",
+                "file:content", Map.of("mime-type", "application/pdf")
+        ));
+
+        SourceNode node = NuxeoSourceNodeAdapter.toSourceNode(
+                document, "nuxeo-prod", "file:content", Set.of("Everyone"), Set.of());
+
+        // The record carries it, which is what core formats.
+        assertThat(node.modifiedAt()).isEqualTo(OffsetDateTime.parse("2026-03-24T09:15:00Z"));
+        assertThat(node.sourceProperties())
+                .doesNotContainKey(ContentLakeIngestProperties.SOURCE_MODIFIED_AT);
     }
 }
