@@ -95,6 +95,47 @@ count ingestion believed it produced: a non-zero value against a measured `chunk
 signature of an embedding phase that never completed. A `null` verdict with a populated `error` means a
 measurement could not be taken, and is deliberately not a guess.
 
+### Plugin Batch Ingester: browsing a connector's tree (port 9096)
+
+Reads the loaded connector's tree, so an operator can see what there is before choosing what to sync. Works for
+any connector: it needs no SPI method beyond `getNode` and `getChildren`, which every connector already has.
+
+```bash
+# Where a tree starts, and which layer of the precedence chain decided that
+curl http://localhost:9096/api/browse/roots -u admin:admin
+
+# One page of a container's children
+curl "http://localhost:9096/api/browse/children?nodeId=b!drive-id:root&skip=0&maxItems=100" -u admin:admin
+
+# One node, for a caller that has an id and wants its name, path and scope
+curl "http://localhost:9096/api/browse/node?nodeId=b!drive-id:root" -u admin:admin
+```
+
+`nodeId` is a query parameter rather than a path segment because node ids contain slashes, colons and
+exclamation marks depending on the source, and an encoded slash in a path is rejected by Tomcat and mangled by
+a proxy.
+
+Three behaviours are deliberate and a caller has to know them.
+
+**Paging advances by the page size, not by what came back.** `nextSkip` is always `skip + maxItems`, and
+`endOfContainer` is set only on an *empty* page. A page shorter than `maxItems` does not mean the container is
+exhausted: a connector may drop entries it cannot represent as a node. Advancing by the number received
+re-reads the dropped entries or shifts every later window, and stopping on a short page truncates the tree.
+`maxItems` is clamped to 500.
+
+**Out-of-scope entries are returned and annotated, not filtered.** Each node carries `inScope` and
+`traversable`, and they are not the same thing: a scope resolver descends into a folder an include pattern does
+not match, so a matching descendant stays reachable. Filtering would hide exactly what an operator inspecting
+an exclusion needs to see.
+
+**Errors distinguish the request from the source.** A node the connector says is absent is `404`. A connector
+that throws is `502` with its own message, because the host is working and the thing behind it is not. A
+configured root that cannot be read appears in `problems[]` alongside the roots that worked, rather than
+failing the whole request and leaving no tree at all.
+
+The response carries no read principals, deny principals or source properties. This endpoint draws a tree;
+access-control data is not its business.
+
 ### Plugin Batch Ingester: root selection (port 9096)
 
 Which roots the loaded connector walks, changeable without a restart. Available only when

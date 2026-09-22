@@ -79,6 +79,10 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
     static final String RESOURCE_UNIT_BURST_SETTING = SOURCE_TYPE + ".resource-unit-burst";
     static final String SCOPES_SETTING = SOURCE_TYPE + ".scopes";
     static final String TOKEN_CACHE_PATH_SETTING = SOURCE_TYPE + ".token-cache-path";
+    static final String SITE_URL_SETTING = SOURCE_TYPE + ".site-url";
+    static final String SITE_ID_SETTING = SOURCE_TYPE + ".site-id";
+    static final String DRIVE_NAMES_SETTING = SOURCE_TYPE + ".drive-names";
+    static final String FOLDER_PATHS_SETTING = SOURCE_TYPE + ".folder-paths";
 
     static final String DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
     static final String DEFAULT_AUTHORITY_HOST = "https://login.microsoftonline.com/";
@@ -105,9 +109,20 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
     @Override
     public ConnectorSchema schema() {
         return ConnectorSchema.builder(SOURCE_TYPE)
-                .required(DRIVE_IDS_SETTING, ConnectorSchema.FieldType.LIST,
+                .optional(DRIVE_IDS_SETTING, ConnectorSchema.FieldType.LIST,
                         "Drive ids to ingest, comma separated. Node ids are '<driveId>:<itemId>', so this "
-                                + "is what a run is scoped to")
+                                + "is what a run is scoped to. Optional now that a site can be named instead: "
+                                + "supply this or " + SITE_URL_SETTING + " or " + SITE_ID_SETTING)
+                .optional(SITE_URL_SETTING, ConnectorSchema.FieldType.URL,
+                        "The site as a human has it, e.g. https://contoso.sharepoint.com/sites/lake. Resolved "
+                                + "to its document libraries on first use, so drive ids need not be found out "
+                                + "of band")
+                .optional(SITE_ID_SETTING, ConnectorSchema.FieldType.STRING,
+                        "The composite Graph site id (hostname,siteGuid,webGuid), for a caller that already "
+                                + "has it and wants to skip the URL lookup")
+                .optional(DRIVE_NAMES_SETTING, ConnectorSchema.FieldType.LIST,
+                        "Document-library names to take from the site, comma separated. Empty takes every "
+                                + "library. Ignored when " + DRIVE_IDS_SETTING + " is set")
                 .required(CLIENT_ID_SETTING, ConnectorSchema.FieldType.STRING,
                         "Application (client) id of the Entra ID app registration")
                 .optional(TENANT_ID_SETTING, ConnectorSchema.FieldType.STRING,
@@ -146,6 +161,11 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                                 + "Graph service to run without a tenant")
                 .optional(SOURCE_ID_SETTING, ConnectorSchema.FieldType.STRING,
                         "Source alias stored as the second half of cin_sourceId; defaults to the first drive id")
+                .optional(FOLDER_PATHS_SETTING, ConnectorSchema.FieldType.LIST,
+                        "Folder paths within a drive to start a pass from, comma separated, e.g. /Finance. "
+                                + "Unlike " + INCLUDE_PATHS_SETTING + " this scopes the walk rather than "
+                                + "filtering it afterwards, so an unselected folder is never enumerated and "
+                                + "never costs resource units")
                 .optional(INCLUDE_PATHS_SETTING, ConnectorSchema.FieldType.LIST,
                         "Path prefixes to ingest; empty means everything in the configured drives")
                 .optional(EXCLUDE_PATHS_SETTING, ConnectorSchema.FieldType.LIST,
@@ -247,31 +267,58 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                     + " and mount the file read-only.");
         }
 
+        // Conditionally required, which ConnectorSchema cannot express: exactly one of three ways to say what
+        // to ingest. Leaving drive-ids unconditionally required would make naming a site impossible; making
+        // none of them required would let the jar load and then ingest nothing, which is the failure this
+        // check exists to convert into a message naming the settings.
+        boolean hasDrives = !context.listProperty(DRIVE_IDS_SETTING).isEmpty();
+        boolean hasSite = isSet(context.property(SITE_URL_SETTING)) || isSet(context.property(SITE_ID_SETTING));
+        if (!hasDrives && !hasSite) {
+            throw new GraphException("Nothing says what to ingest: set " + DRIVE_IDS_SETTING + ", or "
+                    + SITE_URL_SETTING + " or " + SITE_ID_SETTING + " to have the libraries resolved for you.");
+        }
+
         String certificatePath = context.property(CERTIFICATE_PATH_SETTING);
 
-        return new SharePointConnectorSettings(
-                context.property(GRAPH_BASE_URL_SETTING, DEFAULT_GRAPH_BASE_URL),
-                authMode,
-                authority,
-                context.property(CLIENT_ID_SETTING),
-                context.property(CLIENT_SECRET_SETTING),
-                certificatePath == null || certificatePath.isBlank() ? null : Path.of(certificatePath.trim()),
-                context.property(CERTIFICATE_PASSWORD_SETTING),
-                context.property(ACCESS_TOKEN_SETTING),
-                context.listProperty(DRIVE_IDS_SETTING),
-                context.property(SOURCE_ID_SETTING),
-                context.listProperty(INCLUDE_PATHS_SETTING),
-                context.listProperty(EXCLUDE_PATHS_SETTING),
-                context.listProperty(INCLUDE_MIME_TYPES_SETTING),
-                context.listProperty(EXCLUDE_MIME_TYPES_SETTING),
-                SharePointAclMapper.AclFallback.of(context.property(ACL_FALLBACK_SETTING)),
-                SharePointAclMapper.GroupGrants.of(context.property(GROUP_GRANTS_SETTING)),
-                SharePointConnectorSettings.PermissionsMode.of(context.property(PERMISSIONS_MODE_SETTING)),
-                everyoneClaims(context),
-                context.intProperty(RESOURCE_UNITS_PER_MINUTE_SETTING, DEFAULT_RESOURCE_UNITS_PER_MINUTE),
-                context.intProperty(RESOURCE_UNIT_BURST_SETTING, DEFAULT_RESOURCE_UNIT_BURST),
-                context.listProperty(SCOPES_SETTING),
-                tokenCachePath == null || tokenCachePath.isBlank() ? null : Path.of(tokenCachePath.trim()));
+        return SharePointConnectorSettings.builder()
+                .graphBaseUrl(context.property(GRAPH_BASE_URL_SETTING, DEFAULT_GRAPH_BASE_URL))
+                .authMode(authMode)
+                .authority(authority)
+                .clientId(context.property(CLIENT_ID_SETTING))
+                .clientSecret(context.property(CLIENT_SECRET_SETTING))
+                .certificate(pathOrNull(certificatePath))
+                .certificatePassword(context.property(CERTIFICATE_PASSWORD_SETTING))
+                .accessToken(context.property(ACCESS_TOKEN_SETTING))
+                .driveIds(context.listProperty(DRIVE_IDS_SETTING))
+                .sourceId(context.property(SOURCE_ID_SETTING))
+                .includePaths(context.listProperty(INCLUDE_PATHS_SETTING))
+                .excludePaths(context.listProperty(EXCLUDE_PATHS_SETTING))
+                .includeMimeTypes(context.listProperty(INCLUDE_MIME_TYPES_SETTING))
+                .excludeMimeTypes(context.listProperty(EXCLUDE_MIME_TYPES_SETTING))
+                .aclFallback(SharePointAclMapper.AclFallback.of(context.property(ACL_FALLBACK_SETTING)))
+                .groupGrants(SharePointAclMapper.GroupGrants.of(context.property(GROUP_GRANTS_SETTING)))
+                .permissionsMode(SharePointConnectorSettings.PermissionsMode.of(
+                        context.property(PERMISSIONS_MODE_SETTING)))
+                .everyoneClaims(everyoneClaims(context))
+                .resourceUnitsPerMinute(context.intProperty(RESOURCE_UNITS_PER_MINUTE_SETTING,
+                        DEFAULT_RESOURCE_UNITS_PER_MINUTE))
+                .resourceUnitBurst(context.intProperty(RESOURCE_UNIT_BURST_SETTING,
+                        DEFAULT_RESOURCE_UNIT_BURST))
+                .scopes(context.listProperty(SCOPES_SETTING))
+                .tokenCachePath(pathOrNull(tokenCachePath))
+                .siteUrl(context.property(SITE_URL_SETTING))
+                .siteId(context.property(SITE_ID_SETTING))
+                .driveNames(context.listProperty(DRIVE_NAMES_SETTING))
+                .folderPaths(context.listProperty(FOLDER_PATHS_SETTING))
+                .build();
+    }
+
+    private static Path pathOrNull(String value) {
+        return value == null || value.isBlank() ? null : Path.of(value.trim());
+    }
+
+    private static boolean isSet(String value) {
+        return value != null && !value.isBlank();
     }
 
     /**

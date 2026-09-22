@@ -93,6 +93,10 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     private final SharePointConnectorSettings settings;
     private final GraphHttpClient graph;
     private final SharePointAclMapper aclMapper;
+    private final SharePointDriveCatalog drives;
+
+    /** Configured folder paths resolved to item ids, memoised because roots are asked for on every pass. */
+    private volatile List<String> folderRoots;
     private final PermissionHierarchyCache permissions;
     private final ObjectMapper json = new ObjectMapper();
 
@@ -117,13 +121,20 @@ public final class SharePointConnectorClient implements ContentSourceClient {
         this.graph = graph;
         this.aclMapper = new SharePointAclMapper(settings.aclFallback(), settings.groupGrants(),
                 settings.everyoneClaims());
+        this.drives = new SharePointDriveCatalog(settings, graph);
         this.itemPreferences =
                 settings.permissionsMode() == SharePointConnectorSettings.PermissionsMode.HIERARCHICAL
                         ? List.of(HIERARCHICAL_SHARING)
                         : List.of();
         this.permissions = new PermissionHierarchyCache(settings.permissionsMode(), this::readAcl,
                 this::fetchItem);
-        log.info("SharePoint connector ready: " + graph.describe() + ", drives " + settings.driveIds()
+        // Says what was configured, not what it resolves to: resolving a site here would be the network call
+        // this class must not make at construction, since the host builds a client for every mounted jar.
+        log.info("SharePoint connector ready: " + graph.describe() + ", "
+                + (settings.driveIds().isEmpty()
+                        ? "libraries to be resolved from site "
+                                + (settings.siteUrl() != null ? settings.siteUrl() : settings.siteId())
+                        : "drives " + settings.driveIds())
                 + ", permissions mode " + settings.permissionsMode().settingValue());
     }
 
@@ -151,8 +162,8 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     @Override
     public String getRootNodeId() {
-        List<String> drives = settings.driveIds();
-        return drives.size() == 1 ? nodeId(drives.get(0), ROOT_ITEM_ID) : null;
+        List<String> configured = settings.driveIds();
+        return configured.size() == 1 ? nodeId(configured.get(0), ROOT_ITEM_ID) : null;
     }
 
     /**
@@ -167,10 +178,99 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     @Override
     public List<String> getRootNodeIds() {
-        return settings.driveIds().stream()
+        List<String> driveIds = drives.driveIds().stream()
                 .filter(driveId -> driveId != null && !driveId.isBlank())
-                .map(driveId -> nodeId(driveId.trim(), ROOT_ITEM_ID))
+                .map(String::trim)
                 .toList();
+
+        List<String> folders = settings.folderPaths();
+        if (folders.isEmpty()) {
+            return driveIds.stream().map(driveId -> nodeId(driveId, ROOT_ITEM_ID)).toList();
+        }
+        return folderRoots(driveIds, folders);
+    }
+
+    /**
+     * Resolves configured folder paths to the item ids a pass starts from.
+     *
+     * <p>This is what makes folder selection cost what it should. {@code sharepoint.include-paths} reads like
+     * folder selection and is not: it is a filter the host applies to each node <em>after</em> enumeration, so a
+     * run configured for one folder of a large library still enumerated the whole library and paid the resource
+     * units for it. Since permission reads dominate the crawl budget, that is the difference between a selection
+     * being cheap and being the most expensive way to sync a folder.</p>
+     *
+     * <p>Memoised for the same reason the drive catalog is: the host asks for roots on every pass.</p>
+     */
+    private List<String> folderRoots(List<String> driveIds, List<String> folders) {
+        List<String> known = folderRoots;
+        if (known != null) {
+            return known;
+        }
+        synchronized (this) {
+            if (folderRoots == null) {
+                List<String> resolved = new ArrayList<>();
+                List<String> unresolved = new ArrayList<>();
+                for (String driveId : driveIds) {
+                    for (String folder : folders) {
+                        String itemId = resolveFolder(driveId, folder);
+                        if (itemId == null) {
+                            unresolved.add(driveId + ":" + folder);
+                        } else {
+                            resolved.add(nodeId(driveId, itemId));
+                        }
+                    }
+                }
+                if (resolved.isEmpty()) {
+                    throw new GraphException("None of the configured "
+                            + SharePointConnectorPlugin.FOLDER_PATHS_SETTING + " resolved in any drive: "
+                            + unresolved + ". A path is relative to the drive root, for example /Finance.");
+                }
+                if (!unresolved.isEmpty()) {
+                    // Not fatal: a site with several libraries will not have the same folder in each, and
+                    // refusing the whole run because one combination is absent would make the setting unusable.
+                    log.warning("Some configured folder paths did not resolve and are skipped: " + unresolved);
+                }
+                folderRoots = resolved;
+            }
+            return folderRoots;
+        }
+    }
+
+    /**
+     * One folder path to its item id, or {@code null} when the drive does not have it.
+     *
+     * <p>Uses Graph's colon-addressed path form, {@code /drives/{id}/root:/{path}}, which nothing else here
+     * builds. Note the trailing colon is omitted for a bare path and required before a sub-resource, which is
+     * why this returns an id and the caller composes node ids rather than URLs.</p>
+     */
+    private String resolveFolder(String driveId, String folderPath) {
+        String relative = folderPath.trim().replaceAll("^/+", "").replaceAll("/+$", "");
+        if (relative.isBlank()) {
+            return ROOT_ITEM_ID;
+        }
+        String encoded = java.util.Arrays.stream(relative.split("/"))
+                .map(segment -> java.net.URLEncoder.encode(segment, java.nio.charset.StandardCharsets.UTF_8)
+                        .replace("+", "%20"))
+                .collect(java.util.stream.Collectors.joining("/"));
+        try {
+            JsonNode item = getItems("/drives/" + driveId + "/root:/" + encoded,
+                    ResourceUnitMeter.SINGLE_ITEM).body();
+            String itemId = GraphHttpClient.text(item, "id");
+            if (itemId == null || itemId.isBlank()) {
+                return null;
+            }
+            if (item.get("folder") == null) {
+                throw new GraphException(SharePointConnectorPlugin.FOLDER_PATHS_SETTING + " entry '"
+                        + folderPath + "' is not a folder in drive " + driveId);
+            }
+            return itemId;
+        } catch (GraphException e) {
+            if (e.getMessage() != null && e.getMessage().contains("not a folder")) {
+                throw e;
+            }
+            log.fine("Folder '" + folderPath + "' did not resolve in drive " + driveId + ": " + e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -282,11 +382,12 @@ public final class SharePointConnectorClient implements ContentSourceClient {
      */
     @Override
     public String initialCursor() {
-        if (settings.driveIds().isEmpty()) {
+        List<String> driveIds = drives.driveIds();
+        if (driveIds.isEmpty()) {
             return null;
         }
         Map<String, String> positions = new LinkedHashMap<>();
-        for (String driveId : settings.driveIds()) {
+        for (String driveId : driveIds) {
             GraphHttpClient.GraphResponse response = getItems(
                     "/drives/" + driveId + "/root/delta?token=latest",
                     ResourceUnitMeter.DELTA_WITH_TOKEN);

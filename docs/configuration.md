@@ -287,7 +287,11 @@ CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
 
 | Setting | Meaning |
 |---|---|
-| `sharepoint.drive-ids` | Drives to ingest, comma separated. Required, and what a run is scoped to |
+| `sharepoint.drive-ids` | Drives to ingest, comma separated. Supply this, `sharepoint.site-url` or `sharepoint.site-id` |
+| `sharepoint.site-url` | The site as a human has it. Resolved to its document libraries on first use, so drive ids need not be found out of band |
+| `sharepoint.site-id` | The composite Graph site id, for a caller that already has it |
+| `sharepoint.drive-names` | Document-library names to take from the site. Empty takes every library. Ignored when `drive-ids` is set |
+| `sharepoint.folder-paths` | Folders to start a pass from, e.g. `/Finance`. Scopes the walk, unlike `include-paths` which filters after it |
 | `sharepoint.client-id` | Application (client) id of the Entra ID app registration. Required |
 | `sharepoint.tenant-id` | Directory (tenant) id; the authority is derived from it. Required for `client-credentials` and `device-code` unless `sharepoint.authority` is set |
 | `sharepoint.authority` | Entra ID authority, for a sovereign cloud only. Must be `https`: msal4j rejects any other scheme |
@@ -414,6 +418,43 @@ Graph returns a complete permission set to a non-administrator.
 `content-lake-app-deployment/test/test-sharepoint.sh` is the end-to-end check, and the assertions that matter
 are the ACL ones: a document granted to one named user is not returned to a caller its ACL excludes, and a
 group-only document is returned to nobody.
+
+#### Naming a site instead of finding drive ids, and scoping to folders
+
+`sharepoint.drive-ids` used to be required, and there was no supported way to find out what to put in it: the
+connector never called `GET /sites/{id}/drives`, so a drive id was copied out of a Graph Explorer session.
+Naming `sharepoint.site-url` (or `sharepoint.site-id`, if you already have the composite form) resolves the
+site's document libraries instead, and `sharepoint.drive-names` narrows that to particular libraries.
+
+Resolution is lazy and memoised, and both halves of that matter. It cannot happen during construction, because
+the host builds a client for every mounted jar across all six ingesters, so a Graph call there would let one
+connector's outage break a deployment running a different one. It cannot happen per pass either, because roots
+are resolved on every pass, so an unmemoised lookup would spend the tenant's budget on the same two calls
+forever. Configured drive ids still win and cost no Graph call at all, so an existing deployment behaves
+exactly as before.
+
+One consequence worth knowing: with a site rather than drive ids, the source alias is derived from the site
+string, not from the resolved libraries. Deriving it from a library would mean a change in the order Graph
+returns them silently renames the source and orphans its cursor and everything already indexed under the old
+name. Set `sharepoint.source-id` explicitly if you want something prettier than the derived slug.
+
+**`sharepoint.folder-paths` scopes a pass; `sharepoint.include-paths` filters one.** They read alike and are
+not the same. Include paths are applied by the host to each node *after* enumeration, so a run configured for
+one folder of a large library still enumerates the whole library and pays the resource units for it. Since
+permission reads dominate the crawl budget, that is the difference between a selection being cheap and being
+the most expensive way to sync a folder. Folder paths are resolved to item ids through Graph's path-addressing
+form and become the roots the walk starts from, so an unselected folder is never enumerated.
+
+Two behaviours of folder paths are deliberate. A path that resolves in no drive at all is refused, because
+falling back to the drive root would silently widen a deliberately narrow scope to the whole library. But a
+path missing from *one* drive of several is skipped with a warning, because a site with multiple libraries will
+not have the same folder in each and refusing the run would make the setting unusable.
+
+**The change feed does not narrow with the selection.** Graph's delta feed is per drive, so with
+`connector.change-feed.enabled=true` an incremental pass still reads the whole drive's feed and sees items
+outside the selected folders. The saving is in what gets fetched, extracted, embedded and indexed, not in the
+feed read itself. Note also that delta responses carry no `parentReference.path`, so path scope cannot be
+enforced on a feed pass at all; a deployment that needs it enforced on every pass has to leave the feed off.
 
 #### Running it as a named user, where the tenant will not grant application permissions
 

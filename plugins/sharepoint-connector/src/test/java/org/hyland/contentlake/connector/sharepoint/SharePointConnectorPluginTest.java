@@ -77,9 +77,42 @@ class SharePointConnectorPluginTest {
         // unconfigured SharePoint jar from loading and becoming a second candidate in a deployment that
         // mounts every connector.
         assertThat(problems).isNotEmpty();
-        assertThat(String.join(" ", problems))
-                .contains("sharepoint.drive-ids")
-                .contains("sharepoint.client-id");
+        assertThat(String.join(" ", problems)).contains("sharepoint.client-id");
+    }
+
+    @Test
+    void refusesAConfigurationThatSaysNothingAboutWhatToIngest() {
+        // drive-ids is no longer unconditionally required, because a site can be named instead, and
+        // ConnectorSchema cannot express "exactly one of these three". So the check moved into settingsFrom,
+        // and this is what stops the jar loading and then ingesting nothing.
+        Map<String, String> values = new HashMap<>();
+        values.put("sharepoint.client-id", "client-guid");
+        values.put("sharepoint.tenant-id", "tenant-guid");
+        values.put("sharepoint.client-secret", "a-secret");
+
+        assertThatThrownBy(() -> new SharePointConnectorPlugin().settingsFrom(new MapContext(values)))
+                .isInstanceOf(GraphException.class)
+                .hasMessageContaining("sharepoint.drive-ids")
+                .hasMessageContaining("sharepoint.site-url")
+                .hasMessageContaining("sharepoint.site-id");
+    }
+
+    @Test
+    void acceptsASiteInsteadOfDriveIds() {
+        Map<String, String> values = new HashMap<>();
+        values.put("sharepoint.client-id", "client-guid");
+        values.put("sharepoint.tenant-id", "tenant-guid");
+        values.put("sharepoint.client-secret", "a-secret");
+        values.put("sharepoint.site-url", "https://contoso.sharepoint.com/sites/lake");
+
+        SharePointConnectorSettings settings =
+                new SharePointConnectorPlugin().settingsFrom(new MapContext(values));
+
+        assertThat(settings.driveIds()).isEmpty();
+        assertThat(settings.siteUrl()).isEqualTo("https://contoso.sharepoint.com/sites/lake");
+        // Derived from the site string rather than from a resolved drive, so it cannot move when Graph
+        // returns the libraries in a different order.
+        assertThat(settings.effectiveSourceId()).isEqualTo("contoso-sharepoint-com-sites-lake");
     }
 
     @Test

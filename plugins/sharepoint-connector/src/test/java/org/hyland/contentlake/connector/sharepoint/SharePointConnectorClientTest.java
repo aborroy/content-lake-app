@@ -50,20 +50,15 @@ class SharePointConnectorClientTest {
 
     private static SharePointConnectorSettings settings(String graphBaseUrl,
                                                         SharePointConnectorSettings.PermissionsMode mode) {
-        return new SharePointConnectorSettings(
-                graphBaseUrl,
-                SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
-                null, null, null, null, null,
-                "mock-token",
-                List.of(DRIVE),
-                null,
-                List.of(), List.of(), List.of(), List.of(),
-                SharePointAclMapper.AclFallback.FAIL_CLOSED,
-                SharePointAclMapper.GroupGrants.MAP,
-                mode,
-                Set.of(),
-                0, 1,
-                List.of(), null);
+        return SharePointConnectorSettings.builder()
+                .graphBaseUrl(graphBaseUrl)
+                .authMode(SharePointConnectorSettings.AuthMode.STATIC_TOKEN)
+                .accessToken("mock-token")
+                .driveIds(List.of(DRIVE))
+                .permissionsMode(mode)
+                .resourceUnitsPerMinute(0)
+                .resourceUnitBurst(1)
+                .build();
     }
 
     private static MockGraphServer.Options options() {
@@ -83,14 +78,14 @@ class SharePointConnectorClientTest {
     @Test
     void cannotNameARootWhenSeveralDrivesAreConfigured() throws Exception {
         mock = new MockGraphServer(options());
-        SharePointConnectorSettings twoDrives = new SharePointConnectorSettings(
-                mock.graphBaseUrl(), SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
-                null, null, null, null, null, "mock-token",
-                List.of(DRIVE, "b!second-drive"), null,
-                List.of(), List.of(), List.of(), List.of(),
-                SharePointAclMapper.AclFallback.FAIL_CLOSED, SharePointAclMapper.GroupGrants.MAP,
-                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
-                Set.of(), 0, 1, List.of(), null);
+        SharePointConnectorSettings twoDrives = SharePointConnectorSettings.builder()
+                .graphBaseUrl(mock.graphBaseUrl())
+                .authMode(SharePointConnectorSettings.AuthMode.STATIC_TOKEN)
+                .accessToken("mock-token")
+                .driveIds(List.of(DRIVE, "b!second-drive"))
+                .resourceUnitsPerMinute(0)
+                .resourceUnitBurst(1)
+                .build();
         SharePointConnectorClient client = new SharePointConnectorClient(twoDrives,
                 new GraphHttpClient(mock.graphBaseUrl(), twoDrives.tokenProvider(),
                         ResourceUnitMeter.unmetered()));
@@ -119,14 +114,14 @@ class SharePointConnectorClientTest {
     @Test
     void ignoresABlankDriveIdWhenNamingRoots() throws Exception {
         mock = new MockGraphServer(options());
-        SharePointConnectorSettings withBlank = new SharePointConnectorSettings(
-                mock.graphBaseUrl(), SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
-                null, null, null, null, null, "mock-token",
-                List.of(DRIVE, "   "), null,
-                List.of(), List.of(), List.of(), List.of(),
-                SharePointAclMapper.AclFallback.FAIL_CLOSED, SharePointAclMapper.GroupGrants.MAP,
-                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
-                Set.of(), 0, 1, List.of(), null);
+        SharePointConnectorSettings withBlank = SharePointConnectorSettings.builder()
+                .graphBaseUrl(mock.graphBaseUrl())
+                .authMode(SharePointConnectorSettings.AuthMode.STATIC_TOKEN)
+                .accessToken("mock-token")
+                .driveIds(List.of(DRIVE, "   "))
+                .resourceUnitsPerMinute(0)
+                .resourceUnitBurst(1)
+                .build();
         SharePointConnectorClient client = new SharePointConnectorClient(withBlank,
                 new GraphHttpClient(mock.graphBaseUrl(), withBlank.tokenProvider(),
                         ResourceUnitMeter.unmetered()));
@@ -326,13 +321,15 @@ class SharePointConnectorClientTest {
     @Test
     void ingestsAnItemWithAnUnreadableAclOnlyWhenPublicWasChosenExplicitly() throws Exception {
         mock = new MockGraphServer(options());
-        SharePointConnectorSettings explicitlyPublic = new SharePointConnectorSettings(
-                mock.graphBaseUrl(), SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
-                null, null, null, null, null, "mock-token",
-                List.of(DRIVE), null, List.of(), List.of(), List.of(), List.of(),
-                SharePointAclMapper.AclFallback.PUBLIC, SharePointAclMapper.GroupGrants.MAP,
-                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
-                Set.of(), 0, 1, List.of(), null);
+        SharePointConnectorSettings explicitlyPublic = SharePointConnectorSettings.builder()
+                .graphBaseUrl(mock.graphBaseUrl())
+                .authMode(SharePointConnectorSettings.AuthMode.STATIC_TOKEN)
+                .accessToken("mock-token")
+                .driveIds(List.of(DRIVE))
+                .aclFallback(SharePointAclMapper.AclFallback.PUBLIC)
+                .resourceUnitsPerMinute(0)
+                .resourceUnitBurst(1)
+                .build();
         SharePointConnectorClient client = new SharePointConnectorClient(explicitlyPublic,
                 new GraphHttpClient(mock.graphBaseUrl(), explicitlyPublic.tokenProvider(),
                         ResourceUnitMeter.unmetered()));

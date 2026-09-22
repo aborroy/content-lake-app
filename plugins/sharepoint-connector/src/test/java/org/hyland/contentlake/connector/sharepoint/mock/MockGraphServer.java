@@ -234,6 +234,36 @@ public final class MockGraphServer implements AutoCloseable {
     }
 
     private void route(HttpExchange exchange, String path, Map<String, String> query) throws IOException {
+        // The colon-addressed site form, checked against the raw path before it is split.
+        //
+        // Graph addresses a site by URL as /sites/{hostname}:/{server-relative-path}, which is delimited by a
+        // colon rather than by a query. Splitting that on '/' yields four or five segments, so the id-based
+        // matchers below miss it and it would 404. Doing this on the raw path is what makes the real addressing
+        // form reachable at all, and a mock that only answered the opaque-id form would let the connector
+        // encode the mock's shape rather than Graph's.
+        if (path.startsWith("/sites/") && path.contains(":/")) {
+            serveFixture(exchange, path.endsWith("/drives") ? "drives.json" : "site.json", Set.of());
+            return;
+        }
+
+        // The drive path-addressing form, /drives/{driveId}/root:/{server-relative-path}, checked against the
+        // raw path for the same reason: 'root:' is not the segment 'root', so the id-based matchers miss it.
+        //
+        // Served from items/by-path/<path>.json rather than by searching the item fixtures, because the mock
+        // parses no JSON at all, which is what lets a fixture be a payload recorded from Graph Explorer and
+        // dropped in unchanged. An unknown path 404s, which is what the connector reads as "this drive does not
+        // have that folder".
+        int pathRoot = path.indexOf("/root:/");
+        if (path.startsWith("/drives/") && pathRoot > 0) {
+            String relative = path.substring(pathRoot + "/root:/".length());
+            if (relative.endsWith(":")) {
+                relative = relative.substring(0, relative.length() - 1);
+            }
+            serveFixture(exchange, "items/by-path/" + URLDecoder.decode(relative, StandardCharsets.UTF_8)
+                    + ".json", applyPreferences(exchange));
+            return;
+        }
+
         List<String> segments = segments(path);
 
         // /sites/{siteId} and /sites/{siteId}/drives

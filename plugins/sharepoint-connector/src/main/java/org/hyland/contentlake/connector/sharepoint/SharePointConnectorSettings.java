@@ -38,6 +38,13 @@ import java.util.Set;
  * @param everyoneClaims      display names that mean "every user in the tenant"; empty for the defaults
  * @param resourceUnitsPerMinute Graph budget to spend per minute, or zero to not meter at all
  * @param resourceUnitBurst   units allowed to accumulate, so a burst is not paced to the average
+ * @param scopes              delegated Graph scopes for {@link AuthMode#DEVICE_CODE}
+ * @param tokenCachePath      where the delegated token cache lives, for {@link AuthMode#DEVICE_CODE}
+ * @param siteUrl             the site as a human has it, resolved to its document libraries on first use
+ * @param siteId              the composite Graph site id, for a caller that already has it
+ * @param driveNames          document-library names to take from the site, empty for all of them
+ * @param folderPaths         folder paths within a drive to start a pass from, empty for the drive root.
+ *                            Unlike {@code includePaths} this scopes the walk rather than filtering it
  */
 public record SharePointConnectorSettings(String graphBaseUrl,
                                           AuthMode authMode,
@@ -60,7 +67,11 @@ public record SharePointConnectorSettings(String graphBaseUrl,
                                           int resourceUnitsPerMinute,
                                           int resourceUnitBurst,
                                           List<String> scopes,
-                                          Path tokenCachePath) {
+                                          Path tokenCachePath,
+                                          String siteUrl,
+                                          String siteId,
+                                          List<String> driveNames,
+                                          List<String> folderPaths) {
 
     public SharePointConnectorSettings {
         driveIds = driveIds == null ? List.of() : List.copyOf(driveIds);
@@ -71,14 +82,41 @@ public record SharePointConnectorSettings(String graphBaseUrl,
         everyoneClaims = everyoneClaims == null ? Set.of() : Set.copyOf(everyoneClaims);
         permissionsMode = permissionsMode == null ? PermissionsMode.PER_ITEM : permissionsMode;
         scopes = scopes == null ? List.of() : List.copyOf(scopes);
+        driveNames = driveNames == null ? List.of() : List.copyOf(driveNames);
+        folderPaths = folderPaths == null ? List.of() : List.copyOf(folderPaths);
     }
 
-    /** The source alias, defaulting to the first configured drive so a single-drive run needs no setting. */
+    /**
+     * The source alias, defaulting to the first configured drive so a single-drive run needs no setting.
+     *
+     * <h3>This must stay free of I/O, and must not depend on a resolved drive list</h3>
+     * <p>The sync's first act is to derive the qualified source id from the client, so a Graph call here would
+     * fail a job before it started. Worse, deriving it from drives resolved out of a site would mean that a
+     * change in the order Graph returns libraries silently renames the source, orphaning its cursor and every
+     * document already indexed under the old name. So a site-configured run derives its alias from the site
+     * string itself, which is configuration and cannot move.</p>
+     *
+     * <p>Setting {@code sharepoint.source-id} explicitly is still worth doing with a site, because the slug
+     * below is stable but not pretty.</p>
+     */
     public String effectiveSourceId() {
         if (sourceId != null && !sourceId.isBlank()) {
             return sourceId.trim();
         }
-        return driveIds.isEmpty() ? "sharepoint" : driveIds.get(0);
+        if (!driveIds.isEmpty()) {
+            return driveIds.get(0);
+        }
+        String site = siteUrl != null && !siteUrl.isBlank() ? siteUrl : siteId;
+        return site == null || site.isBlank() ? "sharepoint" : slug(site);
+    }
+
+    /** A source alias that is stable, readable and safe in an id. */
+    private static String slug(String value) {
+        String cleaned = value.trim()
+                .replaceFirst("^[a-zA-Z][a-zA-Z0-9+.-]*://", "")
+                .replaceAll("[^A-Za-z0-9]+", "-")
+                .replaceAll("^-+|-+$", "");
+        return cleaned.isBlank() ? "sharepoint" : cleaned.toLowerCase(java.util.Locale.ROOT);
     }
 
     /**
@@ -171,6 +209,91 @@ public record SharePointConnectorSettings(String graphBaseUrl,
         /** The setting value, for a log line or an error message an operator has to act on. */
         public String settingValue() {
             return this == HIERARCHICAL ? "hierarchical" : "per-item";
+        }
+    }
+
+    /**
+     * A builder, because this record now has twenty-five components.
+     *
+     * <p>A positional constructor of that width is its own hazard: every call site has to count arguments, two
+     * adjacent components of the same type can be transposed without the compiler noticing, and adding a
+     * setting means editing every construction site whether or not it cares. The plugin builds one of these
+     * and tests build several, and a silent transposition between, say, {@code clientSecret} and
+     * {@code certificatePassword} would be a genuinely confusing failure.</p>
+     *
+     * <p>The canonical constructor stays public: it is what the record gives you, and nothing is gained by
+     * hiding it.</p>
+     */
+    public static Builder builder() {
+        return new Builder();
+    }
+
+    /** Named setters over the canonical constructor. Unset values take the record's own defaults. */
+    public static final class Builder {
+
+        private String graphBaseUrl = SharePointConnectorPlugin.DEFAULT_GRAPH_BASE_URL;
+        private AuthMode authMode = AuthMode.CLIENT_CREDENTIALS;
+        private String authority;
+        private String clientId;
+        private String clientSecret;
+        private Path certificate;
+        private String certificatePassword;
+        private String accessToken;
+        private List<String> driveIds = List.of();
+        private String sourceId;
+        private List<String> includePaths = List.of();
+        private List<String> excludePaths = List.of();
+        private List<String> includeMimeTypes = List.of();
+        private List<String> excludeMimeTypes = List.of();
+        private SharePointAclMapper.AclFallback aclFallback = SharePointAclMapper.AclFallback.FAIL_CLOSED;
+        private SharePointAclMapper.GroupGrants groupGrants = SharePointAclMapper.GroupGrants.MAP;
+        private PermissionsMode permissionsMode = PermissionsMode.PER_ITEM;
+        private Set<String> everyoneClaims = Set.of();
+        private int resourceUnitsPerMinute;
+        private int resourceUnitBurst = 1;
+        private List<String> scopes = List.of();
+        private Path tokenCachePath;
+        private String siteUrl;
+        private String siteId;
+        private List<String> driveNames = List.of();
+        private List<String> folderPaths = List.of();
+
+        private Builder() {
+        }
+
+        public Builder graphBaseUrl(String value) { this.graphBaseUrl = value; return this; }
+        public Builder authMode(AuthMode value) { this.authMode = value; return this; }
+        public Builder authority(String value) { this.authority = value; return this; }
+        public Builder clientId(String value) { this.clientId = value; return this; }
+        public Builder clientSecret(String value) { this.clientSecret = value; return this; }
+        public Builder certificate(Path value) { this.certificate = value; return this; }
+        public Builder certificatePassword(String value) { this.certificatePassword = value; return this; }
+        public Builder accessToken(String value) { this.accessToken = value; return this; }
+        public Builder driveIds(List<String> value) { this.driveIds = value; return this; }
+        public Builder sourceId(String value) { this.sourceId = value; return this; }
+        public Builder includePaths(List<String> value) { this.includePaths = value; return this; }
+        public Builder excludePaths(List<String> value) { this.excludePaths = value; return this; }
+        public Builder includeMimeTypes(List<String> value) { this.includeMimeTypes = value; return this; }
+        public Builder excludeMimeTypes(List<String> value) { this.excludeMimeTypes = value; return this; }
+        public Builder aclFallback(SharePointAclMapper.AclFallback value) { this.aclFallback = value; return this; }
+        public Builder groupGrants(SharePointAclMapper.GroupGrants value) { this.groupGrants = value; return this; }
+        public Builder permissionsMode(PermissionsMode value) { this.permissionsMode = value; return this; }
+        public Builder everyoneClaims(Set<String> value) { this.everyoneClaims = value; return this; }
+        public Builder resourceUnitsPerMinute(int value) { this.resourceUnitsPerMinute = value; return this; }
+        public Builder resourceUnitBurst(int value) { this.resourceUnitBurst = value; return this; }
+        public Builder scopes(List<String> value) { this.scopes = value; return this; }
+        public Builder tokenCachePath(Path value) { this.tokenCachePath = value; return this; }
+        public Builder siteUrl(String value) { this.siteUrl = value; return this; }
+        public Builder siteId(String value) { this.siteId = value; return this; }
+        public Builder driveNames(List<String> value) { this.driveNames = value; return this; }
+        public Builder folderPaths(List<String> value) { this.folderPaths = value; return this; }
+
+        public SharePointConnectorSettings build() {
+            return new SharePointConnectorSettings(graphBaseUrl, authMode, authority, clientId, clientSecret,
+                    certificate, certificatePassword, accessToken, driveIds, sourceId, includePaths,
+                    excludePaths, includeMimeTypes, excludeMimeTypes, aclFallback, groupGrants,
+                    permissionsMode, everyoneClaims, resourceUnitsPerMinute, resourceUnitBurst, scopes,
+                    tokenCachePath, siteUrl, siteId, driveNames, folderPaths);
         }
     }
 }
