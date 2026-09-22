@@ -95,9 +95,45 @@ class SharePointConnectorClientTest {
                 new GraphHttpClient(mock.graphBaseUrl(), twoDrives.tokenProvider(),
                         ResourceUnitMeter.unmetered()));
 
-        // Inventing one would mean walking whichever drive happened to be first. Null makes the host
-        // require connector.roots instead.
+        // Inventing one would mean walking whichever drive happened to be first, so the singular question
+        // still answers null for a host that asks it.
         assertThat(client.getRootNodeId()).isNull();
+
+        // The plural one answers properly, which is what removes the need for connector.roots.
+        assertThat(client.getRootNodeIds())
+                .containsExactly(DRIVE + ":root", "b!second-drive:root");
+    }
+
+    @Test
+    void namesOneRootPerConfiguredDriveWithoutCallingGraph() throws Exception {
+        // Asked on every pass now that roots resolve per pass, so it must cost nothing: drive ids are
+        // configuration and 'root' is a Graph alias, so there is nothing to look up.
+        mock = new MockGraphServer(options());
+        SharePointConnectorClient client = clientFor(options());
+        int before = mock.requestCount();
+
+        assertThat(client.getRootNodeIds()).containsExactly(DRIVE + ":root");
+        assertThat(mock.requestCount()).isEqualTo(before);
+    }
+
+    @Test
+    void ignoresABlankDriveIdWhenNamingRoots() throws Exception {
+        mock = new MockGraphServer(options());
+        SharePointConnectorSettings withBlank = new SharePointConnectorSettings(
+                mock.graphBaseUrl(), SharePointConnectorSettings.AuthMode.STATIC_TOKEN,
+                null, null, null, null, null, "mock-token",
+                List.of(DRIVE, "   "), null,
+                List.of(), List.of(), List.of(), List.of(),
+                SharePointAclMapper.AclFallback.FAIL_CLOSED, SharePointAclMapper.GroupGrants.MAP,
+                SharePointConnectorSettings.PermissionsMode.PER_ITEM,
+                Set.of(), 0, 1, List.of(), null);
+        SharePointConnectorClient client = new SharePointConnectorClient(withBlank,
+                new GraphHttpClient(mock.graphBaseUrl(), withBlank.tokenProvider(),
+                        ResourceUnitMeter.unmetered()));
+
+        // A blank entry would otherwise become the node id ":root", which resolves to nothing and makes the
+        // pass permanently incomplete.
+        assertThat(client.getRootNodeIds()).containsExactly(DRIVE + ":root");
     }
 
     @Test

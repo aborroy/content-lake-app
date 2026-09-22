@@ -45,6 +45,8 @@ class RootSelectionPrecedenceTest {
 
     @Test
     void fallsBackToTheConnectorsOwnRootWhenThereIsNeither() {
+        // The stub names no plural roots, so this also covers the SPI default path: the host asks only the
+        // plural question, and a connector overriding only the singular one is still honoured through it.
         List<String> roots = ConnectorDiscoveryService.resolveRoots(
                 Optional.empty(), List.of(), new StubClient());
 
@@ -74,6 +76,18 @@ class RootSelectionPrecedenceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("connector.roots")
                 .hasMessageContaining("selection API");
+    }
+
+    @Test
+    void takesEveryRootAConnectorNamesRatherThanOnlyTheFirst() {
+        // What #158 is for: a connector with several entry points no longer has to answer null and make the
+        // operator write composite ids into connector.roots by hand.
+        StubClient multi = new StubClient();
+        multi.roots = List.of("drive-one:root", "drive-two:root");
+
+        List<String> roots = ConnectorDiscoveryService.resolveRoots(Optional.empty(), List.of(), multi);
+
+        assertThat(roots).containsExactly("drive-one:root", "drive-two:root");
     }
 
     @Test
@@ -147,9 +161,10 @@ class RootSelectionPrecedenceTest {
     }
 
     /** Answers a single root and counts how often it was asked for a node. */
-    private static final class StubClient implements ContentSourceClient {
+    private static class StubClient implements ContentSourceClient {
 
         private String root = CONNECTOR_ROOT;
+        private List<String> roots;
         private int nodeLookups;
 
         @Override
@@ -165,6 +180,11 @@ class RootSelectionPrecedenceTest {
         @Override
         public String getRootNodeId() {
             return root;
+        }
+
+        @Override
+        public List<String> getRootNodeIds() {
+            return roots != null ? roots : ContentSourceClient.super.getRootNodeIds();
         }
 
         @Override

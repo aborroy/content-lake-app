@@ -85,7 +85,7 @@ under `connector.*`:
 | Setting | Meaning |
 |---|---|
 | `connector.source-type` | Which loaded connector to ingest with. Optional with one jar mounted, required with several |
-| `connector.roots` | Containers to walk, unless an operator selected some. Empty asks the connector, through `ContentSourceClient.getRootNodeId()` |
+| `connector.roots` | Containers to walk, unless an operator selected some. Empty asks the connector, through `ContentSourceClient.getRootNodeIds()` |
 | `connector.page-size` | Children fetched per listing |
 | `connector.max-depth` | Depth backstop for a hierarchy that does not bottom out |
 | `connector.security.*` | Credentials for this ingester's own sync API. No defaults; startup fails without both |

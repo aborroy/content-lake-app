@@ -101,16 +101,18 @@ public class ConnectorDiscoveryService {
             return fromConfig;
         }
 
-        String own = client.getRootNodeId();
-        if (own != null && !own.isBlank()) {
-            return List.of(own.trim());
+        // getRootNodeIds rather than getRootNodeId: a connector with several entry points can name them all,
+        // and the default implementation of the plural method still answers for one that names only one.
+        List<String> own = clean(client.getRootNodeIds());
+        if (!own.isEmpty()) {
+            return own;
         }
 
         throw new IllegalStateException(
                 "Connector '" + client.getSourceType() + "' does not name a root container and connector.roots "
                         + "is empty, so a batch pass has nowhere to start. Set connector.roots to one or more "
                         + "node ids, select roots through the selection API, or implement "
-                        + "ContentSourceClient.getRootNodeId() in the connector.");
+                        + "ContentSourceClient.getRootNodeIds() in the connector.");
     }
 
     /** Back-compatible overload for a deployment with no selection store. */

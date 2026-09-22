@@ -63,6 +63,40 @@ class ContentSourceClientDefaultsTest {
     }
 
     @Test
+    void namesNoRootsByDefaultEither() {
+        // Empty rather than a singleton of null, so a host can treat "I do not know" as a list it can iterate
+        // without a null check, and fall back to its own configuration.
+        assertThat(client.getRootNodeIds()).isEmpty();
+    }
+
+    @Test
+    void aConnectorOverridingOnlyTheSingularMethodStillAnswersThePluralOne() {
+        // The whole point of the default: every connector written before the plural method keeps working, and
+        // a host may ask only the plural question.
+        ContentSourceClient single = new MinimalClient() {
+            @Override
+            public String getRootNodeId() {
+                return "  the-only-root  ";
+            }
+        };
+
+        assertThat(single.getRootNodeIds()).containsExactly("the-only-root");
+    }
+
+    @Test
+    void aBlankSingularRootIsNotPromotedToAListOfOne() {
+        // A connector that answers a blank string means the same as one that answers null: it does not know.
+        ContentSourceClient blank = new MinimalClient() {
+            @Override
+            public String getRootNodeId() {
+                return "   ";
+            }
+        };
+
+        assertThat(blank.getRootNodeIds()).isEmpty();
+    }
+
+    @Test
     void publishesAnEmptySchemaByDefault() {
         assertThat(client.connectorSchema().fields()).isEmpty();
         assertThat(client.connectorSchema().sourceType()).isEqualTo("sample");

@@ -49,6 +49,36 @@ public interface ContentSourceClient {
     }
 
     /**
+     * Every container a batch discovery pass should start from, or empty when the connector does not know.
+     *
+     * <p>This exists because {@link #getRootNodeId()} can only answer for a connector with exactly one root.
+     * A source with several equally valid entry points -- two SharePoint document libraries, a set of chosen
+     * folders -- could previously only answer {@code null}, which pushed the work onto the operator: the host
+     * then required {@code connector.roots} to be set by hand, with ids in whatever composite form that
+     * connector happens to use.</p>
+     *
+     * <p>Defaults to the singleton of {@link #getRootNodeId()}, or an empty list when that answers
+     * {@code null}, so every existing connector and every connector written against the older method keeps
+     * working unchanged and only the ones with something more to say override this.</p>
+     *
+     * <p>Override this <em>or</em> {@link #getRootNodeId()}, not both: overriding both means two answers that
+     * can disagree, and the host reads this one.</p>
+     *
+     * <h3>It may be called on every pass, so it must be cheap or memoised</h3>
+     * <p>A host resolves roots per pass rather than at startup, which is what lets an operator change a scope
+     * without a restart. A connector that answers this by calling its source must therefore memoise the
+     * result: doing the call per pass is wasteful, and doing it in a constructor instead would put it on the
+     * host's startup path, where a transient source outage becomes a container that will not boot.</p>
+     *
+     * @return the roots, never {@code null}. An empty list means "I do not know", which leaves the host to
+     *         fall back to its configuration.
+     */
+    default List<String> getRootNodeIds() {
+        String single = getRootNodeId();
+        return single == null || single.isBlank() ? List.of() : List.of(single.trim());
+    }
+
+    /**
      * Fetches a single node by its source-system identifier.
      *
      * @param nodeId source-system node identifier

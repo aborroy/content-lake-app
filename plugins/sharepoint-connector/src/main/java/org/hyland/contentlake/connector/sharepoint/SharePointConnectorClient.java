@@ -145,14 +145,32 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     /**
      * Where a batch pass starts, which this can only answer for a single-drive run.
      *
-     * <p>With several drives configured there is no one root, and inventing one would mean the host walked
-     * whichever drive happened to be first. {@code null} makes the host require {@code connector.roots},
-     * which takes composite {@code <driveId>:<itemId>} values.</p>
+     * <p>Kept for a host that still asks the singular question. With several drives configured there is no one
+     * root, and inventing one would mean the host walked whichever drive happened to be first, so this answers
+     * {@code null} and {@link #getRootNodeIds()} answers properly.</p>
      */
     @Override
     public String getRootNodeId() {
         List<String> drives = settings.driveIds();
         return drives.size() == 1 ? nodeId(drives.get(0), ROOT_ITEM_ID) : null;
+    }
+
+    /**
+     * The root of every configured drive.
+     *
+     * <p>This is what makes a multi-library site work without {@code connector.roots}. Before it, a two-drive
+     * configuration answered {@code null} and the operator had to write composite
+     * {@code <driveId>:<itemId>} ids out by hand, having first found the drive ids elsewhere.</p>
+     *
+     * <p>No network call, so it is safe to ask on every pass: the drive ids are configuration, and the root
+     * item alias is a constant Graph defines rather than something to look up.</p>
+     */
+    @Override
+    public List<String> getRootNodeIds() {
+        return settings.driveIds().stream()
+                .filter(driveId -> driveId != null && !driveId.isBlank())
+                .map(driveId -> nodeId(driveId.trim(), ROOT_ITEM_ID))
+                .toList();
     }
 
     /**

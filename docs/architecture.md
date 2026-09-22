@@ -210,6 +210,7 @@ public interface ContentSourceClient {
     default void clearSyncStatus(String nodeId) {}                                // optional sync-status clear
     default ConnectorSchema connectorSchema() { ... }                             // the settings this connector needs
     default String getRootNodeId() { return null; }                                // where a batch pass starts, or null
+    default List<String> getRootNodeIds() { ... }                                  // every root, defaulting to the one above
 }
 ```
 
@@ -308,9 +309,17 @@ three ways that all follow from not knowing the source:
   is `DiscoveryOutcome.incomplete`, which is what stops the reconciliation sweep from reading the gap as
   "deleted at source". A root that cannot be fetched at all propagates and fails the job.
 
-Where the walk starts comes from `connector.roots`, or from `ContentSourceClient.getRootNodeId()` when the
-connector names its own. Neither fails startup: a discovery pass with no entry point would report an empty
-source on every run.
+Where the walk starts comes from a selected scope, then `connector.roots`, then
+`ContentSourceClient.getRootNodeIds()` when the connector names its own. Roots are resolved once per pass
+rather than at startup, which is what lets an operator change a scope without a restart and keeps a connector
+that resolves its roots over the network off the boot path, where a transient source outage would otherwise be
+a container that will not start.
+
+Whether an absent scope is fatal depends on whether anything could supply one later. With no selection store
+configured it fails at startup, because a deployment that can name no root at all is a misconfiguration rather
+than an empty source to report on every run. With one configured it warns and starts, because choosing roots
+through the API is then the operator's next action, and a pass with an empty scope reports itself incomplete so
+the sweep cannot read it as authoritative.
 
 #### What a plugin connector's documents are readable by
 
