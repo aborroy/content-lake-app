@@ -257,12 +257,14 @@ CONNECTOR_SYNC_USERNAME=admin CONNECTOR_SYNC_PASSWORD=admin \
 |---|---|
 | `sharepoint.drive-ids` | Drives to ingest, comma separated. Required, and what a run is scoped to |
 | `sharepoint.client-id` | Application (client) id of the Entra ID app registration. Required |
-| `sharepoint.tenant-id` | Directory (tenant) id; the authority is derived from it. Required for `client-credentials` unless `sharepoint.authority` is set |
+| `sharepoint.tenant-id` | Directory (tenant) id; the authority is derived from it. Required for `client-credentials` and `device-code` unless `sharepoint.authority` is set |
 | `sharepoint.authority` | Entra ID authority, for a sovereign cloud only. Must be `https`: msal4j rejects any other scheme |
-| `sharepoint.auth-mode` | `client-credentials` (default, app-only) or `static-token`; see below |
+| `sharepoint.auth-mode` | `client-credentials` (default, app-only), `device-code` (delegated, as a named user) or `static-token`; see below |
 | `sharepoint.client-secret` | Client secret. Never printed. Supply this or a certificate, never both |
 | `sharepoint.certificate-path` / `sharepoint.certificate-password` | PKCS#12 client certificate. Preferred over a secret |
 | `sharepoint.access-token` | Bearer token for `static-token`. Development only, never printed |
+| `sharepoint.token-cache-path` | File holding the msal4j token cache for `device-code`. Required for that mode. Marked secret: the file contains a refresh token |
+| `sharepoint.scopes` | Delegated scopes for `device-code`. Defaults to `Sites.Read.All` plus `offline_access`. Ignored by the other modes |
 | `sharepoint.graph-base-url` | Graph endpoint. Defaults to `https://graph.microsoft.com/v1.0`; point it at the mock to run without a tenant |
 | `sharepoint.source-id` | Source alias stored in `cin_sourceId`. Defaults to the first drive id |
 | `sharepoint.include-paths` / `sharepoint.exclude-paths` | Path scope. Excludes are applied after includes and win |
@@ -380,6 +382,40 @@ Graph returns a complete permission set to a non-administrator.
 `content-lake-app-deployment/test/test-sharepoint.sh` is the end-to-end check, and the assertions that matter
 are the ACL ones: a document granted to one named user is not returned to a caller its ACL excludes, and a
 group-only document is returned to nobody.
+
+#### Running it as a named user, where the tenant will not grant application permissions
+
+`sharepoint.auth-mode=device-code` authenticates as a person instead of as an application. A human signs in
+once on the host with `scripts/sharepoint-device-login.sh` in the deployment repository, which prints a short
+code and a URL and then writes a token cache; the connector reads that cache and refreshes silently
+afterwards, so restarts need nobody. It is the mode for a tenant that will issue a public-client registration
+but not application permissions.
+
+Three things about it are not interchangeable with app-only, and all three should be understood before
+choosing it:
+
+- **It indexes one identity's view.** Graph returns item permissions by caller, so a nominal-user crawl
+  produces a faithful ACL only where the crawling identity owns the content, and content that identity cannot
+  read is *absent from the index* rather than present and unretrievable. That is a completeness limitation
+  rather than a security one, but it means the index answers "what can this person see" rather than "what is
+  in this site".
+- **Recovery needs a human.** A refresh token can be ended by expiry, a password reset or a Conditional
+  Access change, and only an interactive sign-in restores it. The connector reports the mode as not supported
+  for production at startup for exactly this reason.
+- **Sign-in cannot happen in the container.** The device-code call blocks for up to fifteen minutes, and the
+  service has no way to put a human in front of a browser. An empty or spent cache is therefore reported as a
+  configuration problem naming the command that fixes it, rather than as something a retry will resolve.
+
+The delegated permission to ask for is `Sites.Read.All`, which is the least-privileged one measured to serve
+every call this connector makes, including the item-permission reads the ACL mapping depends on, plus
+`offline_access` for the refresh token. `sharepoint.scopes` overrides that pair; it does not apply to the
+other two modes, because an app-only token is scoped by the permissions granted to the registration and Entra
+rejects resource scopes in a client-credentials request.
+
+The cache file holds a refresh token, which outlives the access tokens it mints and can be redeemed from
+anywhere. Treat it as a credential: the deployment mounts it read-only, keeps it out of version control, and
+narrows its permissions. Because the mount is read-only the connector holds rotated tokens in memory and says
+so once, which costs nothing until the stored token finally expires.
 
 ### Connector Schema And Startup Validation
 

@@ -77,6 +77,8 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
     static final String EVERYONE_CLAIMS_SETTING = SOURCE_TYPE + ".everyone-claims";
     static final String RESOURCE_UNITS_PER_MINUTE_SETTING = SOURCE_TYPE + ".resource-units-per-minute";
     static final String RESOURCE_UNIT_BURST_SETTING = SOURCE_TYPE + ".resource-unit-burst";
+    static final String SCOPES_SETTING = SOURCE_TYPE + ".scopes";
+    static final String TOKEN_CACHE_PATH_SETTING = SOURCE_TYPE + ".token-cache-path";
 
     static final String DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
     static final String DEFAULT_AUTHORITY_HOST = "https://login.microsoftonline.com/";
@@ -115,11 +117,12 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                         "Entra ID authority, only for a sovereign cloud. Must be https: msal4j rejects any "
                                 + "other scheme")
                 .enumeration(AUTH_MODE_SETTING,
-                        "How to authenticate: client-credentials (app-only, the only supported deployment "
-                                + "mode) or static-token (a token supplied directly, for a local mock run or "
-                                + "for validating ACL mapping against your own OneDrive; it cannot be "
-                                + "refreshed)",
-                        false, List.of("client-credentials", "static-token"))
+                        "How to authenticate: client-credentials (app-only, for an unattended crawl across a "
+                                + "tenant), device-code (delegated tokens for a named user, refreshed from the "
+                                + "cache at " + TOKEN_CACHE_PATH_SETTING + "; indexes that user's view only), "
+                                + "or static-token (a token supplied directly, for a local mock run or for "
+                                + "validating ACL mapping against your own OneDrive; it cannot be refreshed)",
+                        false, List.of("client-credentials", "device-code", "static-token"))
                 .secret(CLIENT_SECRET_SETTING,
                         "Client secret. Supply this or " + CERTIFICATE_PATH_SETTING + ", never both", false)
                 .optional(CERTIFICATE_PATH_SETTING, ConnectorSchema.FieldType.STRING,
@@ -128,6 +131,16 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                 .secret(CERTIFICATE_PASSWORD_SETTING, "Password for that certificate", false)
                 .secret(ACCESS_TOKEN_SETTING,
                         "Bearer token for auth-mode=static-token. Development only", false)
+                .secret(TOKEN_CACHE_PATH_SETTING,
+                        "File holding the msal4j token cache for auth-mode=device-code. Required for that "
+                                + "mode. Marked secret because the file contains a refresh token, which "
+                                + "outlives the access tokens it mints. Populate it on the host with "
+                                + SharePointDeviceLogin.COMMAND_HINT + " and mount it read-only", false)
+                .optional(SCOPES_SETTING, ConnectorSchema.FieldType.LIST,
+                        "Delegated Graph scopes for auth-mode=device-code, comma separated; defaults to "
+                                + "Sites.Read.All plus offline_access. Ignored by the other modes, because an "
+                                + "app-only token is scoped by the registration's granted permissions and "
+                                + "Entra rejects resource scopes in a client-credentials request")
                 .optional(GRAPH_BASE_URL_SETTING, ConnectorSchema.FieldType.URL,
                         "Graph endpoint; defaults to " + DEFAULT_GRAPH_BASE_URL + ". Point it at the mock "
                                 + "Graph service to run without a tenant")
@@ -207,16 +220,31 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
         String tenantId = context.property(TENANT_ID_SETTING);
         String authority = context.property(AUTHORITY_SETTING);
 
-        if (authMode == SharePointConnectorSettings.AuthMode.CLIENT_CREDENTIALS
-                && (authority == null || authority.isBlank())) {
+        // Every mode that talks to Entra needs an authority. Only static-token does not, because it never
+        // acquires anything. Testing for that one rather than listing the others means a mode added later
+        // gets the check by default instead of silently running with a null authority.
+        boolean acquiresTokens = authMode != SharePointConnectorSettings.AuthMode.STATIC_TOKEN;
+
+        if (acquiresTokens && (authority == null || authority.isBlank())) {
             if (tenantId == null || tenantId.isBlank()) {
-                // Conditionally required, which ConnectorSchema cannot express: the tenant id is needed for
-                // client-credentials and meaningless for static-token, so naming it here is the only way an
-                // operator gets told which of the two settings to supply.
-                throw new GraphException("auth-mode is client-credentials, so either " + TENANT_ID_SETTING
-                        + " or " + AUTHORITY_SETTING + " must be set");
+                // Conditionally required, which ConnectorSchema cannot express: the tenant id is needed by
+                // the modes that acquire a token and meaningless for static-token, so naming it here is the
+                // only way an operator gets told which of the two settings to supply.
+                throw new GraphException("auth-mode is " + settingValue(authMode) + ", so either "
+                        + TENANT_ID_SETTING + " or " + AUTHORITY_SETTING + " must be set");
             }
             authority = DEFAULT_AUTHORITY_HOST + tenantId.trim();
+        }
+
+        String tokenCachePath = context.property(TOKEN_CACHE_PATH_SETTING);
+        if (authMode == SharePointConnectorSettings.AuthMode.DEVICE_CODE
+                && (tokenCachePath == null || tokenCachePath.isBlank())) {
+            // Same reason: conditionally required. Without it the mode has nowhere to read the refresh token
+            // a sign-in produced, and the failure would otherwise surface on the first Graph call instead of
+            // at load, where it names the setting.
+            throw new GraphException("auth-mode is device-code, so " + TOKEN_CACHE_PATH_SETTING
+                    + " must be set. Populate it on the host with " + SharePointDeviceLogin.COMMAND_HINT
+                    + " and mount the file read-only.");
         }
 
         String certificatePath = context.property(CERTIFICATE_PATH_SETTING);
@@ -241,9 +269,19 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
                 SharePointConnectorSettings.PermissionsMode.of(context.property(PERMISSIONS_MODE_SETTING)),
                 everyoneClaims(context),
                 context.intProperty(RESOURCE_UNITS_PER_MINUTE_SETTING, DEFAULT_RESOURCE_UNITS_PER_MINUTE),
-                context.intProperty(RESOURCE_UNIT_BURST_SETTING, DEFAULT_RESOURCE_UNIT_BURST));
+                context.intProperty(RESOURCE_UNIT_BURST_SETTING, DEFAULT_RESOURCE_UNIT_BURST),
+                context.listProperty(SCOPES_SETTING),
+                tokenCachePath == null || tokenCachePath.isBlank() ? null : Path.of(tokenCachePath.trim()));
     }
 
+    /**
+     * Parses the auth mode, falling back to the app-only one for anything unrecognised.
+     *
+     * <p>The fallback is not the error path an operator sees: {@code auth-mode} is an {@code ENUM} schema
+     * field, so a typo is reported by schema validation naming the allowed values, before this runs. Any new
+     * mode must be added to that list in {@link #schema()} as well as here, or the jar is refused at load
+     * with a schema problem rather than reaching this parse at all.</p>
+     */
     private static SharePointConnectorSettings.AuthMode authMode(ConnectorContext context) {
         String value = context.property(AUTH_MODE_SETTING);
         if (value == null || value.isBlank()) {
@@ -251,7 +289,17 @@ public class SharePointConnectorPlugin implements ConnectorPlugin {
         }
         return switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
             case "static-token", "static_token" -> SharePointConnectorSettings.AuthMode.STATIC_TOKEN;
+            case "device-code", "device_code" -> SharePointConnectorSettings.AuthMode.DEVICE_CODE;
             default -> SharePointConnectorSettings.AuthMode.CLIENT_CREDENTIALS;
+        };
+    }
+
+    /** The setting spelling of a mode, for an error message an operator has to act on. */
+    private static String settingValue(SharePointConnectorSettings.AuthMode authMode) {
+        return switch (authMode) {
+            case CLIENT_CREDENTIALS -> "client-credentials";
+            case DEVICE_CODE -> "device-code";
+            case STATIC_TOKEN -> "static-token";
         };
     }
 

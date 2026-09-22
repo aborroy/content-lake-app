@@ -62,7 +62,8 @@ class SharePointConnectorClientTest {
                 SharePointAclMapper.GroupGrants.MAP,
                 mode,
                 Set.of(),
-                0, 1);
+                0, 1,
+                List.of(), null);
     }
 
     private static MockGraphServer.Options options() {
@@ -89,7 +90,7 @@ class SharePointConnectorClientTest {
                 List.of(), List.of(), List.of(), List.of(),
                 SharePointAclMapper.AclFallback.FAIL_CLOSED, SharePointAclMapper.GroupGrants.MAP,
                 SharePointConnectorSettings.PermissionsMode.PER_ITEM,
-                Set.of(), 0, 1);
+                Set.of(), 0, 1, List.of(), null);
         SharePointConnectorClient client = new SharePointConnectorClient(twoDrives,
                 new GraphHttpClient(mock.graphBaseUrl(), twoDrives.tokenProvider(),
                         ResourceUnitMeter.unmetered()));
@@ -295,7 +296,7 @@ class SharePointConnectorClientTest {
                 List.of(DRIVE), null, List.of(), List.of(), List.of(), List.of(),
                 SharePointAclMapper.AclFallback.PUBLIC, SharePointAclMapper.GroupGrants.MAP,
                 SharePointConnectorSettings.PermissionsMode.PER_ITEM,
-                Set.of(), 0, 1);
+                Set.of(), 0, 1, List.of(), null);
         SharePointConnectorClient client = new SharePointConnectorClient(explicitlyPublic,
                 new GraphHttpClient(mock.graphBaseUrl(), explicitlyPublic.tokenProvider(),
                         ResourceUnitMeter.unmetered()));

@@ -214,4 +214,89 @@ class SharePointConnectorPluginTest {
         assertThat(SharePointConnectorSettings.PermissionsMode.of("HIERARCHICAL"))
                 .isEqualTo(SharePointConnectorSettings.PermissionsMode.HIERARCHICAL);
     }
+
+    private static Map<String, String> minimalDeviceCode() {
+        Map<String, String> values = new HashMap<>();
+        values.put("sharepoint.drive-ids", "b!drive-one");
+        values.put("sharepoint.client-id", "client-guid");
+        values.put("sharepoint.tenant-id", "tenant-guid");
+        values.put("sharepoint.auth-mode", "device-code");
+        values.put("sharepoint.token-cache-path", "/var/lib/content-lake/sharepoint-auth/msal-cache.json");
+        return values;
+    }
+
+    @Test
+    void declaresDeviceCodeAmongTheAllowedAuthModes() {
+        // The load-bearing half of adding a mode. auth-mode is an ENUM field, so a mode handled in the parser
+        // but absent from this list is refused by schema validation before the parser ever runs, and the
+        // symptom is a jar that will not load rather than a bad auth mode.
+        List<String> modes = new SharePointConnectorPlugin().schema().fields().stream()
+                .filter(field -> field.name().equals("sharepoint.auth-mode"))
+                .flatMap(field -> field.allowedValues().stream())
+                .toList();
+
+        assertThat(modes).containsExactlyInAnyOrder("client-credentials", "device-code", "static-token");
+        assertThat(new SharePointConnectorPlugin().schema()
+                .validate(minimalDeviceCode()::get))
+                .as("a device-code configuration satisfies its own schema")
+                .isEmpty();
+    }
+
+    @Test
+    void acceptsDeviceCodeAndDerivesItsAuthorityFromTheTenantId() {
+        SharePointConnectorSettings settings =
+                new SharePointConnectorPlugin().settingsFrom(new MapContext(minimalDeviceCode()));
+
+        assertThat(settings.authMode()).isEqualTo(SharePointConnectorSettings.AuthMode.DEVICE_CODE);
+        // Every mode that acquires a token needs an authority; only static-token does not.
+        assertThat(settings.authority()).isEqualTo("https://login.microsoftonline.com/tenant-guid");
+        assertThat(settings.tokenCachePath()).isNotNull();
+    }
+
+    @Test
+    void refusesDeviceCodeWithoutSomewhereToKeepTheRefreshToken() {
+        Map<String, String> values = minimalDeviceCode();
+        values.remove("sharepoint.token-cache-path");
+
+        assertThatThrownBy(() -> new SharePointConnectorPlugin().settingsFrom(new MapContext(values)))
+                .isInstanceOf(GraphException.class)
+                .hasMessageContaining("sharepoint.token-cache-path")
+                .hasMessageContaining(SharePointDeviceLogin.COMMAND_HINT);
+    }
+
+    @Test
+    void refusesDeviceCodeWithNeitherATenantNorAnAuthority() {
+        Map<String, String> values = minimalDeviceCode();
+        values.remove("sharepoint.tenant-id");
+
+        assertThatThrownBy(() -> new SharePointConnectorPlugin().settingsFrom(new MapContext(values)))
+                .isInstanceOf(GraphException.class)
+                .hasMessageContaining("device-code")
+                .hasMessageContaining("sharepoint.tenant-id")
+                .hasMessageContaining("sharepoint.authority");
+    }
+
+    @Test
+    void marksTheTokenCachePathSecretBecauseItHoldsARefreshToken() {
+        // It is a file path rather than a credential itself, but the file outlives the access tokens it mints
+        // and can be redeemed from anywhere, so the schema must not invite it into a support ticket.
+        assertThat(new SharePointConnectorPlugin().schema().fields().stream()
+                .filter(field -> field.name().equals("sharepoint.token-cache-path"))
+                .allMatch(ConnectorSchema.Field::secret))
+                .isTrue();
+    }
+
+    @Test
+    void buildsADeviceCodeClientWithoutTouchingTheNetwork() {
+        // Same contract as the other modes: the host builds a client for every mounted jar in all six
+        // ingesters, so construction that reached Entra would let one connector's outage break a deployment
+        // running a different one. A missing cache file must not fail here either; it fails on first use.
+        Map<String, String> values = minimalDeviceCode();
+        values.put("sharepoint.graph-base-url", "http://127.0.0.1:1/v1.0");
+        values.put("sharepoint.token-cache-path", "/nonexistent/msal-cache.json");
+
+        SharePointConnectorPlugin plugin = new SharePointConnectorPlugin();
+
+        assertThat(plugin.createClient(new MapContext(values))).isNotNull();
+    }
 }

@@ -58,7 +58,9 @@ public record SharePointConnectorSettings(String graphBaseUrl,
                                           PermissionsMode permissionsMode,
                                           Set<String> everyoneClaims,
                                           int resourceUnitsPerMinute,
-                                          int resourceUnitBurst) {
+                                          int resourceUnitBurst,
+                                          List<String> scopes,
+                                          Path tokenCachePath) {
 
     public SharePointConnectorSettings {
         driveIds = driveIds == null ? List.of() : List.copyOf(driveIds);
@@ -68,6 +70,7 @@ public record SharePointConnectorSettings(String graphBaseUrl,
         excludeMimeTypes = excludeMimeTypes == null ? List.of() : List.copyOf(excludeMimeTypes);
         everyoneClaims = everyoneClaims == null ? Set.of() : Set.copyOf(everyoneClaims);
         permissionsMode = permissionsMode == null ? PermissionsMode.PER_ITEM : permissionsMode;
+        scopes = scopes == null ? List.of() : List.copyOf(scopes);
     }
 
     /** The source alias, defaulting to the first configured drive so a single-drive run needs no setting. */
@@ -78,26 +81,44 @@ public record SharePointConnectorSettings(String graphBaseUrl,
         return driveIds.isEmpty() ? "sharepoint" : driveIds.get(0);
     }
 
-    /** Builds the token provider this configuration asks for. Does no network I/O. */
+    /**
+     * Builds the token provider this configuration asks for. Does no network I/O.
+     *
+     * <p>Note the client-credentials scope stays {@code null}, which the provider reads as the app-only
+     * {@code .default} form. {@code sharepoint.scopes} is deliberately not threaded into it: app-only tokens
+     * are scoped by the permissions granted to the registration, and resource scopes in a client-credentials
+     * request are rejected by Entra. Mixing the two settings would turn a configuration mistake into a
+     * runtime 400 from the token endpoint rather than something the schema can explain.</p>
+     */
     public GraphTokenProvider tokenProvider() {
         return switch (authMode) {
             case STATIC_TOKEN -> new StaticTokenProvider(accessToken);
             case CLIENT_CREDENTIALS -> new ClientCredentialsTokenProvider(authority, clientId, clientSecret,
                     certificate, certificatePassword, null);
+            case DEVICE_CODE -> new DeviceCodeTokenProvider(authority, clientId, scopes, tokenCachePath);
         };
     }
 
     /** How the connector authenticates. */
     public enum AuthMode {
 
-        /** App-only tokens from Entra ID. The only supported deployment mode. */
+        /** App-only tokens from Entra ID. The right answer for an unattended crawl across a tenant. */
         CLIENT_CREDENTIALS,
 
         /**
          * A bearer token handed over in configuration, for a local mock run or for validating ACL mapping
          * against a developer's own OneDrive. Not refreshable, so not a deployment mode.
          */
-        STATIC_TOKEN
+        STATIC_TOKEN,
+
+        /**
+         * Delegated tokens for a named user, refreshed silently from a cache a human populated once with
+         * {@link SharePointDeviceLogin}. For a tenant that will not issue application permissions.
+         *
+         * <p>Indexes one identity's view: content the signed-in user cannot read is absent from the index
+         * rather than present and unretrievable.</p>
+         */
+        DEVICE_CODE
     }
 
     /**
