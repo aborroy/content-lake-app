@@ -414,7 +414,7 @@ class ConnectorDiscoveryServiceTest {
         };
 
         ConnectorDiscoveryService service = new ConnectorDiscoveryService(
-                selected(source, selective), List.of(ROOT), new ConnectorBatchProperties());
+                selected(source, selective), () -> List.of(ROOT), new ConnectorBatchProperties());
 
         // A pruned subtree is a scope decision, not a coverage gap.
         assertThat(service.discover()).extracting(SourceNode::nodeId).containsExactly("keep.txt");
@@ -465,7 +465,7 @@ class ConnectorDiscoveryServiceTest {
             java.util.function.Consumer<ConnectorBatchProperties> customiser) {
         ConnectorBatchProperties props = new ConnectorBatchProperties();
         customiser.accept(props);
-        return new ConnectorDiscoveryService(selected(client, new DefaultScopeResolver()), roots, props)
+        return new ConnectorDiscoveryService(selected(client, new DefaultScopeResolver()), () -> roots, props)
                 .discoverTallied();
     }
 

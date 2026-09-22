@@ -95,6 +95,42 @@ count ingestion believed it produced: a non-zero value against a measured `chunk
 signature of an embedding phase that never completed. A `null` verdict with a populated `error` means a
 measurement could not be taken, and is deliberately not a guess.
 
+### Plugin Batch Ingester: root selection (port 9096)
+
+Which roots the loaded connector walks, changeable without a restart. Available only when
+`connector.selection.store` is set to something other than `none`; otherwise every call answers `501`, because
+an endpoint that accepted a selection nothing would ever read is worse than a missing one.
+
+```bash
+# What the next pass would walk, and where that came from
+curl http://localhost:9096/api/selection -u admin:admin
+
+# Choose roots. Every id is resolved against the connector before anything is stored
+curl -X PUT http://localhost:9096/api/selection \
+  -u admin:admin \
+  -H "Content-Type: application/json" \
+  -d '{"rootNodeIds": ["b!drive-id:folder-item-id", "b!drive-id:another-folder"]}'
+
+# Forget the selection, falling back to connector.roots and then to the connector's own root
+curl -X DELETE http://localhost:9096/api/selection -u admin:admin
+```
+
+The response carries `chosen`, which is the distinction the precedence chain rests on:
+
+| `chosen` | `rootNodeIds` | What a pass does |
+|---|---|---|
+| `false` | empty | Falls through to `connector.roots`, then to the connector's own root |
+| `true` | populated | Walks exactly those roots |
+| `true` | empty | Walks nothing, and reports the pass **incomplete** so the reconciliation sweep does not treat it as authoritative |
+
+That last row is why an empty selection is stored rather than deleted. A pass that walked nothing and claimed
+to be complete would have the sweep propose deleting every document of the source.
+
+`PUT` rejects the whole request with `400` and lists the offenders when any node id does not resolve. A
+selection naming a node the source does not have would otherwise produce a pass that is permanently
+incomplete: the sync succeeds, indexes nothing from that root, and the sweep silently declines to act, which is
+the hardest state to diagnose from outside.
+
 ### RAG Service (port 9091)
 
 #### RAG Prompt

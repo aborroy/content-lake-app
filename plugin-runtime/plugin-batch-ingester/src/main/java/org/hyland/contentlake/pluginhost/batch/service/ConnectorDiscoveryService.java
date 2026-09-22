@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.pluginhost.batch.config.ConnectorBatchProperties;
 import org.hyland.contentlake.pluginhost.batch.config.SelectedConnector;
 import org.hyland.contentlake.service.DiscoveryOutcome;
+import org.hyland.contentlake.service.RootSelection;
 import org.hyland.contentlake.spi.ContentSourceClient;
 import org.hyland.contentlake.spi.ScopeResolver;
 import org.hyland.contentlake.spi.SourceChangePage;
@@ -13,7 +14,9 @@ import org.hyland.contentlake.spi.SourceTombstone;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * Walks a plugin connector's containers through the SPI alone, returning the in-scope documents (#132).
@@ -53,35 +56,47 @@ public class ConnectorDiscoveryService {
 
     private final ContentSourceClient client;
     private final ScopeResolver scopeResolver;
-    private final List<String> roots;
+    private final Supplier<List<String>> roots;
     private final int pageSize;
     private final int maxDepth;
 
+    /**
+     * @param roots resolved once per pass rather than held as a list, so an operator can change the scope
+     *              without restarting the container, and so a connector that resolves its own roots over the
+     *              network does not put that call on the startup path. A Graph or CMIS outage during bean
+     *              construction would otherwise be a boot loop rather than a failed job.
+     */
     public ConnectorDiscoveryService(SelectedConnector connector,
-                                     List<String> roots,
+                                     Supplier<List<String>> roots,
                                      ConnectorBatchProperties properties) {
         this.client = connector.client();
         this.scopeResolver = connector.scopeResolver();
-        this.roots = List.copyOf(roots);
+        this.roots = roots;
         this.pageSize = Math.max(1, properties.getPageSize());
         this.maxDepth = Math.max(1, properties.getMaxDepth());
     }
 
     /**
-     * The entry points for a batch pass: configured roots when there are any, otherwise whatever the
-     * connector names as its own.
+     * The entry points for a batch pass, in precedence order: the roots an operator selected, then the
+     * configured ones, then whatever the connector names as its own.
      *
-     * <p>Resolved at startup rather than per sync, so a connector that can neither be configured with a root
-     * nor name one fails the container rather than reporting an empty source on every run.</p>
+     * <p>A selection that is present and empty is <em>not</em> a fall-through. It means somebody cleared the
+     * choice, and treating that as "walk everything" would silently re-ingest a whole source the moment a
+     * picker was emptied. That is why the selection arrives as an {@link Optional} of a list rather than as a
+     * list.</p>
      *
-     * @throws IllegalStateException when neither source yields a root
+     * @throws IllegalStateException when no selection is present and neither configuration nor the connector
+     *                               yields a root. Callers that can tolerate an empty scope, such as a
+     *                               deployment with a selection store configured, check for that first.
      */
-    public static List<String> resolveRoots(List<String> configured, ContentSourceClient client) {
-        List<String> fromConfig = configured == null ? List.of() : configured.stream()
-                .filter(root -> root != null && !root.isBlank())
-                .map(String::trim)
-                .distinct()
-                .toList();
+    public static List<String> resolveRoots(Optional<RootSelection> selection,
+                                            List<String> configured,
+                                            ContentSourceClient client) {
+        if (selection != null && selection.isPresent()) {
+            return clean(selection.get().rootNodeIds());
+        }
+
+        List<String> fromConfig = clean(configured);
         if (!fromConfig.isEmpty()) {
             return fromConfig;
         }
@@ -94,7 +109,21 @@ public class ConnectorDiscoveryService {
         throw new IllegalStateException(
                 "Connector '" + client.getSourceType() + "' does not name a root container and connector.roots "
                         + "is empty, so a batch pass has nowhere to start. Set connector.roots to one or more "
-                        + "node ids, or implement ContentSourceClient.getRootNodeId() in the connector.");
+                        + "node ids, select roots through the selection API, or implement "
+                        + "ContentSourceClient.getRootNodeId() in the connector.");
+    }
+
+    /** Back-compatible overload for a deployment with no selection store. */
+    public static List<String> resolveRoots(List<String> configured, ContentSourceClient client) {
+        return resolveRoots(Optional.empty(), configured, client);
+    }
+
+    private static List<String> clean(List<String> values) {
+        return values == null ? List.of() : values.stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(String::trim)
+                .distinct()
+                .toList();
     }
 
     /** A discovery pass and its own account of whether it covered its whole scope. */
@@ -262,7 +291,21 @@ public class ConnectorDiscoveryService {
         List<String> reasons = new ArrayList<>();
         Set<String> visited = new LinkedHashSet<>();
 
-        for (String rootId : roots) {
+        List<String> passRoots = roots.get();
+
+        if (passRoots.isEmpty()) {
+            // An operator cleared the selection. Reported as incomplete rather than as an empty but successful
+            // pass, because the reconciliation sweep deletes what an authoritative enumeration did not mention:
+            // calling this complete would delete the entire source the moment a picker was emptied.
+            String reason = "No root is selected for this source, so there was nothing to walk";
+            log.warn("Connector discovery has no roots to walk. The scope is empty, so this pass indexed "
+                    + "nothing and is reported as incomplete; the reconciliation sweep will not treat it as "
+                    + "authoritative. Select roots, or set connector.roots.");
+            return new ConnectorDiscovery(List.of(),
+                    DiscoveryOutcome.incomplete(List.of(), List.of(reason)));
+        }
+
+        for (String rootId : passRoots) {
             SourceNode root = client.getNode(rootId);
             if (root == null) {
                 // Distinct from a listing failure: the connector answered, and the answer is that the
@@ -282,7 +325,7 @@ public class ConnectorDiscoveryService {
                 : DiscoveryOutcome.incomplete(resolvedRootPaths, reasons);
 
         log.info("Connector discovery over {} root(s) found {} in-scope node(s); pass {}",
-                roots.size(), discovered.size(),
+                passRoots.size(), discovered.size(),
                 outcome.complete() ? "complete" : "incomplete: " + outcome.reasonSummary());
         return new ConnectorDiscovery(discovered, outcome);
     }

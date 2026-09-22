@@ -7,7 +7,6 @@ import org.hyland.contentlake.model.HxprDocument;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -129,17 +128,12 @@ public class HxprSyncCursorStore implements SyncCursorStore {
     /**
      * The state document as hxpr receives it: a name and the cursor properties, and deliberately none of
      * the fields that would make it visible to a sweep, a source lookup or a search.
+     *
+     * <p>Shared with every other host state store through {@link HxprStateDocuments}, so the three omissions
+     * that keep such a document out of a sweep's reach have one implementation rather than one per store.</p>
      */
     private HxprDocument stateDocument(String sysName, Map<String, Object> props) {
-        HxprDocument document = new HxprDocument();
-        if (sysName != null) {
-            document.setSysPrimaryType("SysFile");
-            document.setSysName(sysName);
-        }
-        document.setSysMixinTypes(List.of(HxprDocument.MIXIN_CIN_REMOTE));
-        document.setCinIngestProperties(props);
-        document.setCinIngestPropertyNames(new ArrayList<>(props.keySet()));
-        return document;
+        return HxprStateDocuments.stateDocument(sysName, props);
     }
 
     /**
@@ -148,19 +142,11 @@ public class HxprSyncCursorStore implements SyncCursorStore {
      * id so the substitution cannot be mistaken for the source's own identifier.
      */
     static String documentName(String qualifiedSourceId) {
-        String safe = qualifiedSourceId == null ? "" : qualifiedSourceId.replaceAll("[^A-Za-z0-9._-]", "-");
-        return "cursor-" + (safe.isBlank() ? "unknown" : safe);
+        return HxprStateDocuments.documentName("cursor-", qualifiedSourceId);
     }
 
     private static String normalizeFolder(String path) {
-        String trimmed = path == null ? "" : path.trim();
-        while (trimmed.endsWith("/")) {
-            trimmed = trimmed.substring(0, trimmed.length() - 1);
-        }
-        if (trimmed.isBlank()) {
-            throw new IllegalArgumentException("A cursor folder path is required");
-        }
-        return trimmed.startsWith("/") ? trimmed : "/" + trimmed;
+        return HxprStateDocuments.normalizeFolder(path, "cursor");
     }
 
     private static String asString(Object value) {

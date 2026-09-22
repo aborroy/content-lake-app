@@ -16,11 +16,15 @@ import org.hyland.contentlake.extractor.ExtractionFormat;
 import org.hyland.contentlake.extractor.TikaTextExtractor;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.hyland.contentlake.service.EmbeddingTypeResolver;
+import org.hyland.contentlake.service.FileRootSelectionStore;
 import org.hyland.contentlake.service.FileSyncCursorStore;
+import org.hyland.contentlake.service.HxprRootSelectionStore;
 import org.hyland.contentlake.service.HxprSyncCursorStore;
+import org.hyland.contentlake.service.InMemoryRootSelectionStore;
 import org.hyland.contentlake.service.InMemorySyncCursorStore;
 import org.hyland.contentlake.service.IndexReconciliationService;
 import org.hyland.contentlake.service.NodeSyncService;
+import org.hyland.contentlake.service.RootSelectionStore;
 import org.hyland.contentlake.service.SyncCursorStore;
 import org.hyland.contentlake.service.chunking.NoiseReductionService;
 import org.hyland.contentlake.service.chunking.SimpleChunkingService;
@@ -158,16 +162,93 @@ public class AppConfig {
     }
 
     /**
-     * Discovery, with the roots resolved here so a connector that names none and is configured with none
-     * fails the container rather than reporting an empty source on every run.
+     * Where the roots an operator chose are kept.
+     *
+     * <p>{@code NONE} by default, which is what keeps this feature additive: with no store the precedence chain
+     * is the one that existed before it, so no deployment changes behaviour by upgrading.</p>
      */
     @Bean
-    public ConnectorDiscoveryService connectorDiscoveryService(SelectedConnector connector,
-                                                              ConnectorBatchProperties props) {
-        List<String> roots = ConnectorDiscoveryService.resolveRoots(props.getRoots(), connector.client());
-        log.info("Connector '{}' will be walked from {} root(s): {}",
-                connector.sourceType(), roots.size(), roots);
-        return new ConnectorDiscoveryService(connector, roots, props);
+    public RootSelectionStore rootSelectionStore(HxprService hxprService,
+                                                 HxprDocumentApi documentApi,
+                                                 ConnectorBatchProperties props) {
+        ConnectorBatchProperties.Selection selection = props.getSelection();
+        RootSelectionStore store = switch (selection.getStore()) {
+            case NONE -> null;
+            case HXPR -> new HxprRootSelectionStore(hxprService, documentApi, selection.getHxprPath());
+            case FILE -> new FileRootSelectionStore(Path.of(selection.getFile()));
+            case MEMORY -> new InMemoryRootSelectionStore();
+        };
+        if (store != null) {
+            log.info("Root selections for this connector are kept in {}, and can be changed through "
+                    + "/api/selection without a restart", selection.getStore());
+        }
+        return store;
+    }
+
+    /**
+     * Discovery, with the roots resolved once per pass rather than here.
+     *
+     * <p>They used to be resolved at startup, which made a connector that names none and is configured with
+     * none fail the container. Two things made that untenable. An operator cannot change a scope that was read
+     * once into an immutable list, and a connector that resolves its own roots over the network would put that
+     * call on the startup path, turning a transient source outage into a boot loop rather than a failed job.</p>
+     *
+     * <p>The startup check is kept where it still applies. With no selection store there is nothing that could
+     * supply roots later, so a deployment that can name none still fails here, exactly as before. With a store
+     * configured, an absent selection is a state an operator is expected to resolve through the API, so it
+     * warns and starts, and a pass with no roots reports itself incomplete rather than authoritative.</p>
+     */
+    @Bean
+    public ConnectorDiscoveryService connectorDiscoveryService(
+            SelectedConnector connector,
+            ConnectorBatchProperties props,
+            ObjectProvider<RootSelectionStore> selectionStores) {
+
+        RootSelectionStore selectionStore = selectionStores.getIfAvailable();
+        String qualifiedSourceId = IndexReconciliationService.qualifiedSourceId(connector.client());
+
+        if (selectionStore == null) {
+            List<String> roots = ConnectorDiscoveryService.resolveRoots(props.getRoots(), connector.client());
+            log.info("Connector '{}' will be walked from {} root(s): {}",
+                    connector.sourceType(), roots.size(), roots);
+            return new ConnectorDiscoveryService(connector, () -> roots, props);
+        }
+
+        logInitialScope(connector, props, selectionStore, qualifiedSourceId);
+
+        return new ConnectorDiscoveryService(connector,
+                () -> ConnectorDiscoveryService.resolveRoots(
+                        selectionStore.load(qualifiedSourceId), props.getRoots(), connector.client()),
+                props);
+    }
+
+    /**
+     * One line at startup saying what the next pass would walk.
+     *
+     * <p>Only a log line: it must not fail the container, because with a selection store the operator's next
+     * step is to choose roots through the API, and refusing to start would make that impossible.
+     */
+    private void logInitialScope(SelectedConnector connector,
+                                 ConnectorBatchProperties props,
+                                 RootSelectionStore selectionStore,
+                                 String qualifiedSourceId) {
+        try {
+            List<String> roots = ConnectorDiscoveryService.resolveRoots(
+                    selectionStore.load(qualifiedSourceId), props.getRoots(), connector.client());
+            if (roots.isEmpty()) {
+                log.warn("Connector '{}' has an empty root selection, so a sync now would index nothing and "
+                        + "report itself incomplete. Choose roots with PUT /api/selection.",
+                        connector.sourceType());
+            } else {
+                log.info("Connector '{}' will be walked from {} root(s): {}",
+                        connector.sourceType(), roots.size(), roots);
+            }
+        } catch (RuntimeException e) {
+            // Includes the source being unreachable at boot, which is exactly the boot loop this change exists
+            // to prevent. Roots are resolved again per pass, so this costs a log line and nothing else.
+            log.warn("Could not determine the initial scope for connector '{}': {}. It is resolved again on "
+                    + "each pass, so this is not fatal.", connector.sourceType(), e.getMessage());
+        }
     }
 
     /**

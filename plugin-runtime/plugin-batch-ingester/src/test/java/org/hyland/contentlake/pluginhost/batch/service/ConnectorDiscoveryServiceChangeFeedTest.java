@@ -259,7 +259,7 @@ class ConnectorDiscoveryServiceChangeFeedTest {
         };
 
         ConnectorDiscoveryService.ConnectorChanges changes =
-                new ConnectorDiscoveryService(selected(feed, selective), List.of("root"),
+                new ConnectorDiscoveryService(selected(feed, selective), () -> List.of("root"),
                         new ConnectorBatchProperties())
                         .discoverIncremental("cursor-1", 200, 100);
 
@@ -313,7 +313,7 @@ class ConnectorDiscoveryServiceChangeFeedTest {
                                                                   String cursor,
                                                                   int pageSize,
                                                                   int maxPages) {
-        return new ConnectorDiscoveryService(selected(client, new DefaultScopeResolver()), List.of("root"),
+        return new ConnectorDiscoveryService(selected(client, new DefaultScopeResolver()), () -> List.of("root"),
                 new ConnectorBatchProperties())
                 .discoverIncremental(cursor, pageSize, maxPages);
     }

@@ -67,6 +67,15 @@ public class ConnectorBatchProperties {
     /** Where the host keeps each source's feed position. */
     private Cursor cursor = new Cursor();
 
+    /**
+     * Where the host keeps the roots an operator chose, so a scope change needs no restart.
+     *
+     * <p>Off by default, which preserves exactly today's behaviour: with no store, roots come from
+     * {@code connector.roots} and then from the connector, and a deployment that can supply neither still
+     * fails at startup rather than reporting an empty source on every run.</p>
+     */
+    private Selection selection = new Selection();
+
     private Security security = new Security();
 
     /**
@@ -145,6 +154,50 @@ public class ConnectorBatchProperties {
              * Nothing survives a restart, so every run after one is a full walk. For dev, and the honest
              * answer for a container with neither a mount nor write access to hxpr.
              */
+            MEMORY
+        }
+    }
+
+    /**
+     * Where the host keeps the roots an operator chose for a source.
+     *
+     * <p>Mirrors {@link Cursor} rather than sharing it. Both are keyed by the qualified source id, so one
+     * store would put a source's cursor and its selection at the same path, and the generation counter a
+     * cursor carries has no meaning for a selection.</p>
+     *
+     * <p>Note that both the {@code HXPR} and {@code FILE} stores are wiped by {@code make clean}: one lives in
+     * the index it wipes, the other on the state volume it removes. That is correct, because a selection is
+     * the scope of an index that no longer exists. A selection does survive a container restart, which is the
+     * case that distinguishes this from the startup configuration it replaces.</p>
+     */
+    @Data
+    public static class Selection {
+
+        /** Which store to use. {@code NONE} is the default and keeps today's behaviour exactly. */
+        private Store store = Store.NONE;
+
+        /**
+         * Folder for the state documents when {@code store} is {@code HXPR}.
+         *
+         * <p>Deliberately not the cursor folder. The two would otherwise collide per source.</p>
+         */
+        private String hxprPath = "/content-lake/_state/roots";
+
+        /** State file when {@code store} is {@code FILE}. Needs a writable mount. */
+        private String file = "/var/lib/content-lake/connector/roots.json";
+
+        public enum Store {
+            /**
+             * No selection is stored and the API that writes one is not available. Roots come from
+             * {@code connector.roots} and then from the connector, and a deployment that supplies neither
+             * still fails at startup. This is the default so the feature is purely additive.
+             */
+            NONE,
+            /** One state document per source in hxpr, alongside the cursors and invisible to a sweep. */
+            HXPR,
+            /** A JSON file, for a deployment that mounts writable state. */
+            FILE,
+            /** Forgotten on restart, which falls back to configured roots. For a test. */
             MEMORY
         }
     }

@@ -85,13 +85,14 @@ under `connector.*`:
 | Setting | Meaning |
 |---|---|
 | `connector.source-type` | Which loaded connector to ingest with. Optional with one jar mounted, required with several |
-| `connector.roots` | Containers to walk. Empty asks the connector, through `ContentSourceClient.getRootNodeId()` |
+| `connector.roots` | Containers to walk, unless an operator selected some. Empty asks the connector, through `ContentSourceClient.getRootNodeId()` |
 | `connector.page-size` | Children fetched per listing |
 | `connector.max-depth` | Depth backstop for a hierarchy that does not bottom out |
 | `connector.security.*` | Credentials for this ingester's own sync API. No defaults; startup fails without both |
 | `connector.reconcile.*` | Post-discovery deletion sweep. Off by default |
 | `connector.change-feed.*` | Read the connector's change feed instead of walking it. Off by default |
 | `connector.cursor.*` | Where the change feed's position is kept between passes |
+| `connector.selection.*` | Where the roots an operator chose are kept, so a scope change needs no restart. Off by default |
 
 Two things about it are deliberate. With no connector loaded it fails to start, because its only source is
 that jar and a sync API reporting zero documents hides the misconfiguration. And the walk visits each node id
@@ -116,12 +117,43 @@ walked in full. Both sides have to agree: the connector implements the feed, and
 | `connector.cursor.store` | `hxpr` | `hxpr`, `file` or `memory` |
 | `connector.cursor.hxpr-path` | `/content-lake/_state/cursors` | Where the `hxpr` store keeps its state document |
 | `connector.cursor.file` | `/data/connector-cursor.json` | Path the `file` store writes, which needs a writable mount |
+| `connector.selection.store` | `none` | `none`, `hxpr`, `file` or `memory`. `none` keeps the pre-selection behaviour exactly and leaves `/api/selection` unavailable |
+| `connector.selection.hxpr-path` | `/content-lake/_state/roots` | Where the `hxpr` store keeps its state document. Deliberately not the cursor folder |
+| `connector.selection.file` | `/var/lib/content-lake/connector/roots.json` | Path the `file` store writes, which needs a writable mount |
 
 The default is `hxpr` because this container's mounts are read-only, so a file store would have nowhere to
 write. Its state document carries no `cin_sourceId` and no `cin_paths`, which is what keeps the sweep from
 proposing the deletion of the cursor that tells it where it is, and it has no embeddings, which is what keeps
 it out of search results. `memory` is the honest answer for a deployment with neither a mount nor hxpr write
 access: every pass is a full walk, which is the behaviour with the feature off.
+
+#### Changing which roots a sync walks, without a restart
+
+Roots used to be read once at startup into an immutable list, so changing a scope meant editing configuration
+and restarting a container. With `connector.selection.store` set to anything but `none`, a pass asks the
+selection store instead, and `GET`, `PUT` and `DELETE /api/selection` read and change it. Precedence per pass
+is the stored selection, then `connector.roots`, then whatever the connector names as its own root.
+
+Three properties of that are worth stating, because each is a decision rather than an accident.
+
+**A selection that is present and empty is not a fall-through.** It means somebody cleared the choice. Treating
+it as "walk everything" would silently re-ingest a whole source the moment a picker was emptied, so an empty
+selection yields an empty scope.
+
+**A pass with an empty scope reports itself incomplete.** The reconciliation sweep deletes what an
+authoritative enumeration did not mention, so a pass that walked nothing must never claim to be complete: it
+would propose deleting every document of the source. Incomplete means the sweep declines to act, which is the
+safe direction.
+
+**With `none`, nothing changes.** Roots come from configuration and then from the connector, a deployment that
+supplies neither still fails at startup, and the endpoint answers `501`. That is the default, so upgrading
+alters no behaviour.
+
+The store also moves root resolution off the startup path, which matters for any connector that resolves its
+roots over the network: doing that during bean construction turns a transient source outage into a container
+that will not boot, rather than a job that failed and can be retried. Both the `hxpr` and `file` stores are
+wiped by `make clean`, which is correct, because a selection is the scope of an index that no longer exists. A
+selection does survive a container restart.
 
 How one pass decides which mechanism it runs: the feed, if the feature is on, the connector declares one, a
 cursor is stored, and `full-walk-every` has not been reached. Otherwise a full walk. The first pass therefore

@@ -75,6 +75,18 @@ connector:
     store: ${CONNECTOR_CURSOR_STORE:hxpr}
     hxpr-path: ${CONNECTOR_CURSOR_HXPR_PATH:/content-lake/_state/cursors}
     file: ${CONNECTOR_CURSOR_FILE:/data/connector-cursor.json}
+  # Where the host keeps the roots an operator chose, so a scope change needs no restart. `none` is the
+  # default and keeps the previous behaviour exactly: roots come from connector.roots and then from the
+  # connector, and a deployment that supplies neither still fails at startup. With a store set, /api/selection
+  # can read and write the scope, and a pass with an empty selection reports itself incomplete rather than
+  # authoritative, so clearing a selection cannot make the sweep delete the source.
+  #
+  # A separate hxpr folder from the cursors on purpose: both are keyed by the qualified source id, so one
+  # folder and prefix would put a source's cursor and its selection at the same path.
+  selection:
+    store: ${CONNECTOR_SELECTION_STORE:none}
+    hxpr-path: ${CONNECTOR_SELECTION_HXPR_PATH:/content-lake/_state/roots}
+    file: ${CONNECTOR_SELECTION_FILE:/var/lib/content-lake/connector/roots.json}
   executor:
     core-size: ${CONNECTOR_BATCH_CORE_SIZE:1}
     max-size: ${CONNECTOR_BATCH_MAX_SIZE:1}
