@@ -210,4 +210,25 @@ public interface ContentSourceClient {
      * @param nodeId source-system node identifier
      */
     default void clearSyncStatus(String nodeId) {}
+
+    /**
+     * How this source is authenticating, or {@code null} when there is nothing worth showing an operator.
+     *
+     * <p>{@code null} is the right answer for most sources and is the default, so nothing has to opt out. A
+     * source whose credential is deployment configuration has no state that changes: it works, or the container
+     * failed to start. The sources that need this are the ones holding a credential that can lapse while
+     * everything else stays healthy, because there the failure arrives as a job that stopped working for
+     * reasons the log explains in terms of a file the operator has never seen.</p>
+     *
+     * <p>Two obligations on an implementation, and both are about what a caller is. This is read by a status
+     * endpoint that may be polled, so it <strong>must not</strong> acquire a token, call the source, or
+     * otherwise block: report {@code null} in a field rather than making a status response wait on a directory.
+     * And every value reaches a browser, so it must carry no token, no secret, and no path to a file holding
+     * either -- see {@link SourceAuthState} for why the cache path in particular is excluded.</p>
+     *
+     * @return the current authentication state, or {@code null} when this source has none to report
+     */
+    default SourceAuthState authState() {
+        return null;
+    }
 }

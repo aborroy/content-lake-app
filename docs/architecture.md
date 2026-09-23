@@ -178,6 +178,11 @@ Nothing under `plugins/` takes part in any of this, and none of it may be added 
 Four interfaces plus their data carriers in `content-lake-spi` (`org.hyland.contentlake.spi`), carrying
 zero Alfresco/Nuxeo imports. Every content source adapter must implement them.
 
+Note which members are `default`. The SPI grows by adding defaults rather than abstract methods, so a source
+that has no opinion about a capability does not have to express one and no existing connector breaks when a
+capability is added. `null` is the SPI's idiom throughout for "not applicable", and it is load-bearing:
+`getRootNodeId`, `initialCursor` and `authState` all use it to mean something specific.
+
 ### `SourceNode` -- universal document representation
 
 ```java
@@ -211,8 +216,42 @@ public interface ContentSourceClient {
     default ConnectorSchema connectorSchema() { ... }                             // the settings this connector needs
     default String getRootNodeId() { return null; }                                // where a batch pass starts, or null
     default List<String> getRootNodeIds() { ... }                                  // every root, defaulting to the one above
+    default SourceAuthState authState() { return null; }                           // how it authenticates, or null
 }
 ```
+
+### `SourceAuthState` -- a credential an operator can see the state of
+
+Returned by `ContentSourceClient.authState()`, and `null` for most sources. A source whose credential is
+deployment configuration has no state that varies: it works, or the container failed to start. The sources
+that need this are the ones holding a credential that can lapse while everything else stays healthy -- a
+delegated refresh token a human minted, whose expiry arrives as a job that stopped working, explained in a log
+line about a token cache nobody has heard of.
+
+```java
+public record SourceAuthState(
+    String mode,                      // the connector's own setting value, e.g. "device-code"
+    boolean supportedInProduction,    // false for a development shortcut, so a screen can say so
+    String identity,                  // the account it acts as, or null for a mode with no user
+    OffsetDateTime lastRefreshedAt,   // or null when not knowable without a call, which is usual
+    boolean usable,                   // whether a sync could get a credential now, with no human
+    String remedy                     // what to do when it cannot, or null
+) {}
+```
+
+Two constraints on an implementation, and both follow from who calls it:
+
+- **Answering must be cheap.** The caller is a status endpoint that may be polled, so it must not acquire a
+  token or call the source. Anything only a round trip could establish belongs in a `null` field rather than a
+  slow one; a status response that hangs because a directory is unreachable is worse than one that admits it
+  does not know. This is why `lastRefreshedAt` is usually `null` -- most token libraries do not expose it, and
+  the only way to learn it would be to attempt an acquisition.
+- **Every value reaches a browser.** No token, no secret, and no path to a file holding either. The cache path
+  is excluded even though it is the most useful thing in the connector's own log line: it names a file worth
+  attacking. `remedy` carries the action instead, which is what an operator can act on anyway.
+
+`usable` is the field a screen should lead with, because it is the difference between "this will work" and
+"this will fail in a way that looks like a connector defect".
 
 ### `ConnectorSchema` -- what a connector needs to be configured
 

@@ -45,6 +45,23 @@ public final class StaticTokenProvider implements GraphTokenProvider {
     }
 
     @Override
+    public String mode() {
+        return "static-token";
+    }
+
+    /**
+     * Reported usable, which is a statement about configuration rather than about the token.
+     *
+     * <p>A pasted token either works or it has expired, and there is no way to tell which without spending a
+     * Graph call -- which this must not do. Claiming it is unusable would be wrong on a working run; the honest
+     * signal about this mode is {@link #supportedInProduction()}, which is already {@code false}.</p>
+     */
+    @Override
+    public boolean usable() {
+        return true;
+    }
+
+    @Override
     public boolean supportedInProduction() {
         return false;
     }

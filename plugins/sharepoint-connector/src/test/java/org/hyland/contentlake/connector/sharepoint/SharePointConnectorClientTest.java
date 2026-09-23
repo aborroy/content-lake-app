@@ -1,6 +1,7 @@
 package org.hyland.contentlake.connector.sharepoint;
 
 import org.hyland.contentlake.connector.sharepoint.mock.MockGraphServer;
+import org.hyland.contentlake.spi.SourceAuthState;
 import org.hyland.contentlake.spi.SourceChangePage;
 import org.hyland.contentlake.spi.SourceNode;
 import org.hyland.contentlake.spi.SourceTombstone;
@@ -510,6 +511,54 @@ class SharePointConnectorClientTest {
                 walk(client, child.nodeId());
             }
         }
+    }
+
+    /**
+     * The auth state the host puts on its status response, and the fact that reporting it costs nothing.
+     *
+     * <p>An empty request log is the assertion: a status endpoint may poll this, so an implementation that
+     * reached Graph to describe its own credential would make asking as expensive as using it.</p>
+     */
+    @Test
+    void reportsItsAuthenticationStateWithoutCallingGraph() throws Exception {
+        SharePointConnectorClient client = clientFor(options());
+
+        SourceAuthState state = client.authState();
+
+        assertThat(state).isNotNull();
+        assertThat(state.mode()).isEqualTo("static-token");
+        // A development shortcut, and the screen has to be able to say so rather than leaving it unremarked.
+        assertThat(state.supportedInProduction()).isFalse();
+        assertThat(state.usable()).isTrue();
+        assertThat(mock.requestLog()).isEmpty();
+    }
+
+    /**
+     * Nothing in the auth state can be rendered unsafely, because all of it reaches a browser.
+     *
+     * <p>Asserted over the whole record rather than field by field, so a field added later is covered by this
+     * test without anyone remembering to extend it.</p>
+     */
+    @Test
+    void putsNoCredentialIntoTheStateItReports() throws Exception {
+        SharePointConnectorClient client = clientFor(options());
+
+        String rendered = client.authState().toString();
+
+        assertThat(rendered)
+                .doesNotContain("mock-token")
+                .doesNotContainIgnoringCase("secret")
+                .doesNotContainIgnoringCase("refresh_token")
+                .doesNotContainIgnoringCase("msal-cache");
+    }
+
+    /** An application identity has no user, which a screen must be able to tell from an unknown one. */
+    @Test
+    void reportsNoIdentityForAModeThatHasNoUser() throws Exception {
+        SharePointConnectorClient client = clientFor(options());
+
+        // static-token is the mock-run stand-in for an application credential: neither has an account.
+        assertThat(client.authState().identity()).isNull();
     }
 
     /** Just the {@code /permissions} calls the connector made, so they can be counted exactly. */

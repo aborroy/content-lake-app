@@ -156,6 +156,60 @@ class DeviceCodeTokenProviderTest {
                 .hasMessageContaining(empty.toString());
     }
 
+    /**
+     * The auth state a screen renders, answered from the cache without a network call.
+     *
+     * <p>{@code bodies} staying empty is the assertion that matters: a status endpoint may poll this, and a
+     * provider that attempted a silent acquisition to answer it would make asking about the credential as
+     * expensive as using it, and would fail whenever the directory was briefly unreachable.</p>
+     */
+    @Test
+    void reportsItsStateFromTheCacheWithoutSpendingATokenRequest() throws Exception {
+        DeviceCodeTokenProvider provider = new DeviceCodeTokenProvider(
+                AUTHORITY, "client-id", List.of("https://graph.microsoft.com/Sites.Read.All"), seededCache(),
+                new LoopbackTransport());
+
+        assertThat(provider.mode()).isEqualTo("device-code");
+        assertThat(provider.usable()).isTrue();
+        assertThat(provider.identity()).isNotBlank();
+        assertThat(provider.remedy()).isNull();
+
+        // Nothing went to the token endpoint to answer any of the above.
+        assertThat(bodies).isEmpty();
+    }
+
+    @Test
+    void reportsAnEmptyCacheAsUnusableAndNamesTheCommandThatFixesIt() {
+        DeviceCodeTokenProvider provider = new DeviceCodeTokenProvider(
+                AUTHORITY, "client-id", List.of(), cacheDirectory.resolve("empty.json"),
+                new LoopbackTransport());
+
+        assertThat(provider.usable()).isFalse();
+        assertThat(provider.identity()).isNull();
+        assertThat(provider.remedy()).contains(SharePointDeviceLogin.COMMAND_HINT);
+    }
+
+    /**
+     * The remedy reaches a browser, so it must not name the cache file.
+     *
+     * <p>The provider's own exception does name it, deliberately, because that goes to a log an engineer reads.
+     * This is the same fact rendered for a different audience, and the path is a file worth attacking.</p>
+     */
+    @Test
+    void keepsTheCachePathOutOfTheRemedyEvenThoughTheExceptionCarriesIt() {
+        Path cache = cacheDirectory.resolve("secret-location.json");
+
+        DeviceCodeTokenProvider provider = new DeviceCodeTokenProvider(
+                AUTHORITY, "client-id", List.of(), cache, new LoopbackTransport());
+
+        assertThat(provider.remedy())
+                .isNotNull()
+                .doesNotContain(cache.toString())
+                .doesNotContain("secret-location");
+        // And the log-facing message still does, so this is a difference in audience rather than a regression.
+        assertThatThrownBy(provider::token).hasMessageContaining(cache.toString());
+    }
+
     @Test
     void refusesToGuessAtACacheItCannotParse() throws IOException {
         Path corrupt = cacheDirectory.resolve("corrupt.json");

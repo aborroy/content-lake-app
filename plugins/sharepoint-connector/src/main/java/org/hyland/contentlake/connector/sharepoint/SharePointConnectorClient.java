@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.hyland.contentlake.spi.ConnectorSchema;
 import org.hyland.contentlake.spi.ContentSourceClient;
+import org.hyland.contentlake.spi.SourceAuthState;
 import org.hyland.contentlake.spi.SourceChangePage;
 import org.hyland.contentlake.spi.SourceNode;
 import org.hyland.contentlake.spi.SourceTombstone;
@@ -146,6 +147,37 @@ public final class SharePointConnectorClient implements ContentSourceClient {
     @Override
     public String getSourceType() {
         return SOURCE_TYPE;
+    }
+
+    /**
+     * How this connector is authenticating, for an operator screen.
+     *
+     * <p>Worth reporting here and not on most sources, because under {@code device-code} the credential is a
+     * refresh token a human minted and it can lapse while every other part of the deployment stays healthy. The
+     * only symptom is then a job that stopped working, explained in a log line about a token cache the operator
+     * has never heard of. This is what lets a screen say so before a sync is attempted.</p>
+     *
+     * <p>Every value comes from local state. Nothing here acquires a token or calls Graph, because a status
+     * endpoint may poll it, and no value carries a token, a secret or the cache path -- the remedy names the
+     * sign-in command instead of the file, which is what an operator can act on anyway.</p>
+     */
+    @Override
+    public SourceAuthState authState() {
+        GraphTokenProvider provider = settings.tokenProvider();
+        // Read once each: usable() re-reads the cache, and a screen that showed "not usable" beside a remedy of
+        // null because the two calls disagreed would be reporting on a state that never existed.
+        boolean usable = provider.usable();
+        String identity = provider.identity();
+        if (!usable) {
+            return SourceAuthState.needsSignIn(provider.mode(), identity, provider.remedy(),
+                    provider.supportedInProduction());
+        }
+        // lastRefreshedAt is null throughout: msal4j exposes no such timestamp, and the only way to learn it
+        // would be to attempt an acquisition, which is exactly what this must not do. Absent is honest.
+        return identity == null
+                ? SourceAuthState.withoutUser(provider.mode(), provider.supportedInProduction())
+                : SourceAuthState.signedInAs(provider.mode(), identity, null,
+                        provider.supportedInProduction());
     }
 
     @Override

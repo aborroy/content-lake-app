@@ -39,4 +39,48 @@ public interface GraphTokenProvider {
     default boolean supportedInProduction() {
         return true;
     }
+
+    /**
+     * The mode's name as a setting value, for a screen rather than for a log line.
+     *
+     * <p>Distinct from {@link #describe()} on purpose: that is prose for an engineer reading a log, this is the
+     * token an operator would put in {@code sharepoint.auth-mode}. A screen that showed the sentence could not
+     * tell the reader which setting produced it.</p>
+     */
+    String mode();
+
+    /**
+     * Who this provider is acting as, or {@code null} for a mode with no user.
+     *
+     * <p>An application credential genuinely has no account, which is not the same as an unknown one, so
+     * {@code null} here means "there is no user" rather than "could not tell".</p>
+     *
+     * <p><strong>Must not acquire or refresh a token.</strong> It is read by a status endpoint that may be
+     * polled, and a call that reached the network would make asking about a credential as expensive as using
+     * one.</p>
+     */
+    default String identity() {
+        return null;
+    }
+
+    /**
+     * Whether {@link #token()} would succeed right now with no human involved.
+     *
+     * <p>Only a mode holding a credential that can lapse has anything to report; anything configured up front
+     * either worked at startup or the container failed. Same prohibition as {@link #identity()}: answer from
+     * local state, never from a round trip.</p>
+     */
+    default boolean usable() {
+        return true;
+    }
+
+    /**
+     * What an operator should do when {@link #usable()} is {@code false}, or {@code null} when nothing.
+     *
+     * <p>An instruction, not a diagnostic. It reaches a browser, so it must name no file holding a credential,
+     * which rules out the message the provider's own exception carries.</p>
+     */
+    default String remedy() {
+        return null;
+    }
 }

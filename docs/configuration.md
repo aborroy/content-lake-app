@@ -490,6 +490,53 @@ anywhere. Treat it as a credential: the deployment mounts it read-only, keeps it
 narrows its permissions. Because the mount is read-only the connector holds rotated tokens in memory and says
 so once, which costs nothing until the stored token finally expires.
 
+#### Seeing the state of the credential before a sync fails
+
+Because that cache can lapse while every other part of the deployment stays healthy, the connector reports its
+authentication state on the plugin host's `GET /api/status`, under `auth`. The whole point is that the state is
+visible beforehand rather than diagnosed from a failed job afterwards.
+
+```json
+{
+  "sourceType": "sharepoint",
+  "state": "IDLE",
+  "auth": {
+    "mode": "device-code",
+    "supportedInProduction": false,
+    "identity": null,
+    "lastRefreshedAt": null,
+    "usable": false,
+    "remedy": "Sign in again on the host with scripts/sharepoint-device-login.sh, then restart this service."
+  }
+}
+```
+
+That is the response for a cache holding no account, which is the ordinary first-run state and the one an
+operator most needs a clear answer for. After a sign-in, `usable` is `true`, `identity` names the account and
+`remedy` is `null`.
+
+`usable` is the field to read first: it answers whether a sync could get a credential right now with nobody
+involved. When it is `false`, `remedy` names the command that fixes it.
+
+Note that the service starts normally in this state. An unusable credential is a thing to report, not a reason
+to refuse to boot, so the failure is visible on this endpoint rather than as a container that will not run.
+
+Three things are deliberately not in there:
+
+- **No token, no secret, and no cache path.** All of this reaches a browser, and the cache path names a file
+  worth attacking. The connector's own log line does include the path, because that goes to an engineer rather
+  than to a screen; the two are the same fact rendered for different audiences.
+- **`lastRefreshedAt` is usually `null`,** and that is honest rather than unfinished. msal4j exposes no such
+  timestamp, and the only way to establish one would be to attempt an acquisition.
+- **`usable` is the cheap half of the question.** It is answered from the cache, not by attempting a refresh,
+  because a status endpoint may be polled and a silent acquisition is a round trip to Entra ID. So a cache
+  holding an account whose refresh token has been *revoked* still reads as usable, and the sync is what
+  discovers otherwise. Spending a token request per status poll, and failing the endpoint whenever the
+  directory was briefly unreachable, would be the worse trade.
+
+`client-credentials` reports `identity: null`, because an application identity has no user. That is not the
+same as an unknown one, and a screen should distinguish them.
+
 ### Connector Schema And Startup Validation
 
 Each source connector publishes the settings it needs, and every ingester checks its configuration

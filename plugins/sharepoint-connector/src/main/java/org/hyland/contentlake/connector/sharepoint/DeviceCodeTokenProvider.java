@@ -148,6 +148,66 @@ final class DeviceCodeTokenProvider implements GraphTokenProvider {
     }
 
     @Override
+    public String mode() {
+        return "device-code";
+    }
+
+    /**
+     * The account the cache holds, read locally, or {@code null} when it holds none.
+     *
+     * <p>msal4j serves {@code getAccounts()} from the cache it already loaded, so this costs a file read at
+     * worst and never a network call -- which is required, because a status endpoint may poll it.</p>
+     *
+     * <p>Swallows its own failure rather than propagating. An unreadable cache is exactly the state this is
+     * meant to describe, and a status call that threw while reporting on a broken credential would replace a
+     * legible screen with a stack trace.</p>
+     */
+    @Override
+    public String identity() {
+        try {
+            return cachedAccount().username();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether a silent refresh could happen now, judged by whether the cache names an account.
+     *
+     * <p>Deliberately not judged by attempting one. A silent acquisition is a round trip to Entra ID, and
+     * spending that on every status poll would make asking about the credential as costly as using it -- and
+     * would make the status endpoint fail whenever the directory was briefly unreachable, which is a different
+     * problem wearing this one's clothes.</p>
+     *
+     * <p>So this is the cheap half of the question. A cache holding an account whose refresh token has been
+     * revoked still reads as usable here, and the sync is what discovers otherwise. That is the honest limit of
+     * what can be known without paying, and the alternative is worse.</p>
+     */
+    @Override
+    public boolean usable() {
+        try {
+            cachedAccount();
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * The command that fixes it, and nothing else.
+     *
+     * <p>Notably <em>not</em> the message {@link #signInRequired} builds: that one names the cache path, which
+     * is the most useful thing in a log line and must not reach a browser. It names a file worth attacking, and
+     * the screen showing this is reachable from one.</p>
+     */
+    @Override
+    public String remedy() {
+        return usable() ? null
+                : "Sign in again on the host with " + SharePointDeviceLogin.COMMAND_HINT
+                        + ", then restart this service.";
+    }
+
+    @Override
     public boolean supportedInProduction() {
         return false;
     }

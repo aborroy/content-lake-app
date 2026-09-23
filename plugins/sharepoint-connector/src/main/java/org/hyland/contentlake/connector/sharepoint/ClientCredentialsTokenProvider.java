@@ -174,4 +174,20 @@ public final class ClientCredentialsTokenProvider implements GraphTokenProvider 
     public String describe() {
         return description;
     }
+
+    @Override
+    public String mode() {
+        return "client-credentials";
+    }
+
+    /**
+     * {@code null}, because an application identity has no user, rather than because one could not be found.
+     *
+     * <p>The distinction matters to a screen: "acting as the application" and "signed in as nobody we could
+     * determine" look identical if both are blank, and only the second is a problem.</p>
+     */
+    @Override
+    public String identity() {
+        return null;
+    }
 }
