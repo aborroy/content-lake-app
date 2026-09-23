@@ -159,6 +159,43 @@ class NuxeoBatchIngestionServiceTest {
         verify(discoveryService).discoverTallied(request);
     }
 
+    /**
+     * A job whose task throws an {@code Error} ends {@code FAILED}, not {@code RUNNING} for ever (#153).
+     *
+     * <p>{@code catch (Exception)} does not catch an {@code Error}, and the future the task ran in was
+     * discarded, so such a throwable was captured by nobody: the job kept {@code status: RUNNING} and
+     * {@code completedAt: null} indefinitely and printed nothing at all. A caller polling for a terminal status
+     * waited for ever. That is what stopped a real crawl at 51 of 52 documents.</p>
+     */
+    @Test
+    void startConfiguredSync_marksTheJobFailedWhenTheTaskThrowsAnError() {
+        when(discoveryService.discoverFromConfigTallied())
+                .thenThrow(new StackOverflowError("thrown from the extraction chain"));
+
+        IngestionJob job = service.startConfiguredSync();
+
+        assertThat(job.getStatus()).isEqualTo(IngestionJob.JobStatus.FAILED);
+        assertThat(job.getCompletedAt()).isNotNull();
+    }
+
+    /** The same for a {@code Throwable} that is neither an {@code Exception} nor an {@code Error}. */
+    @Test
+    void startBatchSync_marksTheJobFailedWhenTheTaskThrowsAThrowableThatIsNeither() {
+        NuxeoSyncRequest request = new NuxeoSyncRequest();
+        when(discoveryService.discoverTallied(request)).thenAnswer(invocation -> {
+            throw new NeitherExceptionNorError();
+        });
+
+        IngestionJob job = service.startBatchSync(request);
+
+        assertThat(job.getStatus()).isEqualTo(IngestionJob.JobStatus.FAILED);
+        assertThat(job.getCompletedAt()).isNotNull();
+    }
+
+    /** Extends Throwable directly, which is the case neither {@code catch} clause used to reach. */
+    private static final class NeitherExceptionNorError extends Throwable {
+    }
+
     private static NuxeoDiscoveryService.NuxeoDiscovery discovery(SourceNode... nodes) {
         return new NuxeoDiscoveryService.NuxeoDiscovery(List.of(nodes),
                 DiscoveryOutcome.complete(List.of("/default-domain/workspaces/finance")));

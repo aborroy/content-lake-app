@@ -82,8 +82,30 @@ public class ConnectorBatchIngestionService {
 
     public IngestionJob startConfiguredSync() {
         IngestionJob job = createJob();
-        CompletableFuture.runAsync(() -> runJob(job), batchExecutor);
+        CompletableFuture.runAsync(() -> runJob(job), batchExecutor)
+                .whenComplete((ignored, thrown) -> failIfEscaped(job, thrown));
         return job;
+    }
+
+    /**
+     * The last line of defence for a job whose task did not finish it.
+     *
+     * <p>A future nobody observes captures whatever escaped its task and discards it, so a throwable that
+     * missed the catch in {@link #runJob} left the job {@code RUNNING} with {@code completedAt} null, for ever,
+     * and printed nothing at all. A caller polling for a terminal status waited for ever, and a stalled job was
+     * indistinguishable from a slow one. This is the only place that sees such a throwable.</p>
+     *
+     * <p>{@code thrown} is non-null only when something escaped the task, so this cannot overwrite the status
+     * of a job that finished. It can run twice for one throwable, because {@link #runJob} marks an {@code Error}
+     * and rethrows it; {@link IngestionJob#fail()} is not idempotent, but both calls write the same terminal
+     * status and the only difference is a {@code completedAt} microseconds later.</p>
+     */
+    private void failIfEscaped(IngestionJob job, Throwable thrown) {
+        if (thrown == null) {
+            return;
+        }
+        job.fail();
+        log.error("Connector batch job {} ended on a throwable its task did not handle", job.getJobId(), thrown);
     }
 
     public IngestionJob getJob(String jobId) {
@@ -113,9 +135,16 @@ public class ConnectorBatchIngestionService {
             if (resumeFrom == null || !ingestFromFeed(job, source, resumeFrom)) {
                 walk(job, source);
             }
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // Throwable rather than Exception: one unreadable file threw something outside Exception from the
+            // extraction chain, and the job stayed RUNNING for ever because nothing here caught it. Marking the
+            // job at the point of failure is what keeps the source context in the log line; an Error is rethrown
+            // afterwards, because swallowing one here would hide a JVM-level problem from the executor.
             job.fail();
-            log.error("Connector batch job {} failed", job.getJobId(), e);
+            log.error("Connector batch job {} failed", job.getJobId(), t);
+            if (t instanceof Error error) {
+                throw error;
+            }
         }
     }
 
@@ -361,8 +390,12 @@ public class ConnectorBatchIngestionService {
             job.recordReconciliation(reconciliationService.reconcile(
                     seen, outcome, job.getFailedCountValue(),
                     IndexReconciliationService.underAnyPath(prefixes), config));
-        } catch (Exception e) {
-            log.error("Reconciliation sweep for job {} failed; ingestion is unaffected", job.getJobId(), e);
+        } catch (Throwable t) {
+            // Throwable, and deliberately not rethrown, so the invariant above survives the widening of
+            // runJob's catch: the job is already COMPLETED with correct ingestion counters, and letting a sweep
+            // throwable reach runJob would flip it to FAILED. Logged rather than swallowed, which is the whole
+            // point -- nothing here may end without a log line.
+            log.error("Reconciliation sweep for job {} failed; ingestion is unaffected", job.getJobId(), t);
         }
     }
 

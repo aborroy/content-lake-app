@@ -238,6 +238,62 @@ class ConnectorBatchIngestionServiceReconcileTest {
         assertThat(seenCaptor.getValue().overflowed()).isTrue();
     }
 
+    /**
+     * A job whose task throws an {@code Error} ends {@code FAILED}, not {@code RUNNING} for ever (#153).
+     *
+     * <p>{@code catch (Exception)} does not catch an {@code Error}, and the future the task ran in was
+     * discarded, so such a throwable was captured by nobody: the job kept {@code status: RUNNING} and
+     * {@code completedAt: null} indefinitely and printed nothing at all. A caller polling
+     * {@code /api/sync/status/{id}} waited for ever. That is what stopped a real SharePoint crawl at 51 of 52
+     * documents, on a detached signature file.</p>
+     */
+    @Test
+    void marksTheJobFailedWhenTheTaskThrowsAnError() {
+        when(discoveryService.discoverTallied())
+                .thenThrow(new StackOverflowError("thrown from the extraction chain"));
+
+        IngestionJob job = service.startConfiguredSync();
+
+        assertThat(job.getStatus()).isEqualTo(IngestionJob.JobStatus.FAILED);
+        assertThat(job.getCompletedAt()).isNotNull();
+    }
+
+    /** The same for a {@code Throwable} that is neither an {@code Exception} nor an {@code Error}. */
+    @Test
+    void marksTheJobFailedWhenTheTaskThrowsAThrowableThatIsNeither() {
+        when(discoveryService.discoverTallied()).thenAnswer(invocation -> {
+            throw new NeitherExceptionNorError();
+        });
+
+        IngestionJob job = service.startConfiguredSync();
+
+        assertThat(job.getStatus()).isEqualTo(IngestionJob.JobStatus.FAILED);
+        assertThat(job.getCompletedAt()).isNotNull();
+    }
+
+    /**
+     * A sweep throwable must not turn a completed ingestion into a failed job.
+     *
+     * <p>The sweep runs after {@code job.complete()} on purpose, and widening the caller's catch to
+     * {@code Throwable} would have let a sweep failure reach it and downgrade the status. The sweep therefore
+     * catches its own throwables, and this is the test that keeps that true.</p>
+     */
+    @Test
+    void aSweepThrowableLeavesACompletedJobCompleted() {
+        props.getReconcile().setEnabled(true);
+        when(discoveryService.discoverTallied()).thenReturn(complete(node("node-1")));
+        when(reconciliationService.reconcile(any(), any(), anyInt(), any(), any()))
+                .thenThrow(new StackOverflowError("thrown from the sweep"));
+
+        IngestionJob job = service.startConfiguredSync();
+
+        assertThat(job.getStatus()).isEqualTo(IngestionJob.JobStatus.COMPLETED);
+    }
+
+    /** Extends Throwable directly, which is the case neither {@code catch} clause used to reach. */
+    private static final class NeitherExceptionNorError extends Throwable {
+    }
+
     private static IndexReconciliationService.Report report(int deleted) {
         return new IndexReconciliationService.Report(
                 IndexReconciliationService.Status.COMPLETED, 2, 2, deleted, deleted, 0, 0.5, "ok");
