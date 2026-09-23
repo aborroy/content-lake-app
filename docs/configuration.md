@@ -537,6 +537,39 @@ ingestion:
     aspects: [cm:workingcopy]
 ```
 
+### Content That Is Skipped Before It Is Downloaded
+
+Some file types cannot contain text by construction: a detached signature, a certificate, a key store, an
+archive, a disk image, a font, a media file. The pipeline used to download each one and hand it to a parser
+that could only fail, which on a real corpus is not a rounding error. Every one of those is a content download
+plus a parse attempt, and on a metered source such as Microsoft Graph the download is charged per document.
+
+`NonTextContentPolicy` in `common/content-lake-core` holds the deny list, and it is consulted **before** the
+download rather than after, which is the only point at which the cost can still be avoided. A skipped document
+is still indexed with its metadata and its ACL; what it does not get is text, chunks or embeddings. The reason
+is recorded on `contentLake_syncError` as `Content not read, because ...`, deliberately distinct from the
+`No extractable text produced for ...` that an attempted-but-empty extraction records: "we did not try" and
+"we tried and got nothing" are different facts about a document, and only the second deserves attention.
+
+Two properties of the list are worth knowing before changing it:
+
+- **It is a deny list, not an allow list.** An allow list silently drops formats the transform services could
+  have handled, which is the failure mode that costs a customer their content. Being wrong about an entry here
+  costs one missed skip, never one missed document.
+- **It matches on file extension as well as MIME type,** because the cases that matter are invisible to a MIME
+  check. Graph reports a `.csig` detached signature as `application/octet-stream`, which is also what any
+  source reports for a file it could not identify, so denying that type would lose every such document. The
+  extension is the only thing that separates them. Matching takes the last dot, so `report.docx.csig` is a
+  signature and `report.csig.docx` is a document.
+
+A node with neither a known type nor a file name is **not** skipped. "We know nothing about it" is not the
+same claim as "it cannot contain text", and guessing in that direction loses documents.
+
+The default list is in `NonTextContentPolicy.defaults()`. A deployment that would rather pay than risk a wrong
+skip can pass `NonTextContentPolicy.allowEverything()`, which restores the previous behaviour exactly: every
+document is downloaded and offered to the extractor chain. For a single known offender in one source, a
+connector's own `exclude-mime-types` or `exclude-paths` is the narrower tool and needs no code change.
+
 ### Live Ingestion
 
 Edit `alfresco/alfresco-live-ingester/src/main/resources/application.yml`:

@@ -135,6 +135,8 @@ public class NodeSyncService {
     private static final String TARGET_MIME_TYPE = "text/plain";
     private static final String MARKDOWN_MIME_TYPE = "text/markdown";
     private static final String ERR_NO_EXTRACTABLE_TEXT = "No extractable text produced for mimeType=%s";
+    /** Deliberately distinct from the message above: this document was never read, not read and found empty. */
+    private static final String ERR_NON_TEXT_CONTENT = "Content not read, because %s";
     private static final String ERR_NO_CHUNKS = "No chunks produced from extracted text";
     private static final Set<String> TEXT_MIME_TYPES = Set.of(
             "text/plain", "text/html", "text/xml", "text/csv",
@@ -172,8 +174,41 @@ public class NodeSyncService {
      */
     private final boolean contentReuseEnabled;
 
+    /**
+     * Which content is skipped before it is downloaded, because it cannot contain text (#154).
+     *
+     * <p>Last constructor parameter, and there is a constructor without it that applies
+     * {@link NonTextContentPolicy#defaults()}, so a caller that has no opinion does not have to express one.</p>
+     */
+    private final NonTextContentPolicy nonTextContentPolicy;
+
     /** Short circuits versus full reprocesses, so the saving this service exists for is measurable. */
     private final ContentReuseCounters contentReuseCounters = new ContentReuseCounters();
+
+    /** How much the policy above saved, so a deny list nobody tuned is still visible in a run. */
+    private final AtomicLong nonTextSkips = new AtomicLong(0);
+
+    /**
+     * The default policy, for a caller with no opinion about what cannot contain text.
+     *
+     * <p>Delegates to the generated all-arguments constructor with {@link NonTextContentPolicy#defaults()}.
+     * It exists so a deny list could be added in core without a signature change rippling through five
+     * ingester configurations and ten test classes at once.</p>
+     */
+    public NodeSyncService(ContentSourceClient sourceClient,
+                           HxprDocumentApi documentApi,
+                           HxprService hxprService,
+                           TextExtractor textExtractor,
+                           EmbeddingService embeddingService,
+                           SimpleChunkingService chunkingService,
+                           String hxprTargetPath,
+                           String hxprPathRepositoryId,
+                           boolean keywordContextEnrichmentEnabled,
+                           boolean contentReuseEnabled) {
+        this(sourceClient, documentApi, hxprService, textExtractor, embeddingService, chunkingService,
+                hxprTargetPath, hxprPathRepositoryId, keywordContextEnrichmentEnabled, contentReuseEnabled,
+                NonTextContentPolicy.defaults());
+    }
 
     // ──────────────────────────────────────────────────────────────────────
     // Public pipeline entry-points
@@ -255,6 +290,23 @@ public class NodeSyncService {
                                String nodeId, String mimeType,
                                String documentName, String documentPath) {
         try {
+            // Asked before extractText, which is what downloads, so a type that cannot contain text costs
+            // nothing: no download, no temp file, no parser. On a metered source the download is the charge.
+            //
+            // Reported as its own reason rather than as ERR_NO_EXTRACTABLE_TEXT, because "we did not try" and
+            // "we tried and got nothing" are different facts about a document, and only the second is worth an
+            // operator's attention. The terminal status stays FAILED, which is what the pipeline has always
+            // recorded for a document with no text; giving this case a status of its own would change the
+            // HxprDocument wire contract and is not in the scope of this fix.
+            String cannotContainText = nonTextContentPolicy.reasonFor(mimeType, documentName);
+            if (cannotContainText != null) {
+                nonTextSkips.incrementAndGet();
+                log.info("Skipped content for node {} without downloading it, because {}", nodeId, cannotContainText);
+                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED,
+                        String.format(ERR_NON_TEXT_CONTENT, cannotContainText), nodeId);
+                return;
+            }
+
             ExtractedText extracted = extractText(nodeId, mimeType, documentName);
             if (extracted == null || extracted.text() == null || extracted.text().isBlank()) {
                 log.warn("Empty text for node {} ({})", nodeId, mimeType);
@@ -1295,6 +1347,16 @@ public class NodeSyncService {
     /** Snapshot of how much reprocessing the content fingerprint has avoided. */
     public ContentReuseStats getContentReuseStats() {
         return contentReuseCounters.snapshot();
+    }
+
+    /**
+     * Documents skipped because their type cannot contain text (#154).
+     *
+     * <p>Counted rather than only logged, because the saving is invisible otherwise: a deny list nobody tuned
+     * looks identical to one that never matched, and only this number tells them apart.</p>
+     */
+    public long getNonTextSkipCount() {
+        return nonTextSkips.get();
     }
 
     /**
