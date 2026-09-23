@@ -284,6 +284,79 @@ class MockGraphServerTest {
                 .hasMessageContaining("itemNotFound");
     }
 
+    /**
+     * The diagnostics endpoint the end-to-end suite reads instead of inferring what the connector asked for.
+     *
+     * <p>{@link MockGraphServer#requestLog()} is reachable only from the same JVM, and the suite is a shell
+     * script talking to a container. Without this, "the enumeration was bounded by the selection" has to be
+     * guessed from a document count.</p>
+     */
+    @Test
+    void reportsWhatItWasAskedOverHttpSoAShellSuiteCanAssertOnIt() throws Exception {
+        GraphHttpClient client = clientFor(options());
+        client.getJson("/drives/" + DRIVE + "/items/root/children", ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+        client.getJson("/drives/" + DRIVE + "/items/f-public/children", ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+
+        JsonNode all = diagnostics("");
+        assertThat(all.get("count").asInt()).isEqualTo(2);
+        assertThat(all.get("total").asInt()).isEqualTo(2);
+
+        // The narrowing form, which is how one folder's enumeration is counted in a single call.
+        assertThat(diagnostics("?contains=f-public/children").get("count").asInt()).isEqualTo(1);
+        assertThat(diagnostics("?contains=never-requested").get("count").asInt()).isZero();
+    }
+
+    /** Asking must not itself be recorded, or an assertion that looked twice would drift. */
+    @Test
+    void doesNotCountItsOwnDiagnosticsRequests() throws Exception {
+        clientFor(options());
+
+        diagnostics("");
+        diagnostics("");
+
+        assertThat(diagnostics("").get("total").asInt()).isZero();
+    }
+
+    /** Resettable, so a pass can be measured on its own rather than against everything since startup. */
+    @Test
+    void clearsTheLogOnDeleteSoOnePassCanBeMeasuredAlone() throws Exception {
+        GraphHttpClient client = clientFor(options());
+        client.getJson("/drives/" + DRIVE + "/items/root/children", ResourceUnitMeter.MULTI_ITEM_QUERY, List.of());
+        assertThat(diagnostics("").get("total").asInt()).isEqualTo(1);
+
+        java.net.http.HttpResponse<String> cleared = java.net.http.HttpClient.newHttpClient().send(
+                java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create(mock.diagnosticsUrl() + "/requests")).DELETE().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(cleared.statusCode()).isEqualTo(200);
+
+        assertThat(diagnostics("").get("total").asInt()).isZero();
+        assertThat(diagnostics("").get("requests")).isEmpty();
+    }
+
+    /** It is not a Graph path, so it answers without a bearer token even when Graph paths demand one. */
+    @Test
+    void needsNoBearerTokenBecauseItIsNotAGraphSurface() throws Exception {
+        clientFor(options());
+
+        java.net.http.HttpResponse<String> response = java.net.http.HttpClient.newHttpClient().send(
+                java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create(mock.diagnosticsUrl() + "/requests")).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("\"requests\"");
+    }
+
+    private JsonNode diagnostics(String query) throws Exception {
+        java.net.http.HttpResponse<String> response = java.net.http.HttpClient.newHttpClient().send(
+                java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create(mock.diagnosticsUrl() + "/requests" + query)).GET().build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        return new com.fasterxml.jackson.databind.ObjectMapper().readTree(response.body());
+    }
+
     private static List<String> idsOf(GraphHttpClient.GraphResponse response) {
         return GraphHttpClient.array(response.body(), "value").stream()
                 .map(node -> node.get("id").asText())

@@ -124,6 +124,17 @@ public final class MockGraphServer implements AutoCloseable {
     private static final String API_PREFIX = "/v1.0";
     private static final String STORAGE_PREFIX = "/mock-storage";
 
+    /**
+     * Where this server reports on itself rather than pretending to be Graph.
+     *
+     * <p>Outside {@link #API_PREFIX} and exempt from the bearer check, like {@link #STORAGE_PREFIX}, because it
+     * is not part of the surface being mocked. It exists because {@link #requestLog()} is reachable only from a
+     * test in the same JVM, and the end-to-end suite is a shell script talking to a container: without this,
+     * an assertion about how many children the connector enumerated has to be inferred from document counts
+     * rather than measured from what was actually asked.</p>
+     */
+    private static final String DIAGNOSTICS_PREFIX = "/mock-diagnostics";
+
     private final Options options;
     private final HttpServer server;
     private final String baseUrl;
@@ -179,6 +190,14 @@ public final class MockGraphServer implements AutoCloseable {
         return baseUrl + API_PREFIX;
     }
 
+    /**
+     * Where to ask this server what it was asked. Deliberately not under {@link #graphBaseUrl()}: a connector
+     * that could reach it would be talking to something Graph does not have.
+     */
+    public String diagnosticsUrl() {
+        return baseUrl + DIAGNOSTICS_PREFIX;
+    }
+
     /** Every request path this server has answered, for assertions about what the connector actually did. */
     public List<String> requestLog() {
         return List.copyOf(requestLog);
@@ -197,6 +216,14 @@ public final class MockGraphServer implements AutoCloseable {
         try {
             String path = exchange.getRequestURI().getPath();
             Map<String, String> query = parseQuery(exchange.getRequestURI());
+
+            // Before the counters, so asking what happened is not itself recorded as something that happened.
+            // An assertion that counted its own reads would drift every time the suite looked twice.
+            if (path.startsWith(DIAGNOSTICS_PREFIX)) {
+                serveDiagnostics(exchange, path.substring(DIAGNOSTICS_PREFIX.length()));
+                return;
+            }
+
             requestCount.incrementAndGet();
             requestLog.add(exchange.getRequestMethod() + " " + path
                     + (exchange.getRequestURI().getRawQuery() == null
@@ -548,6 +575,44 @@ public final class MockGraphServer implements AutoCloseable {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(bytes);
         }
+    }
+
+    /**
+     * What this server has been asked, so a shell suite can assert on it.
+     *
+     * <p>{@code GET /mock-diagnostics/requests} answers the whole log and the count;
+     * {@code ?contains=<substring>} narrows it, which is what makes "how many children did it enumerate under
+     * this folder" a single call. {@code DELETE} resets both, so a pass can be measured on its own rather than
+     * against every request since startup.</p>
+     *
+     * <p>Not a Graph surface, so it is not under {@code /v1.0} and needs no bearer token. Keeping it outside
+     * both is deliberate: a connector that reached it would be talking to something Graph does not have.</p>
+     */
+    private void serveDiagnostics(HttpExchange exchange, String path) throws IOException {
+        if (!path.equals("/requests")) {
+            error(exchange, 404, "itemNotFound", "No such diagnostics path: " + path);
+            return;
+        }
+        if (exchange.getRequestMethod().equals("DELETE")) {
+            requestLog.clear();
+            requestCount.set(0);
+            respondJson(exchange, 200, "{\"cleared\":true}", Set.of());
+            return;
+        }
+        String contains = parseQuery(exchange.getRequestURI()).get("contains");
+        List<String> matching = requestLog.stream()
+                .filter(entry -> contains == null || entry.contains(contains))
+                .toList();
+        StringBuilder body = new StringBuilder("{\"count\":").append(matching.size())
+                .append(",\"total\":").append(requestCount.get())
+                .append(",\"requests\":[");
+        for (int i = 0; i < matching.size(); i++) {
+            if (i > 0) {
+                body.append(',');
+            }
+            body.append('"').append(escape(matching.get(i))).append('"');
+        }
+        respondJson(exchange, 200, body.append("]}").toString(), Set.of());
     }
 
     /** Echoes only the preferences this server was told to honour, and stays silent about the rest. */
