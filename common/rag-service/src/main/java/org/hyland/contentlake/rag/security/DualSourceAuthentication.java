@@ -1,6 +1,8 @@
 package org.hyland.contentlake.rag.security;
 
-import org.springframework.security.core.Authentication;
+import org.hyland.contentlake.security.CallerAuthentication;
+import org.hyland.contentlake.security.CallerIdentities;
+import org.hyland.contentlake.security.SourceIdentity;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 
@@ -15,8 +17,12 @@ import java.util.List;
  * credentials ({@code X-Nuxeo-Authorization: Basic base64(user:pass)}).
  * Permission filters built from this token cover both sources independently, so
  * results from either repository are returned according to each user's permissions.</p>
+ *
+ * <p>Carries its two principals as {@link CallerIdentities} so the query path can read them without naming
+ * this class. That is the step that lets a third identity source exist; this type is superseded once nothing
+ * constructs it.</p>
  */
-public class DualSourceAuthentication implements Authentication {
+public class DualSourceAuthentication implements CallerAuthentication {
 
     private final String alfrescoUsername;
     private final String nuxeoUsername;
@@ -34,6 +40,28 @@ public class DualSourceAuthentication implements Authentication {
     /** Returns the Nuxeo-authenticated username, or {@code null} if not authenticated against Nuxeo. */
     public String getNuxeoUsername() {
         return nuxeoUsername;
+    }
+
+    /**
+     * The two principals as an identity set: the Alfresco one is the fallback, so a source of a third type
+     * resolves to it exactly as {@code isNuxeoSource(id) ? nuxeoUser : alfrescoUser} sent it there.
+     *
+     * <p>Only {@code DualSourceAuthenticationFilter} constructs this type and it requires both credentials
+     * to validate, so the one-sided shape below is unreachable in a deployment. It is mapped to a single
+     * untyped identity anyway, because that is what {@link #getName()} has always reported for it.</p>
+     */
+    @Override
+    public CallerIdentities identities() {
+        if (alfrescoUsername == null) {
+            return nuxeoUsername == null ? CallerIdentities.EMPTY : CallerIdentities.single(nuxeoUsername);
+        }
+        if (nuxeoUsername == null) {
+            return CallerIdentities.single(alfrescoUsername);
+        }
+        return CallerIdentities.builder()
+                .fallback(SourceIdentity.of("alfresco", alfrescoUsername))
+                .add(SourceIdentity.of("nuxeo", nuxeoUsername))
+                .build();
     }
 
     @Override
