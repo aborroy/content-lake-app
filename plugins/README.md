@@ -80,9 +80,10 @@ fails.
 ## Optional: implementing a change feed
 
 A connector that implements nothing beyond `ContentSourceClient`'s abstract methods is walked in full on
-every sync pass. That is a supported, fully functional choice and is what all three projects here do: the
-host enumerates containers, ingests what it finds, and its reconciliation sweep works out what disappeared
-by comparing the index against that enumeration.
+every sync pass. That is a supported, fully functional choice and is what `cmis-connector/` and
+`filesystem-connector/` do: the host enumerates containers, ingests what it finds, and its reconciliation
+sweep works out what disappeared by comparing the index against that enumeration. `sharepoint-connector/`
+implements the change feed instead.
 
 A source that can report its own changes since a token can offer that instead, by overriding three default
 methods:

@@ -94,10 +94,12 @@ content-lake-app/
             sample-directory-connector/   Worked example: ingests a mounted directory
 ```
 
-The three directories under `plugins/` sit at three different points in one lifecycle: `archetype/`
-generates a connector, `examples/sample-directory-connector/` is one to read, and `cmis-connector/`
-is one that ships. None has a parent POM, none appears in any intermediate POM, and none is named in
-any Dockerfile, which is the whole point of the plugin mechanism.
+They sit at three points in one lifecycle: `archetype/` generates a connector,
+`examples/sample-directory-connector/` is one to read, and `cmis-connector/` and `sharepoint-connector/` are
+ones that ship. `cmis-connector/` is worth reading for how a dependency is shaded in; `sharepoint-connector/`
+for a connector that implements the change feed, meters what its source charges it, and carries a mock of
+that source so it can be run with no account anywhere. None has a parent POM, none appears in any intermediate
+POM, and none is named in any Dockerfile, which is the whole point of the plugin mechanism.
 
 Do not confuse `connector/` with `plugins/`. `connector/` is the reactor module group holding the
 host application that loads plugins at runtime; `plugins/` holds the plugins themselves and is never
