@@ -8,9 +8,11 @@ import org.hyland.contentlake.rag.service.RagService;
 import org.hyland.contentlake.rag.service.SemanticSearchService;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.LinkedHashMap;
@@ -73,8 +75,19 @@ public class RagController {
                 request.getQuestion(), request.getSessionId(), request.isResetSession(),
                 request.getTopK(), request.getMinScore(), request.isIncludeContext());
 
-        RagPromptResponse response = ragService.prompt(request);
-        return ResponseEntity.ok(response);
+        try {
+            RagPromptResponse response = ragService.prompt(request);
+            return ResponseEntity.ok(response);
+        } catch (HttpClientErrorException.BadRequest e) {
+            // Malformed filter: hxpr returned 400 with a parser message. Surface it as 400.
+            log.warn("RAG prompt rejected by engine (malformed filter): {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(RagPromptResponse.builder()
+                            .question(request.getQuestion())
+                            .answer("Search failed: " + e.getResponseBodyAsString())
+                            .sourcesUsed(0)
+                            .build());
+        }
     }
 
     /**

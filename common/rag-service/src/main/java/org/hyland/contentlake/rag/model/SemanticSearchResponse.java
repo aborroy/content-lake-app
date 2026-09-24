@@ -60,6 +60,9 @@ public class SemanticSearchResponse {
     /** Time taken for the search in milliseconds. */
     private long searchTimeMs;
 
+    /** Error message when the request was rejected (e.g., malformed filter). Null on success. */
+    private String error;
+
     /**
      * Ordered list of search hits.
      *

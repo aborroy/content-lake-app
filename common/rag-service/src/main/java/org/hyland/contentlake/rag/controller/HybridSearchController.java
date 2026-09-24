@@ -9,6 +9,7 @@ import org.hyland.contentlake.rag.service.HybridSearchService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.HttpClientErrorException;
 
 /**
  * REST controller for hybrid (vector + keyword) search.
@@ -70,8 +71,19 @@ public class HybridSearchController {
                 request.getQuery(), request.getStrategy(), request.getMaxResults(),
                 request.getTopDocuments(), request.getChunksPerDocument());
 
-        HybridSearchResponse response = hybridSearchService.search(request);
-        return ResponseEntity.ok(response);
+        try {
+            HybridSearchResponse response = hybridSearchService.search(request);
+            return ResponseEntity.ok(response);
+        } catch (HttpClientErrorException.BadRequest e) {
+            // Malformed filter: hxpr returned 400 with a parser message. Surface it as 400.
+            log.warn("Hybrid search rejected by engine (malformed filter): {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(HybridSearchResponse.builder()
+                            .query(request.getQuery())
+                            .resultCount(0)
+                            .error(e.getResponseBodyAsString())
+                            .build());
+        }
     }
 
     /** A supplied budget of zero or less. Absent (null) is not a budget and is not rejected. */

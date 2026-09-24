@@ -68,6 +68,9 @@ public class HybridSearchResponse {
     /** Time taken for the full hybrid search in milliseconds. */
     private long searchTimeMs;
 
+    /** Error message when the request was rejected (e.g., malformed filter). Null on success. */
+    private String error;
+
     /**
      * Ordered list of fused search hits.
      *

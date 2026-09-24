@@ -5,8 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
 import org.hyland.contentlake.rag.service.SemanticSearchService;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.client.HttpClientErrorException;
 
 import java.util.Map;
 
@@ -60,8 +62,22 @@ public class SemanticSearchController {
                 request.getQuery(), request.getTopK(), request.getTopDocuments(),
                 request.getChunksPerDocument(), request.getMinScore());
 
-        SemanticSearchResponse response = semanticSearchService.search(request);
-        return ResponseEntity.ok(response);
+        try {
+            SemanticSearchResponse response = semanticSearchService.search(request);
+            return ResponseEntity.ok(response);
+        } catch (HttpClientErrorException.BadRequest e) {
+            // Malformed filter: hxpr returned 400 with a parser message. Surface it as 400 so the caller
+            // knows it's their input, not a service failure.
+            log.warn("Search rejected by engine (malformed filter): {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                    .body(SemanticSearchResponse.builder()
+                            .query(request.getQuery())
+                            .resultCount(0)
+                            .totalCount(0)
+                            .searchTimeMs(0)
+                            .error(e.getResponseBodyAsString())
+                            .build());
+        }
     }
 
     /** A supplied budget of zero or less. Absent (null) is not a budget and is not rejected. */
