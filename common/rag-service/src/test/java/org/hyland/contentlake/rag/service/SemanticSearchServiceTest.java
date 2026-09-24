@@ -25,6 +25,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.Supplier;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -33,6 +35,11 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.*;
+import org.hyland.contentlake.security.CallerIdentities;
+import org.mockito.ArgumentCaptor;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 
 @ExtendWith(MockitoExtension.class)
 class SemanticSearchServiceTest {
@@ -48,8 +55,16 @@ class SemanticSearchServiceTest {
 
     @InjectMocks SemanticSearchService service;
 
+    /**
+     * The real permission-filter builder, spied. Real so the emitted HXQL is the real thing these tests
+     * assert on, spied so the memoization test can still count how often a filter was resolved.
+     */
+    private PermissionFilterBuilder permissionFilterSpy;
+
     @BeforeEach
     void setUp() {
+        permissionFilterSpy = spy(PermissionFilterBuilder.withoutGroupResolvers(hxprService));
+        ReflectionTestUtils.setField(service, "permissionFilterBuilder", permissionFilterSpy);
         ReflectionTestUtils.setField(service, "alfrescoSourceId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
@@ -98,266 +113,39 @@ class SemanticSearchServiceTest {
     }
 
     // -----------------------------------------------------------------------
-    // Permission filter
+    // Permission filter: this service only delegates now
     // -----------------------------------------------------------------------
 
     @Test
-    void buildPermissionFilter_adminUser_includesEveryoneAndUsername() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of("admin", "GROUP_EVERYONE")).when(svc).getUserAuthorities("admin", "test-repo");
+    void currentUserPermissionFilter_passesTheCallersIdentitiesAndThisServicesSettings() {
+        PermissionFilterBuilder builder = mock(PermissionFilterBuilder.class);
+        ReflectionTestUtils.setField(service, "permissionFilterBuilder", builder);
+        // A plain token carries no per-source identity, so the caller's name comes from here.
+        when(securityContextService.getCurrentUsername()).thenReturn("alice");
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken("alice", null,
+                        List.of(new SimpleGrantedAuthority("ROLE_USER"))));
+        when(builder.query(any(), any(), any(), any())).thenReturn("SELECT * FROM SysContent WHERE 1=1");
 
-        String filter = svc.buildPermissionFilter("admin", null);
+        try {
+            String filter = service.currentUserPermissionFilter("alfresco", "cin_sourceId = 'x'");
 
-        // __Everyone__ is always included
-        assertThat(filter).contains("sys_racl = '__Everyone__'");
-        assertThat(filter).contains("sys_racl = 'u:admin_#_test-repo'");
-        // GROUP_EVERYONE itself is skipped (not added as a clause)
-        assertThat(filter).doesNotContain("GROUP_EVERYONE");
-    }
+            assertThat(filter).isEqualTo("SELECT * FROM SysContent WHERE 1=1");
 
-    @Test
-    void buildPermissionFilter_userWithGroups_includesGroupRaclFormat() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS"))
-                .when(svc).getUserAuthorities("alice", "test-repo");
+            ArgumentCaptor<CallerIdentities> identities = ArgumentCaptor.forClass(CallerIdentities.class);
+            ArgumentCaptor<PermissionFilterBuilder.Settings> settings =
+                    ArgumentCaptor.forClass(PermissionFilterBuilder.Settings.class);
+            verify(builder).query(identities.capture(), settings.capture(),
+                    eq("alfresco"), eq("cin_sourceId = 'x'"));
 
-        String filter = svc.buildPermissionFilter("alice", null);
-
-        // Groups are prefixed with "g:" in sys_racl
-        assertThat(filter).contains("sys_racl = 'g:GROUP_DEVELOPERS_#_test-repo'");
-        // Username also included
-        assertThat(filter).contains("sys_racl = 'u:alice_#_test-repo'");
-    }
-
-    @Test
-    void buildPermissionFilter_withAdditionalFilter_combinesWithAnd() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "my-repo");
-
-        String filter = svc.buildPermissionFilter("alice", "cin_sourceId = 'my-repo'");
-
-        assertThat(filter).contains(" AND ");
-        assertThat(filter).contains("cin_sourceId = 'my-repo'");
-    }
-
-    @Test
-    void buildPermissionFilter_withSourceFilter_usesFilteredSourceId() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("alice", "cin_sourceId = 'nuxeo:nuxeo-demo'");
-
-        assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("u:alice_#_test-repo");
-    }
-
-    @Test
-    void buildPermissionFilter_withConfiguredExtraSourceIds_includesAllNamespaces() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-        doReturn(List.of("alice", "GROUP_DEVELOPERS")).when(svc).getUserAuthorities("alice", "test-repo");
-        doReturn(List.of("alice", "GROUP_ENGINEERING")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("alice", null);
-
-        assertThat(filter).contains("sys_racl = 'g:GROUP_DEVELOPERS_#_test-repo'");
-        assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
-        assertThat(filter).contains("sys_racl = 'g:GROUP_ENGINEERING_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("g:GROUP_ENGINEERING_#_test-repo'");
-    }
-
-    @Test
-    void buildPermissionFilter_withSourceType_usesOnlyMatchingSourceId() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        doReturn(List.of("alice")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("alice", "nuxeo", null);
-
-        assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("u:alice_#_test-repo");
-    }
-
-    @Test
-    void buildPermissionFilter_alfrescoAdminDoesNotRestrictToAdminAuthorities() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "test-repo");
-
-        String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-        assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
-        assertThat(filter).doesNotContain("sys_racl = 'u:admin_#_test-repo'");
-        assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
-    }
-
-    @Test
-    void buildPermissionFilter_adminBypassOffByDefault_alfrescoAdminIsAclFilteredLikeAnyoneElse() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "test-repo");
-
-        String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-        // No unconditional source clause: the administrator reads through sys_racl like everyone else.
-        assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
-        assertThat(filter).contains("sys_racl = 'u:admin_#_test-repo'");
-        assertThat(filter).contains("sys_racl = '__Everyone__'");
-        // The group is namespaced like any other, so it grants only what documents actually name.
-        assertThat(filter).contains("sys_racl = 'g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo'");
-    }
-
-    @Test
-    void buildPermissionFilter_discoversAlfrescoSourceIdFromTheIndex() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-
-        stubIndexedSources("alfresco:discovered-repo");
-        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "discovered-repo");
-
-        String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-        assertThat(filter).contains("cin_sourceId = 'alfresco:discovered-repo'");
-        assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
-    }
-
-    // -----------------------------------------------------------------------
-    // A source rag-service was not compiled against (#133)
-    // -----------------------------------------------------------------------
-
-    @Test
-    void buildPermissionFilter_thirdSourceInTheIndex_getsAClauseWithoutAPin() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-        stubIndexedSources("sample-directory:sample-directory");
-        doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice", "sample-directory");
-
-        String filter = svc.buildPermissionFilter("alice", null);
-
-        // Before #133 nothing named this source, so the filter was unresolvedSourceClause() and every
-        // query returned nothing at all.
-        assertThat(filter).doesNotContain("__unresolved_permission_source__");
-        assertThat(filter).contains("sys_racl = '__Everyone__'");
-        assertThat(filter).contains("sys_racl = 'u:alice_#_sample-directory'");
-    }
-
-    @Test
-    void buildPermissionFilter_thirdSourceWithAdminBypass_qualifiesTheSourceIdWithItsOwnType() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-        stubIndexedSources("cmis:docbase-1");
-        // The bypass group is Alfresco's and grants nothing here, so this asserts the qualified form
-        // rather than the bypass: a bare id could never match a stored '<type>:<id>'.
-        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "docbase-1");
-
-        String filter = svc.buildPermissionFilter("admin", null);
-
-        assertThat(filter).doesNotContain("cin_sourceId = 'docbase-1'");
-        assertThat(filter).contains("sys_racl = 'u:admin_#_docbase-1'");
-        assertThat(filter).contains("sys_racl = 'g:GROUP_ALFRESCO_ADMINISTRATORS_#_docbase-1'");
-    }
-
-    @Test
-    void getUserAuthorities_thirdSource_resolvesDefaultsOnlyAndDoesNotCallADirectory() {
-        // No resolver claims that source's type, so the caller gets themselves and Everyone: its public
-        // documents are retrievable and its group-granted ones stay hidden.
-        withResolvers(alfrescoResolver(() -> List.of("GROUP_UNREACHABLE")));
-
-        assertThat(service.getUserAuthorities("alice", "sample-directory"))
-                .containsExactly("alice", "GROUP_EVERYONE");
-    }
-
-    @Test
-    void getUserAuthorities_resolverKnowsTheUser_addsTheirGroups() {
-        withResolvers(alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
-
-        assertThat(service.getUserAuthorities("alice", "test-repo"))
-                .containsExactly("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS");
-    }
-
-    @Test
-    void getUserAuthorities_resolverHasNoSuchIdentity_keepsTheSourceWithDefaults() {
-        // null is "not in this directory", which is not a directory failure and must not cost the source.
-        withResolvers(alfrescoResolver(() -> null));
-
-        assertThat(service.getUserAuthorities("alice", "test-repo"))
-                .containsExactly("alice", "GROUP_EVERYONE");
-    }
-
-    // -----------------------------------------------------------------------
-    // Group resolution failure policy
-    // -----------------------------------------------------------------------
-
-    @Test
-    void getUserAuthorities_lookupFails_failClosed_resolvesNoAuthorities() {
-        withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> {
-            throw new IllegalStateException("directory down");
-        }));
-
-        assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
-    }
-
-    @Test
-    void getUserAuthorities_lookupFails_degrade_keepsUsernameAndEveryone() {
-        withRegistry(GroupResolutionFailurePolicy.DEGRADE, alfrescoResolver(() -> {
-            throw new IllegalStateException("directory down");
-        }));
-
-        assertThat(service.getUserAuthorities("alice", "test-repo"))
-                .containsExactly("alice", "GROUP_EVERYONE");
-    }
-
-    @Test
-    void getUserAuthorities_noRegistryWired_resolvesDefaultsForEverySource() {
-        // A service constructed without the registry, as several tests here do, must still answer.
-        assertThat(service.getUserAuthorities("alice", "test-repo"))
-                .containsExactly("alice", "GROUP_EVERYONE");
-    }
-
-    @Test
-    void buildPermissionFilter_unresolvedAuthorities_excludesTheSourceAndMatchesNothing() {
-        SemanticSearchService svc = spy(service);
-        doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-
-        String filter = svc.buildPermissionFilter("alice", null);
-
-        // No clause at all would match every document, so the sentinel has to take its place.
-        assertThat(filter).contains("cin_sourceId = '__unresolved_permission_source__'");
-        assertThat(filter).doesNotContain("sys_racl");
-    }
-
-    @Test
-    void buildPermissionFilter_oneSourceUnresolved_keepsTheOtherAndDropsOnlyThatSource() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-        doReturn(List.of("alice", "GROUP_MEMBERS")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("alice", null);
-
-        assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
-        assertThat(filter).contains("sys_racl = 'g:GROUP_MEMBERS_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("test-repo");
-    }
-
-    @Test
-    void buildPermissionFilter_dualAuth_unresolvedSourceIsNotGivenDefaultAuthorities() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-        doReturn(List.of("bob")).when(svc).getUserAuthorities("bob", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("alice", "bob", null, null);
-
-        assertThat(filter).contains("sys_racl = 'u:bob_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("u:alice_#_test-repo");
+            // The identity reaches the builder untyped, so it answers for every source as it always has.
+            assertThat(identities.getValue().usernameFor("alfresco")).isEqualTo("alice");
+            assertThat(identities.getValue().usernameFor("sharepoint")).isEqualTo("alice");
+            // And the configured ids come from this service's own fields on every call.
+            assertThat(settings.getValue().sources().sourceIdOf("alfresco")).isEqualTo("test-repo");
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -398,42 +186,6 @@ class SemanticSearchServiceTest {
         service.logPermissionSourceIdConfiguration();
 
         verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
-    }
-
-    @Test
-    void buildPermissionFilter_mixedSources_keepsAlfrescoAdminBypassScopedToAlfresco() {
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-        doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "test-repo");
-        doReturn(List.of("admin", "GROUP_MEMBERS"))
-                .when(svc).getUserAuthorities("admin", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("admin", null, null);
-
-        assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
-        assertThat(filter).contains("sys_racl = 'g:GROUP_MEMBERS_#_nuxeo-demo'");
-        assertThat(filter).doesNotContain("sys_racl = 'u:admin_#_test-repo'");
-        assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
-    }
-
-    @Test
-    void buildPermissionFilter_adminBypassOn_doesNotLeakIntoANuxeoSource() {
-        // The bypass is an Alfresco repository concept. Enabling it must not turn the same group name
-        // into full access on a source that has no notion of it.
-        SemanticSearchService svc = spy(service);
-        ReflectionTestUtils.setField(svc, "permissionSourceIds", "nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-        doReturn(List.of("admin", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                .when(svc).getUserAuthorities("admin", "nuxeo-demo");
-
-        String filter = svc.buildPermissionFilter("admin", null, null);
-
-        assertThat(filter).doesNotContain("cin_sourceId = 'nuxeo:nuxeo-demo'");
-        assertThat(filter).contains("sys_racl = 'u:admin_#_nuxeo-demo'");
     }
 
     // -----------------------------------------------------------------------
@@ -479,7 +231,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_noResults_returnsEmptyResponse() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -496,7 +247,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_minScoreFiltering_excludesLowScoringResults() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -544,7 +294,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_enrichesOnlyTheDocumentsOfRetainedCandidates() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -767,7 +516,6 @@ class SemanticSearchServiceTest {
     /** A service whose permission filter and embedding are stubbed, so only retrieval is under test. */
     private SemanticSearchService budgetService() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
         when(embeddingService.getModelName()).thenReturn("test-model");
@@ -839,7 +587,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_noExpansion_runsExactlyOnePass() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -860,7 +607,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_expandedIntoVariants_searchesEachAndFusesTheResults() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.getModelName()).thenReturn("test-model");
@@ -888,7 +634,7 @@ class SemanticSearchServiceTest {
         verify(embeddingService).embedQuery("test");
         verify(embeddingService).embedQuery("rephrased");
         verify(hxprService, times(2)).vectorSearch(any(), any(), any(), anyInt());
-        verify(svc, times(1)).getUserAuthorities(anyString(), anyString());
+        verify(permissionFilterSpy, times(1)).query(any(), any(), any(), any());
 
         assertThat(response.getResults()).hasSize(2);
         assertThat(response.getResults()).extracting(SemanticSearchResponse.SearchHit::getChunkText)
@@ -903,7 +649,6 @@ class SemanticSearchServiceTest {
     @Test
     void search_expansionThrows_fallsBackToTheOriginalQuery() {
         SemanticSearchService svc = spy(service);
-        doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -939,7 +684,6 @@ class SemanticSearchServiceTest {
     void search_withSourceType_addsGenericSourceFilterAndNarrowsAuthorities() {
         SemanticSearchService svc = spy(service);
         ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-        doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
 
         when(securityContextService.getCurrentUsername()).thenReturn("user");
         when(embeddingService.embedQuery(any())).thenReturn(List.of(0.1d, 0.2d));
@@ -958,6 +702,5 @@ class SemanticSearchServiceTest {
                         && filter.contains("sys_racl = 'u:user_#_nuxeo-demo'")
                         && !filter.contains("u:user_#_test-repo")
         ), anyInt());
-        verify(svc, never()).getUserAuthorities(eq("user"), eq("test-repo"));
     }
 }

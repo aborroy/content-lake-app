@@ -7,12 +7,11 @@ import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.observability.RagObservations;
 import org.hyland.contentlake.rag.model.SemanticSearchRequest;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse;
-import org.hyland.contentlake.rag.security.DualSourceAuthentication;
-import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.ChunkMetadata;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SearchHit;
 import org.hyland.contentlake.rag.model.SemanticSearchResponse.SourceDocument;
 import org.hyland.contentlake.security.AclFilterBuilder;
+import org.hyland.contentlake.security.CallerIdentityService;
 import org.hyland.contentlake.security.SecurityContextService;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.client.NamedQueryService;
@@ -100,15 +99,18 @@ public class SemanticSearchService {
     /** Optional (#73): null in unit tests that construct this service without the tracing collaborator. */
     private final RagObservations observations;
     /**
-     * Group expansion per source (#143). Optional: null in unit tests that construct this service without
-     * it, where {@link #groupResolvers()} falls back to a registry with no resolvers.
-     */
-    private final SourceGroupResolverRegistry groupResolverRegistry;
-    /**
      * The shared source catalogue. Optional: null in unit tests, where {@link #sourceCatalog()} builds a
-     * private one.
+     * private one. Read only by the startup diagnostic now that the filter itself is built elsewhere.
      */
     private final PermissionSourceCatalog permissionSourceCatalog;
+    /**
+     * The ACL-scoped query for a caller, over every source they are authenticated for. Optional: null in
+     * unit tests, where {@link #permissionFilter()} builds one with no group resolvers, which yields the
+     * caller's default authorities for every source.
+     */
+    private final PermissionFilterBuilder permissionFilterBuilder;
+    /** The caller's identity per source type. Optional: null in unit tests, where one is built lazily. */
+    private final CallerIdentityService callerIdentityServiceBean;
 
     @Value("${alfresco.source-id:}")
     private String alfrescoSourceId;
@@ -127,6 +129,8 @@ public class SemanticSearchService {
 
     /** Built on first use by {@link #sourceCatalog()} when no bean was injected. */
     private volatile PermissionSourceCatalog fallbackSourceCatalog;
+    private volatile PermissionFilterBuilder fallbackPermissionFilter;
+    private volatile CallerIdentityService fallbackCallerIdentityService;
 
     /**
      * Permission-aware semantic search. When the query cache (#72) is enabled, an identical
@@ -367,13 +371,8 @@ public class SemanticSearchService {
         String additionalFilter = combineFilters(request.getFilter(), sourceTypeFilter);
         // A named query, when supplied, resolves server-side to an HXQL fragment; no-op when absent.
         additionalFilter = combineFilters(additionalFilter, namedQueryService.resolveFilter(request.getNamedQuery()));
-        if (auth instanceof DualSourceAuthentication dual) {
-            return buildPermissionFilter(
-                    dual.getAlfrescoUsername(), dual.getNuxeoUsername(),
-                    request.getSourceType(), additionalFilter);
-        }
-        String username = securityContextService.getCurrentUsername();
-        return buildPermissionFilter(username, request.getSourceType(), additionalFilter);
+        return permissionFilter().query(callerIdentityService().identities(auth), permissionSettings(),
+                request.getSourceType(), additionalFilter);
     }
 
     /**
@@ -383,12 +382,8 @@ public class SemanticSearchService {
      * {@code sys_racl}. Returns a complete HXQL query ({@code SELECT ... WHERE ...}).
      */
     public String currentUserPermissionFilter(String sourceType, String additionalFilter) {
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        if (auth instanceof DualSourceAuthentication dual) {
-            return buildPermissionFilter(dual.getAlfrescoUsername(), dual.getNuxeoUsername(),
-                    sourceType, additionalFilter);
-        }
-        return buildPermissionFilter(securityContextService.getCurrentUsername(), sourceType, additionalFilter);
+        return permissionFilter().query(callerIdentityService().currentIdentities(), permissionSettings(),
+                sourceType, additionalFilter);
     }
 
     /** Single-threaded memoization; each search resolves its filter at most once. */
@@ -601,110 +596,6 @@ public class SemanticSearchService {
     }
 
     // ---------------------------------------------------------------
-    // Permission filter (sys_racl)
-    // ---------------------------------------------------------------
-
-    String buildPermissionFilter(String username, String additionalFilter) {
-        return buildPermissionFilter(username, null, additionalFilter);
-    }
-
-    /**
-     * Dual-auth variant: routes Alfresco sources to {@code alfrescoUser} and Nuxeo sources
-     * to {@code nuxeoUser}. Sources whose corresponding user is {@code null} are excluded
-     * (the caller has not authenticated against that repository).
-     */
-    String buildPermissionFilter(String alfrescoUser, String nuxeoUser,
-                                 String sourceType, String additionalFilter) {
-        List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
-        Map<String, List<String>> authoritiesBySource =
-                resolveAuthoritiesByDualSource(alfrescoUser, nuxeoUser, sourceIds);
-
-        List<String> sourceClauses = new ArrayList<>();
-        for (String sourceId : sourceIds) {
-            String username = isNuxeoSource(sourceId) ? nuxeoUser : alfrescoUser;
-            if (username == null) {
-                // Not authenticated against this source, so exclude it from results entirely.
-                continue;
-            }
-            List<String> authorities = authoritiesBySource.get(sourceId);
-            if (authorities == null || authorities.isEmpty()) {
-                // Authorities unresolved rather than empty. Substituting a default here would undo the
-                // fail-closed decision taken in getUserAuthorities.
-                log.warn("Excluding source {} from the permission filter for user {}: no authorities resolved",
-                        sourceId, username);
-                continue;
-            }
-            sourceClauses.add(sourcePermissionClause(sourceId, authorities));
-        }
-
-        log.debug("Dual-auth permission filter: alfrescoUser={}, nuxeoUser={}, sourceIds={}",
-                alfrescoUser, nuxeoUser, sourceIds);
-
-        if (sourceClauses.isEmpty()) {
-            log.warn("No permission clauses resolved (alfrescoUser={}, nuxeoUser={}, sourceType={}, filter={})",
-                    alfrescoUser, nuxeoUser, sourceType, additionalFilter);
-        }
-
-        return AclFilterBuilder.query(sourceClauses, additionalFilter);
-    }
-
-    Map<String, List<String>> resolveAuthoritiesByDualSource(String alfrescoUser, String nuxeoUser,
-                                                             List<String> sourceIds) {
-        Map<String, List<String>> authoritiesBySource = new LinkedHashMap<>();
-        for (String sourceId : sourceIds) {
-            String username = isNuxeoSource(sourceId) ? nuxeoUser : alfrescoUser;
-            if (username != null) {
-                authoritiesBySource.put(sourceId, getUserAuthorities(username, sourceId));
-            }
-        }
-        return authoritiesBySource;
-    }
-
-    String buildPermissionFilter(String username, String sourceType, String additionalFilter) {
-        List<String> sourceIds = resolvePermissionSourceIds(sourceType, additionalFilter);
-        Map<String, List<String>> authoritiesBySource = resolveAuthoritiesBySource(username, sourceIds);
-
-        List<String> sourceClauses = new ArrayList<>();
-        for (String sourceId : sourceIds) {
-            List<String> authorities = authoritiesBySource.get(sourceId);
-            if (authorities == null || authorities.isEmpty()) {
-                log.warn("Excluding source {} from the permission filter for user {}: no authorities resolved",
-                        sourceId, username);
-                continue;
-            }
-            sourceClauses.add(sourcePermissionClause(sourceId, authorities));
-        }
-
-        log.debug("Permission filter with source-scoped authorities for user {} (sourceIds={})", username, sourceIds);
-
-        if (sourceClauses.isEmpty()) {
-            log.warn("No permission source ids resolved for user {} (sourceType={}, additionalFilter={})",
-                    username, sourceType, additionalFilter);
-        }
-
-        return AclFilterBuilder.query(sourceClauses, additionalFilter);
-    }
-
-    Map<String, List<String>> resolveAuthoritiesBySource(String username, List<String> sourceIds) {
-        Map<String, List<String>> authoritiesBySource = new LinkedHashMap<>();
-        for (String sourceId : sourceIds) {
-            authoritiesBySource.put(sourceId, getUserAuthorities(username, sourceId));
-        }
-        return authoritiesBySource;
-    }
-
-    /**
-     * The caller's authorities on one source, or an empty list when they could not be resolved and the
-     * configured policy is to fail closed. An empty list is not "no groups": it means the answer is
-     * unknown, and {@link #buildPermissionFilter(String, String, String)} drops the source instead of
-     * guessing.
-     */
-    List<String> getUserAuthorities(String username, String sourceId) {
-        String sourceType = sourceCatalog().sourceType(configuredSources(), sourceId);
-        return groupResolvers().authorities(username, sourceId, sourceType);
-    }
-
-    // ---------------------------------------------------------------
     // Document metadata enrichment
     // ---------------------------------------------------------------
 
@@ -875,21 +766,6 @@ public class SemanticSearchService {
     }
 
     /**
-     * The per-source ACL predicate. The bypass argument is the local policy decision: the
-     * administrator group grants full access only when {@code rag.security.admin-bypass.enabled} is
-     * set and only on an Alfresco source. The predicate itself belongs to {@link AclFilterBuilder}.
-     */
-    private String sourcePermissionClause(String sourceId, List<String> authorities) {
-        return AclFilterBuilder.sourcePermissionClause(
-                sourceId, formatSourceId(sourceId), authorities,
-                adminBypassEnabled && isAlfrescoSource(sourceId));
-    }
-
-    private String formatSourceId(String sourceId) {
-        return sourceCatalog().qualify(configuredSources(), sourceId);
-    }
-
-    /**
      * Logs the resolved permission-source-id configuration once at startup and, when
      * {@code rag.permission.source-ids} is pinned, warns if it fails to cover the sources actually
      * present in the index. A pinned value that misses an indexed source silently hides that source's
@@ -924,16 +800,49 @@ public class SemanticSearchService {
         }
     }
 
-    private List<String> resolvePermissionSourceIds(String sourceType, String additionalFilter) {
-        return sourceCatalog().resolve(configuredSources(), sourceType, additionalFilter);
-    }
-
     /**
      * The catalogue of sources to filter on: the injected bean when there is one, otherwise a private
      * instance built lazily so it is available to a unit test that never runs {@code @PostConstruct}. It
      * holds only what came from the index; the configured ids are read from this service's own fields on
      * every call, which is what keeps the two from disagreeing.
      */
+    /**
+     * The permission-filter builder, or one with no group resolvers when this service was constructed
+     * without it. A builder with no resolvers yields the caller's default authorities for every source,
+     * which is the same answer this service gave for a source it had no directory client for.
+     */
+    private PermissionFilterBuilder permissionFilter() {
+        if (permissionFilterBuilder != null) {
+            return permissionFilterBuilder;
+        }
+        PermissionFilterBuilder current = fallbackPermissionFilter;
+        if (current == null) {
+            current = PermissionFilterBuilder.withoutGroupResolvers(hxprService);
+            fallbackPermissionFilter = current;
+        }
+        return current;
+    }
+
+    private CallerIdentityService callerIdentityService() {
+        if (callerIdentityServiceBean != null) {
+            return callerIdentityServiceBean;
+        }
+        CallerIdentityService current = fallbackCallerIdentityService;
+        if (current == null) {
+            current = new CallerIdentityService(securityContextService);
+            fallbackCallerIdentityService = current;
+        }
+        return current;
+    }
+
+    /**
+     * The configured source ids and the local bypass policy, read from this service's own fields on every
+     * call. Passed per call rather than held by the builder, which is what keeps the two from disagreeing.
+     */
+    private PermissionFilterBuilder.Settings permissionSettings() {
+        return new PermissionFilterBuilder.Settings(configuredSources(), adminBypassEnabled);
+    }
+
     private PermissionSourceCatalog sourceCatalog() {
         if (permissionSourceCatalog != null) {
             return permissionSourceCatalog;
@@ -946,26 +855,7 @@ public class SemanticSearchService {
         return current;
     }
 
-    /**
-     * The group resolvers, or a registry holding none when this service was constructed without one. A
-     * registry with no resolvers yields the caller's default authorities for every source, which is the
-     * same answer this service gave for a source it had no directory client for.
-     */
-    private SourceGroupResolverRegistry groupResolvers() {
-        return groupResolverRegistry != null
-                ? groupResolverRegistry
-                : SourceGroupResolverRegistry.withoutResolvers();
-    }
-
     private PermissionSourceCatalog.Configured configuredSources() {
-        return new PermissionSourceCatalog.Configured(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
-    }
-
-    private boolean isAlfrescoSource(String sourceId) {
-        return sourceCatalog().isAlfresco(configuredSources(), sourceId);
-    }
-
-    private boolean isNuxeoSource(String sourceId) {
-        return sourceCatalog().isNuxeo(configuredSources(), sourceId);
+        return PermissionSourceCatalog.Configured.of(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
     }
 }

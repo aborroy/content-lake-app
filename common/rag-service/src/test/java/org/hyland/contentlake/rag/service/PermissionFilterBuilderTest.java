@@ -35,7 +35,7 @@ import static org.mockito.Mockito.when;
 class PermissionFilterBuilderTest {
 
     private static final PermissionSourceCatalog.Configured SOURCES =
-            new PermissionSourceCatalog.Configured("test-repo", "nuxeo-demo", null);
+            PermissionSourceCatalog.Configured.of("test-repo", "nuxeo-demo", null);
 
     @Mock
     private HxprService hxprService;
@@ -69,7 +69,7 @@ class PermissionFilterBuilderTest {
      */
     private static PermissionFilterBuilder.Settings alfrescoOnly() {
         return new PermissionFilterBuilder.Settings(
-                new PermissionSourceCatalog.Configured("test-repo", null, null), false);
+                PermissionSourceCatalog.Configured.of("test-repo", null, null), false);
     }
 
     private static SourceGroupResolver resolver(String sourceType, Supplier<List<String>> groups) {
@@ -287,6 +287,101 @@ class PermissionFilterBuilderTest {
             // The bypass group is Alfresco's policy and grants nothing in another source.
             assertThat(filter).doesNotContain("cin_sourceId = 'sharepoint:site-1'");
             assertThat(filter).contains("sys_racl = 'u:admin_#_site-1'");
+        }
+    }
+
+    /** Ported from the two service tests: which sources a filter covers, and how each is namespaced. */
+    @Nested
+    class SourceSelection {
+
+        @Test
+        void combinesTheCallersOwnFilterWithAnd() {
+            String filter = builderWith().query(CallerIdentities.single("alice"), alfrescoOnly(),
+                    null, "cin_sourceId = 'test-repo'");
+
+            assertThat(filter).contains(" AND ");
+            assertThat(filter).contains("cin_sourceId = 'test-repo'");
+        }
+
+        @Test
+        void narrowsToASourcePinnedInTheCallersOwnFilter() {
+            String filter = builderWith().query(CallerIdentities.single("alice"), settings(false),
+                    null, "cin_sourceId = 'nuxeo:nuxeo-demo'");
+
+            // An id-level pin in the caller's filter is a first-class way to scope to one source.
+            assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
+            assertThat(filter).doesNotContain("u:alice_#_test-repo");
+        }
+
+        @Test
+        void coversEverySourceAnOperatorPinned() {
+            PermissionFilterBuilder builder = builderWith(
+                    resolver("alfresco", () -> List.of("GROUP_DEVELOPERS")),
+                    resolver("nuxeo", () -> List.of("GROUP_ENGINEERING")));
+            PermissionFilterBuilder.Settings pinned = new PermissionFilterBuilder.Settings(
+                    PermissionSourceCatalog.Configured.of("test-repo", "nuxeo-demo", "test-repo,nuxeo-demo"),
+                    false);
+
+            String filter = builder.query(CallerIdentities.single("alice"), pinned, null, null);
+
+            assertThat(filter).contains("sys_racl = 'g:GROUP_DEVELOPERS_#_test-repo'");
+            assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
+            assertThat(filter).contains("sys_racl = 'g:GROUP_ENGINEERING_#_nuxeo-demo'");
+            // A group from one source's directory must not be namespaced into another's.
+            assertThat(filter).doesNotContain("g:GROUP_ENGINEERING_#_test-repo");
+        }
+
+        @Test
+        void narrowsToTheRequestedSourceType() {
+            String filter = builderWith().query(
+                    CallerIdentities.single("alice"), settings(false), "nuxeo", null);
+
+            assertThat(filter).contains("sys_racl = 'u:alice_#_nuxeo-demo'");
+            assertThat(filter).doesNotContain("u:alice_#_test-repo");
+        }
+
+        @Test
+        void discoversASourceIdFromTheIndexWhenNoneIsConfigured() {
+            stubIndexedSources("alfresco:discovered-repo");
+            PermissionFilterBuilder.Settings nothingConfigured = new PermissionFilterBuilder.Settings(
+                    PermissionSourceCatalog.Configured.of(null, null, null), true);
+            PermissionFilterBuilder builder = builderWith(
+                    resolver("alfresco", () -> List.of("GROUP_ALFRESCO_ADMINISTRATORS")));
+
+            String filter = builder.query(CallerIdentities.single("admin"), nothingConfigured, "alfresco", null);
+
+            assertThat(filter).contains("cin_sourceId = 'alfresco:discovered-repo'");
+        }
+    }
+
+    @Nested
+    class WhenTheAdminBypassIsOff {
+
+        @Test
+        void anAlfrescoAdministratorIsAclFilteredLikeAnyoneElse() {
+            PermissionFilterBuilder builder = builderWith(
+                    resolver("alfresco", () -> List.of("GROUP_ALFRESCO_ADMINISTRATORS")));
+
+            String filter = builder.query(CallerIdentities.single("admin"), alfrescoOnly(), "alfresco", null);
+
+            // No unconditional source clause: the administrator reads through sys_racl like everyone else.
+            assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
+            assertThat(filter).contains("sys_racl = 'u:admin_#_test-repo'");
+            // The group is namespaced like any other, so it grants only what documents actually name.
+            assertThat(filter).contains("sys_racl = 'g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo'");
+        }
+
+        @Test
+        void andWhenOnItReplacesTheAclClauseRatherThanNarrowingIt() {
+            PermissionFilterBuilder builder = builderWith(
+                    resolver("alfresco", () -> List.of("GROUP_ALFRESCO_ADMINISTRATORS")));
+            PermissionFilterBuilder.Settings bypassOn = new PermissionFilterBuilder.Settings(
+                    PermissionSourceCatalog.Configured.of("test-repo", null, null), true);
+
+            String filter = builder.query(CallerIdentities.single("admin"), bypassOn, "alfresco", null);
+
+            assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
+            assertThat(filter).doesNotContain("sys_racl = 'u:admin_#_test-repo'");
         }
     }
 
