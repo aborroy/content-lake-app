@@ -26,14 +26,23 @@ public record ContentLakeNodeStatus(
     public enum Status {
         PENDING,
         INDEXED,
-        FAILED
+        FAILED,
+        /**
+         * Nothing was attempted, because the document's type cannot contain text. Distinct from
+         * {@code FAILED}, which means a pass ran and produced no usable text.
+         *
+         * <p>Scope exclusion deliberately has no status of its own: it is carried by the
+         * {@code inScope} and {@code excluded} fields of the enclosing record.</p>
+         */
+        SKIPPED
     }
 
     public record FolderStatusSummary(
             long totalDocuments,
             long indexedDocuments,
             long pendingDocuments,
-            long failedDocuments
+            long failedDocuments,
+            long skippedDocuments
     ) {
     }
 }

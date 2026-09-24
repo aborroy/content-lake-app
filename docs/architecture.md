@@ -443,8 +443,8 @@ public interface ScopeResolver {
 | `SOURCE_NAME` | `source_name` | node name |
 | `SOURCE_MIME_TYPE` | `source_mimeType` | MIME type |
 | `SOURCE_MODIFIED_AT` | `source_modifiedAt` | ISO-8601 timestamp |
-| `CONTENT_LAKE_SYNC_STATUS` | `contentLake_syncStatus` | `PENDING`, `INDEXED`, `FAILED` |
-| `CONTENT_LAKE_SYNC_ERROR` | `contentLake_syncError` | error message when FAILED |
+| `CONTENT_LAKE_SYNC_STATUS` | `contentLake_syncStatus` | `PENDING`, `INDEXED`, `FAILED`, `SKIPPED` |
+| `CONTENT_LAKE_SYNC_ERROR` | `contentLake_syncError` | reason, when `FAILED` or `SKIPPED` |
 | `CONTENT_LAKE_EXTRACTED_TEXT` | `contentLake_extractedText` | extracted body, mirrored here because `sys_fulltextBinary` is not queryable from HXQL |
 | `CONTENT_LAKE_SECTION_MAP` | `contentLake_sectionMap` | per-chunk section index and section text, for small-to-big retrieval |
 | `CONTENT_LAKE_CONTENT_FINGERPRINT` | `contentLake_contentFingerprint` | fingerprint of everything determining the stored chunks and vectors |

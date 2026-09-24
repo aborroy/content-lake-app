@@ -6,9 +6,9 @@ package org.hyland.alfresco.contentlake.client;
  * <p>Derived from a single AFTS facet query; files without {@code cl:syncStatus}
  * are treated as PENDING.</p>
  */
-public record FolderStatusCounts(long total, long indexed, long failed) {
+public record FolderStatusCounts(long total, long indexed, long failed, long skipped) {
 
     public long pending() {
-        return Math.max(0, total - indexed - failed);
+        return Math.max(0, total - indexed - failed - skipped);
     }
 }

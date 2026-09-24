@@ -117,7 +117,8 @@ public class HxprDocument {
         PENDING,
         PROCESSING,
         INDEXED,
-        FAILED
+        FAILED,
+        SKIPPED
     }
 
     /**

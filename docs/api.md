@@ -67,6 +67,22 @@ curl "http://localhost:9090/api/content-lake/nodes/{folderId}/status?includeFold
   -u admin:admin
 ```
 
+`status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | no content pass has finished yet |
+| `INDEXED` | a pass completed and stored content |
+| `FAILED` | a pass ran and produced no usable text, or errored. `error` says why |
+| `SKIPPED` | nothing was attempted, because the type cannot contain text. `error` names the extension |
+
+A folder's `folderSummary` counts all four, and they sum to `totalDocuments`. A skipped document does
+not make its folder report `FAILED`: there is nothing to repair, so the folder verdict turns on
+`failedDocuments` and `pendingDocuments` only.
+
+Scope exclusion is not a status. It is reported by the `inScope` and `excluded` fields, which is why a
+node that is out of scope reports `status: null`.
+
 #### Prove a Node Is Retrievable
 
 `status` reports a claim: it is read from the node's own `cl:syncStatusValue`, and a document can hold

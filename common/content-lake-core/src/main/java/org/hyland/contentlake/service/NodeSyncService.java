@@ -295,14 +295,14 @@ public class NodeSyncService {
             //
             // Reported as its own reason rather than as ERR_NO_EXTRACTABLE_TEXT, because "we did not try" and
             // "we tried and got nothing" are different facts about a document, and only the second is worth an
-            // operator's attention. The terminal status stays FAILED, which is what the pipeline has always
-            // recorded for a document with no text; giving this case a status of its own would change the
-            // HxprDocument wire contract and is not in the scope of this fix.
+            // operator's attention. The terminal status is SKIPPED for the same reason: FAILED would claim a
+            // pass ran and produced nothing. Scope exclusion has no status of its own, because
+            // ContentLakeNodeStatus already carries it as the inScope and excluded fields.
             String cannotContainText = nonTextContentPolicy.reasonFor(mimeType, documentName);
             if (cannotContainText != null) {
                 nonTextSkips.incrementAndGet();
                 log.info("Skipped content for node {} without downloading it, because {}", nodeId, cannotContainText);
-                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.FAILED,
+                patchSyncState(hxprDocId, baseIngestProps, ContentLakeNodeStatus.Status.SKIPPED,
                         String.format(ERR_NON_TEXT_CONTENT, cannotContainText), nodeId);
                 return;
             }
@@ -571,6 +571,13 @@ public class NodeSyncService {
      * no extractable text at all, which is a stable outcome rather than a repairable one, and retrying it
      * on every pass would pay extraction for every such binary in the corpus forever. A transient failure
      * is therefore retried when the node next changes, not on the next sweep.</p>
+     *
+     * <p>{@code SKIPPED} counts as concluded for the same reason, and more strongly: the type cannot
+     * contain text, so a later pass would reach the same conclusion without even downloading. One
+     * consequence is worth knowing when reading a long-lived index: a document stored as {@code FAILED}
+     * by a build that predates {@code SKIPPED} is not reclassified by a later pass, because this method
+     * reports it concluded and {@link #isStale} then skips it. It reclassifies when its node next
+     * changes, or on a rebuilt index.</p>
      *
      * <p>Reads the status from {@code cin_ingestProperties} rather than {@link HxprDocument#getSyncStatus()}:
      * that field is {@code @JsonIgnore}, so it is never populated on a document read back from hxpr.</p>
@@ -1096,6 +1103,7 @@ public class NodeSyncService {
             case PENDING -> HxprDocument.SyncStatus.PENDING;
             case INDEXED -> HxprDocument.SyncStatus.INDEXED;
             case FAILED  -> HxprDocument.SyncStatus.FAILED;
+            case SKIPPED -> HxprDocument.SyncStatus.SKIPPED;
         };
     }
 

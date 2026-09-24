@@ -65,8 +65,8 @@ class ContentLakeNodeStatusServiceTest {
         Node folder = folder("folder-1");
         alfrescoClient.nodesById.put("folder-1", folder);
         scopeResolver.folderInScopeIds.add("folder-1");
-        // AFTS returns counts directly: 3 total, 1 indexed, 1 failed -> 1 pending
-        searchService.countsByFolderId.put("folder-1", new FolderStatusCounts(3, 1, 1));
+        // AFTS returns counts directly: 3 total, 1 indexed, 1 failed, 0 skipped -> 1 pending
+        searchService.countsByFolderId.put("folder-1", new FolderStatusCounts(3, 1, 1, 0));
 
         Map<String, ContentLakeNodeStatus> results = service.getNodeStatuses(List.of("folder-1"), true);
         ContentLakeNodeStatus status = results.get("folder-1");
@@ -79,9 +79,47 @@ class ContentLakeNodeStatusServiceTest {
         assertThat(status.folderSummary().indexedDocuments()).isEqualTo(1);
         assertThat(status.folderSummary().pendingDocuments()).isEqualTo(1);
         assertThat(status.folderSummary().failedDocuments()).isEqualTo(1);
+        assertThat(status.folderSummary().skippedDocuments()).isZero();
         // No getAllChildren or hxpr batch calls needed -- AFTS handles it in one query
         assertThat(alfrescoClient.getAllChildrenCalls).isZero();
         assertThat(hxprService.batchCalls).isEmpty();
+    }
+
+    @Test
+    void getNodeStatuses_folderWithAggregate_aSkippedDocumentDoesNotFailTheFolder() {
+        Node folder = folder("folder-1");
+        alfrescoClient.nodesById.put("folder-1", folder);
+        scopeResolver.folderInScopeIds.add("folder-1");
+        // 10 total, 9 indexed, 0 failed, 1 skipped -> 0 pending. The skip is the only non-indexed document.
+        searchService.countsByFolderId.put("folder-1", new FolderStatusCounts(10, 9, 0, 1));
+
+        ContentLakeNodeStatus status = service.getNodeStatuses(List.of("folder-1"), true).get("folder-1");
+
+        // While the skip was recorded as FAILED, one signature file turned its whole folder red.
+        assertThat(status.status()).isEqualTo(ContentLakeNodeStatus.Status.INDEXED);
+        assertThat(status.error()).isNull();
+        assertThat(status.folderSummary().skippedDocuments()).isEqualTo(1);
+        assertThat(status.folderSummary().failedDocuments()).isZero();
+        assertThat(status.folderSummary().pendingDocuments()).isZero();
+    }
+
+    @Test
+    void getNodeStatuses_folderWithAggregate_countsStillSum() {
+        Node folder = folder("folder-1");
+        alfrescoClient.nodesById.put("folder-1", folder);
+        scopeResolver.folderInScopeIds.add("folder-1");
+        // 10 total, 4 indexed, 2 failed, 3 skipped -> 1 pending, and the four buckets must sum to the total.
+        searchService.countsByFolderId.put("folder-1", new FolderStatusCounts(10, 4, 2, 3));
+
+        ContentLakeNodeStatus.FolderStatusSummary summary =
+                service.getNodeStatuses(List.of("folder-1"), true).get("folder-1").folderSummary();
+
+        assertThat(summary.indexedDocuments()
+                + summary.pendingDocuments()
+                + summary.failedDocuments()
+                + summary.skippedDocuments())
+                .isEqualTo(summary.totalDocuments());
+        assertThat(summary.pendingDocuments()).isEqualTo(1);
     }
 
     @Test
@@ -180,7 +218,7 @@ class ContentLakeNodeStatusServiceTest {
 
         @Override
         public FolderStatusCounts getFolderStatusCounts(String folderId, Collection<String> excludedAspects) {
-            return countsByFolderId.getOrDefault(folderId, new FolderStatusCounts(0, 0, 0));
+            return countsByFolderId.getOrDefault(folderId, new FolderStatusCounts(0, 0, 0, 0));
         }
     }
 

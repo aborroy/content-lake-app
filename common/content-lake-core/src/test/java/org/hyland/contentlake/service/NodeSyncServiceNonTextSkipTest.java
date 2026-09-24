@@ -3,6 +3,7 @@ package org.hyland.contentlake.service;
 import org.hyland.contentlake.client.HxprDocumentApi;
 import org.hyland.contentlake.client.HxprService;
 import org.hyland.contentlake.model.ContentLakeIngestProperties;
+import org.hyland.contentlake.model.ContentLakeNodeStatus;
 import org.hyland.contentlake.model.HxprDocument;
 import org.hyland.contentlake.service.chunking.SimpleChunkingService;
 import org.hyland.contentlake.spi.ContentSourceClient;
@@ -115,6 +116,22 @@ class NodeSyncServiceNonTextSkipTest {
         assertThat(String.valueOf(error))
                 .isEqualTo("Content not read, because its extension .p7s cannot contain text")
                 .doesNotContain("No extractable text");
+    }
+
+    @Test
+    void recordsSkippedRatherThanFailed() {
+        service.processContent("hxpr-doc-1", Map.of("source_nodeId", "node-1"), "node-1",
+                "application/octet-stream", "detached.p7s", "/detached.p7s");
+
+        ArgumentCaptor<HxprDocument> captor = ArgumentCaptor.forClass(HxprDocument.class);
+        verify(documentApi).updateById(eq("hxpr-doc-1"), captor.capture());
+        HxprDocument patched = captor.getValue();
+
+        // The status an operator or a query can filter on, not just the error string. FAILED would claim a
+        // pass ran and produced nothing; nothing was attempted.
+        assertThat(patched.getCinIngestProperties().get(ContentLakeIngestProperties.CONTENT_LAKE_SYNC_STATUS))
+                .isEqualTo(ContentLakeNodeStatus.Status.SKIPPED.name());
+        assertThat(patched.getSyncStatus()).isEqualTo(HxprDocument.SyncStatus.SKIPPED);
     }
 
     @Test

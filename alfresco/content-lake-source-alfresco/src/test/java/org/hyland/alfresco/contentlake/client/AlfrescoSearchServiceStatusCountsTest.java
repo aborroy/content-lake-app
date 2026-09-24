@@ -20,20 +20,23 @@ import static org.assertj.core.api.Assertions.assertThat;
 class AlfrescoSearchServiceStatusCountsTest {
 
     @Test
-    void countsIndexedFailedAndPendingFromNodeProperties() {
+    void countsIndexedFailedSkippedAndPendingFromNodeProperties() {
         StubSearchService searchService = new StubSearchService(List.of(
                 fileWithProperties("doc-1", Map.of("cl:syncStatusValue", "INDEXED")),
                 fileWithProperties("doc-2", Map.of("cl:syncStatusValue", "INDEXED")),
                 fileWithProperties("doc-3", Map.of("cl:syncStatusValue", "FAILED")),
                 fileWithProperties("doc-4", Map.of("cl:syncStatusValue", "PENDING")),
-                fileWithProperties("doc-5", Map.of())
+                fileWithProperties("doc-5", Map.of()),
+                fileWithProperties("doc-6", Map.of("cl:syncStatusValue", "SKIPPED"))
         ));
 
         FolderStatusCounts counts = searchService.getFolderStatusCounts("folder-1", List.of());
 
-        assertThat(counts.total()).isEqualTo(5);
+        assertThat(counts.total()).isEqualTo(6);
         assertThat(counts.indexed()).isEqualTo(2);
         assertThat(counts.failed()).isEqualTo(1);
+        assertThat(counts.skipped()).isEqualTo(1);
+        // Derived, so a skip must not be double-counted as pending: doc-4 and doc-5 only.
         assertThat(counts.pending()).isEqualTo(2);
     }
 
@@ -60,6 +63,7 @@ class AlfrescoSearchServiceStatusCountsTest {
         assertThat(counts.total()).isZero();
         assertThat(counts.indexed()).isZero();
         assertThat(counts.failed()).isZero();
+        assertThat(counts.skipped()).isZero();
         assertThat(counts.pending()).isZero();
     }
 

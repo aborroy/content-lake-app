@@ -126,7 +126,7 @@ public class AlfrescoSearchService {
      * OpenSearch batch indexer silently drops properties whose namespace prefix is
      * missing from its static prefix map. A facet would then report every document as
      * PENDING while it is in fact indexed. PENDING is derived as
-     * {@code total - indexed - failed}, so a document that has no status property yet
+     * {@code total - indexed - failed - skipped}, so a document that has no status property yet
      * still counts as pending.</p>
      *
      * @param folderId        ancestor folder node identifier
@@ -137,6 +137,7 @@ public class AlfrescoSearchService {
         long total = 0;
         long indexed = 0;
         long failed = 0;
+        long skipped = 0;
 
         for (Node node : findDescendantFiles(folderId, excludedAspects)) {
             // The AFTS query already asks for this, but the predicate is a no-op on a
@@ -150,11 +151,14 @@ public class AlfrescoSearchService {
                 indexed++;
             } else if ("FAILED".equals(status)) {
                 failed++;
+            } else if ("SKIPPED".equals(status)) {
+                skipped++;
             }
         }
 
-        log.debug("Status counts for folder {}: total={} indexed={} failed={}", folderId, total, indexed, failed);
-        return new FolderStatusCounts(total, indexed, failed);
+        log.debug("Status counts for folder {}: total={} indexed={} failed={} skipped={}",
+                folderId, total, indexed, failed, skipped);
+        return new FolderStatusCounts(total, indexed, failed, skipped);
     }
 
     // ──────────────────────────────────────────────────────────────────────

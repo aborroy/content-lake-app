@@ -160,10 +160,13 @@ public class ContentLakeNodeStatusService {
                     folderNode.getId(),
                     ContentLakeNodeStatus.Status.INDEXED,
                     true, true, true, false, null,
-                    new ContentLakeNodeStatus.FolderStatusSummary(0, 0, 0, 0)
+                    new ContentLakeNodeStatus.FolderStatusSummary(0, 0, 0, 0, 0)
             );
         }
 
+        // Skips are counted but do not reach this expression, which is the point: a type that cannot contain
+        // text leaves nothing to repair and nothing for an operator to act on. While the skip was recorded as
+        // FAILED, one signature file turned its whole folder red.
         ContentLakeNodeStatus.Status folderStatus = counts.failed() > 0
                 ? ContentLakeNodeStatus.Status.FAILED
                 : (counts.pending() > 0 ? ContentLakeNodeStatus.Status.PENDING : ContentLakeNodeStatus.Status.INDEXED);
@@ -179,7 +182,8 @@ public class ContentLakeNodeStatusService {
                         counts.total(),
                         counts.indexed(),
                         counts.pending(),
-                        counts.failed()
+                        counts.failed(),
+                        counts.skipped()
                 )
         );
     }
