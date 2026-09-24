@@ -10,6 +10,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -92,11 +93,52 @@ final class PermissionSourceCatalog {
     private static final Pattern SOURCE_ID_EQUALS_PATTERN =
             Pattern.compile("cin_sourceId\\s*=\\s*'([^']+)'");
 
-    /** The source ids a deployment configures directly, as the search services hold them. */
-    record Configured(String alfrescoSourceId, String nuxeoSourceId, String pinnedSourceIds) {
+    /**
+     * The source ids a deployment configures directly, as the search services hold them.
+     *
+     * <p>Keyed by source type rather than one field per known source, so a fourth type needs no change here.
+     * Iteration order is the declaration order and is load-bearing: a source id configured for two types
+     * would otherwise be typed by whichever the map happened to yield first, and configuration wins over the
+     * index precisely so that answer is predictable.</p>
+     */
+    record Configured(Map<String, String> sourceIdsByType, String pinnedSourceIds) {
+
+        Configured {
+            sourceIdsByType = sourceIdsByType == null
+                    ? Map.of()
+                    : Collections.unmodifiableMap(new LinkedHashMap<>(sourceIdsByType));
+        }
+
+        /**
+         * The two in-tree source ids, in the order they have always been checked.
+         *
+         * <p>Kept as a factory so the {@code alfresco.source-id} and {@code nuxeo.source-id} properties stay
+         * exactly what a deployment sets, and adding a type is a call here rather than a new property
+         * convention.</p>
+         */
+        static Configured of(String alfrescoSourceId, String nuxeoSourceId, String pinnedSourceIds) {
+            Map<String, String> byType = new LinkedHashMap<>();
+            if (alfrescoSourceId != null && !alfrescoSourceId.isBlank()) {
+                byType.put(ALFRESCO, alfrescoSourceId);
+            }
+            if (nuxeoSourceId != null && !nuxeoSourceId.isBlank()) {
+                byType.put(NUXEO, nuxeoSourceId);
+            }
+            return new Configured(byType, pinnedSourceIds);
+        }
 
         boolean hasPin() {
             return pinnedSourceIds != null && !pinnedSourceIds.isBlank();
+        }
+
+        /** The configured source id for one type, as configured, or {@code null}. */
+        String sourceIdOf(String sourceType) {
+            return sourceType == null ? null : sourceIdsByType.get(normalizeType(sourceType));
+        }
+
+        /** Every configured source id, in declaration order. */
+        List<String> configuredIds() {
+            return List.copyOf(sourceIdsByType.values());
         }
     }
 
@@ -161,8 +203,7 @@ final class PermissionSourceCatalog {
         }
 
         sourceIds.addAll(indexedSources().keySet());
-        addBareId(sourceIds, configured.alfrescoSourceId());
-        addBareId(sourceIds, configured.nuxeoSourceId());
+        configured.configuredIds().forEach(id -> addBareId(sourceIds, id));
         return List.copyOf(sourceIds);
     }
 
@@ -176,11 +217,10 @@ final class PermissionSourceCatalog {
         if (sourceId == null || sourceId.isBlank()) {
             return null;
         }
-        if (sourceId.equals(bareId(configured.alfrescoSourceId()))) {
-            return ALFRESCO;
-        }
-        if (sourceId.equals(bareId(configured.nuxeoSourceId()))) {
-            return NUXEO;
+        for (Map.Entry<String, String> configuredSource : configured.sourceIdsByType().entrySet()) {
+            if (sourceId.equals(bareId(configuredSource.getValue()))) {
+                return configuredSource.getKey();
+            }
         }
         return indexedSources().get(sourceId);
     }
@@ -274,11 +314,7 @@ final class PermissionSourceCatalog {
     }
 
     private void addIdsOfType(Set<String> sourceIds, Configured configured, String type) {
-        if (ALFRESCO.equals(type)) {
-            addBareId(sourceIds, configured.alfrescoSourceId());
-        } else if (NUXEO.equals(type)) {
-            addBareId(sourceIds, configured.nuxeoSourceId());
-        }
+        addBareId(sourceIds, configured.sourceIdOf(type));
         if (!sourceIds.isEmpty()) {
             // A configured id for the requested type answers it, without reading the index.
             return;

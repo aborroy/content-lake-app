@@ -1483,7 +1483,7 @@ public class HybridSearchService {
     }
 
     private PermissionSourceCatalog.Configured configuredSources() {
-        return new PermissionSourceCatalog.Configured(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
+        return PermissionSourceCatalog.Configured.of(alfrescoSourceId, nuxeoSourceId, permissionSourceIds);
     }
 
     private boolean isAlfrescoSource(String sourceId) {
