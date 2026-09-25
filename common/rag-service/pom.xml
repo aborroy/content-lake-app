@@ -49,6 +49,15 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <!-- JWT validation for Entra caller authentication (#168): NimbusJwtDecoder, the JWKS client and
+             key rotation. Deliberately this rather than spring-boot-starter-oauth2-resource-server, which
+             also brings the servlet autoconfiguration that would register its own bearer filter and its own
+             AuthenticationManager beside the one RagSecurityConfig builds. The decoder is the only part
+             wanted here; the chain is already ours. Version managed by the Boot BOM. -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-oauth2-jose</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-configuration-processor</artifactId>

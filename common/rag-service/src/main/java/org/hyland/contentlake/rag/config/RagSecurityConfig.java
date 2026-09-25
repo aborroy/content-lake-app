@@ -3,6 +3,7 @@ package org.hyland.contentlake.rag.config;
 import jakarta.servlet.DispatcherType;
 import org.hyland.contentlake.rag.security.AlfrescoDirectory;
 import org.hyland.contentlake.rag.security.AlfrescoTicketAuthenticationFilter;
+import org.hyland.contentlake.rag.security.BearerTokenAuthenticationFilter;
 import org.hyland.contentlake.rag.security.DualSourceAuthenticationFilter;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
 import org.hyland.contentlake.rag.security.NuxeoDirectory;
@@ -44,6 +45,12 @@ public class RagSecurityConfig {
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(provider)
                 .addFilterBefore(new DualSourceAuthenticationFilter(alfrescoDirectory, nuxeoDirectory),
+                        BasicAuthenticationFilter.class)
+                // Before Basic, and it only ever reads a Bearer scheme, so a Basic credential passes through
+                // untouched. Registered unconditionally: with no Entra authenticator present a bearer token
+                // finds nothing that claims it and gets a 401, which is the right answer for a deployment that
+                // has not configured Entra sign-in.
+                .addFilterBefore(new BearerTokenAuthenticationFilter(authenticationManager),
                         BasicAuthenticationFilter.class)
                 .addFilterBefore(new AlfrescoTicketAuthenticationFilter(authenticationManager),
                         BasicAuthenticationFilter.class)

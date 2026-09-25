@@ -186,6 +186,22 @@ class EntraGroupResolverTest {
     }
 
     @Test
+    void leavesAnObjectIdAloneEvenThoughItContainsNoAtSign() {
+        String objectId = "8f14e45f-ceea-467a-9c1e-1b2c3d4e5f60";
+        handle("/v1.0/users/" + objectId + "/transitiveMemberOf", exchange ->
+                respond(exchange, 200, "{\"value\":[{\"id\":\"group-guid-finance\"}]}"));
+
+        List<String> groups = resolverWith("@contoso.com").resolveGroups(objectId);
+
+        // Once a caller is identified by their oid, the username reaching here is a GUID. Testing only for an
+        // "@" appended the domain to it, Graph answered 404 for <guid>@contoso.com, and that reported "no such
+        // identity": the caller kept the source with default authorities and their group grants silently
+        // stopped resolving. Graph accepts an object id directly, so it must be passed through untouched.
+        assertThat(groups).containsExactly("GROUP_group-guid-finance");
+        assertThat(requestLog).allSatisfy(uri -> assertThat(uri).doesNotContain("@contoso.com"));
+    }
+
+    @Test
     void treatsAKnownUserInNoGroupsAsAnEmptyListRatherThanNull() {
         handle("/v1.0/users/loner@contoso.com/transitiveMemberOf", exchange ->
                 respond(exchange, 200, "{\"value\":[]}"));

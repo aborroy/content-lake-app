@@ -17,6 +17,12 @@ final class CallerAuthenticatorOrder {
      * shown a caller's password once Alfresco and Nuxeo have declined it.
      */
     static final int CMIS = 30;
+    /**
+     * Last, and immaterial. The bearer authenticator is the only one claiming a credential that carries a token
+     * attribute, and it is the only credential shape it claims, so its position cannot change an outcome. Given
+     * a value at all because an unordered chain is a chain whose order nobody has decided.
+     */
+    static final int ENTRA = 40;
 
     private CallerAuthenticatorOrder() {
     }

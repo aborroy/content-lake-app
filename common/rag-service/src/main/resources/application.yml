@@ -266,6 +266,30 @@ rag:
       # Appended to a bare username to form the Entra identity, since a caller's repository username is not
       # necessarily their Entra one. Anything already containing @ is left alone.
       username-suffix: ${RAG_SECURITY_ENTRA_USERNAME_SUFFIX:}
+      # Caller authentication from an Entra-issued bearer token (#168), so a SharePoint user signs in as
+      # themselves. Separate from the resolver above and separately enabled, because they belong to two
+      # different app registrations: the resolver uses a service credential (content-lake-service), this
+      # validates tokens minted for the sign-in application (content-lake-ui) and holds no credential at all.
+      caller-auth:
+        enabled: ${RAG_SECURITY_ENTRA_CALLER_AUTH_ENABLED:false}
+        # The sign-in application's client id. Required when enabled, together with the tenant-id above;
+        # startup fails naming both if either is missing.
+        client-id: ${RAG_SECURITY_ENTRA_CALLER_AUTH_CLIENT_ID:}
+        # What the token's aud claim must name. Defaults to api://<client-id>, which is what "Expose an API"
+        # sets the Application ID URI to. THIS is the check that stops a token minted for Microsoft Graph
+        # being replayed here: its signature and issuer would both be valid.
+        audience: ${RAG_SECURITY_ENTRA_CALLER_AUTH_AUDIENCE:}
+        # Both default to the tenant's v2.0 endpoints and are overridable only for a test or a sovereign
+        # cloud. The JWKS is fetched and cached, and refetched on an unknown key id, so a signing-key
+        # rotation needs no restart.
+        issuer: ${RAG_SECURITY_ENTRA_CALLER_AUTH_ISSUER:}
+        jwks-uri: ${RAG_SECURITY_ENTRA_CALLER_AUTH_JWKS_URI:}
+        # Which claim becomes the caller's principal, matched against what the connector wrote into cin_read.
+        # oid, the Entra object id, because the SharePoint ACL mapper always emits it and it is the only one
+        # that cannot change; userPrincipalName and email are emitted too but a given tenant may send only
+        # one of them. Do not set this to sub: sub is pairwise per application, matches no stored principal,
+        # and would trim a valid caller to nothing with no error.
+        principal-claim: ${RAG_SECURITY_ENTRA_CALLER_AUTH_PRINCIPAL_CLAIM:oid}
     # Caller authentication against a CMIS repository (#169), so a deployment whose only source is the CMIS
     # connector can be queried by its own users rather than by a service account.
     #

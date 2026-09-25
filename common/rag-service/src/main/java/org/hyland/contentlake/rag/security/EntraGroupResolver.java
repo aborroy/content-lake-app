@@ -66,6 +66,10 @@ public class EntraGroupResolver implements SourceGroupResolver {
     /** Stops a runaway pager; a user in more groups than this has other problems. */
     private static final int MAX_PAGES = 20;
 
+    /** An Entra object id, which addresses a user directly and must not have a domain appended. */
+    private static final java.util.regex.Pattern OBJECT_ID_PATTERN = java.util.regex.Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
     private final RestClient restClient;
     private final Supplier<String> accessToken;
     private final String sourceType;
@@ -188,13 +192,26 @@ public class EntraGroupResolver implements SourceGroupResolver {
         return marker >= 0 ? link.substring(marker) : null;
     }
 
-    /** Appends the configured domain to a bare username, and leaves an object id or a UPN alone. */
+    /**
+     * Appends the configured domain to a bare username, and leaves an object id or a UPN alone.
+     *
+     * <p>The object id case is not hypothetical tidiness. Graph accepts either an object id or a UPN in
+     * {@code /users/{id}}, and once a caller is identified by their {@code oid} the username reaching here is a
+     * GUID. A GUID contains no {@code @}, so testing only for that appended the domain to it, Graph answered
+     * 404 for {@code <guid>@<domain>}, and this reported "no such identity": the caller kept the source with
+     * their default authorities and their group grants silently stopped resolving.</p>
+     */
     private String entraIdentity(String username) {
         String trimmed = username.trim();
-        if (usernameSuffix.isEmpty() || trimmed.contains("@")) {
+        if (usernameSuffix.isEmpty() || trimmed.contains("@") || isObjectId(trimmed)) {
             return trimmed;
         }
         return trimmed + (usernameSuffix.startsWith("@") ? usernameSuffix : "@" + usernameSuffix);
+    }
+
+    /** Whether this is an Entra object id, which is a GUID and already addresses a user directly. */
+    private static boolean isObjectId(String value) {
+        return OBJECT_ID_PATTERN.matcher(value).matches();
     }
 
     /**
