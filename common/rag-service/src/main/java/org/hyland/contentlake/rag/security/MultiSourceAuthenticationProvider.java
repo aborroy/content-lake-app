@@ -63,9 +63,7 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
 
     @Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-        Object presented = authentication.getCredentials();
-        CallerCredentials credentials = CallerCredentials.of(
-                authentication.getName(), presented == null ? "" : presented.toString());
+        CallerCredentials credentials = presentedCredentials(authentication);
 
         for (CallerAuthenticator authenticator : authenticators) {
             if (!authenticator.supports(credentials)) {
@@ -83,14 +81,32 @@ public class MultiSourceAuthenticationProvider implements AuthenticationProvider
     }
 
     /**
-     * Only the token Spring's {@code BasicAuthenticationFilter} and the two header filters produce.
+     * What the caller presented, however it reached us.
+     *
+     * <p>A {@link PresentedCredentialsAuthentication} already holds it, including any attribute an
+     * authenticator needs. Everything else is a username and a password, which is what Spring's
+     * {@code BasicAuthenticationFilter} and the two header filters produce.</p>
+     */
+    private static CallerCredentials presentedCredentials(Authentication authentication) {
+        if (authentication instanceof PresentedCredentialsAuthentication presented) {
+            return presented.credentials();
+        }
+        Object credentials = authentication.getCredentials();
+        return CallerCredentials.of(
+                authentication.getName(), credentials == null ? "" : credentials.toString());
+    }
+
+    /**
+     * The two request shapes an authenticator can be reached through.
      *
      * <p>{@code ProviderManager} holds this provider alone, so any token class rejected here gets a
-     * {@code ProviderNotFoundException} and a 401. An authenticator whose credential arrives as something
-     * other than a username and password has to widen this first.</p>
+     * {@code ProviderNotFoundException} and a 401 with no authenticator consulted. That is why a credential
+     * which is not a username and password needs a shape listed here, rather than being smuggled through the
+     * principal behind a marker.</p>
      */
     @Override
     public boolean supports(Class<?> authentication) {
-        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);
+        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication)
+                || PresentedCredentialsAuthentication.class.isAssignableFrom(authentication);
     }
 }

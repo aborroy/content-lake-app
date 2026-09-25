@@ -11,6 +11,7 @@ import org.springframework.security.core.Authentication;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -208,12 +209,66 @@ class MultiSourceAuthenticationProviderTest {
     }
 
     @Test
-    void supportsOnlyTheUsernamePasswordTokenTheFiltersProduce() {
+    void supportsTheTwoRequestShapesAndNotAResult() {
         var provider = new MultiSourceAuthenticationProvider(List.of(declining("alfresco", 10)));
 
         assertThat(provider.supports(UsernamePasswordAuthenticationToken.class)).isTrue();
-        // ProviderManager holds this provider alone, so a token rejected here is a 401. Widening this is
-        // the first commit of any authenticator whose credential does not arrive as user and password.
+        assertThat(provider.supports(PresentedCredentialsAuthentication.class)).isTrue();
+        // ProviderManager holds this provider alone, so a token rejected here is a 401 with no authenticator
+        // consulted. A result is not a request and must never be re-adjudicated.
         assertThat(provider.supports(MultiIdentityAuthentication.class)).isFalse();
+    }
+
+    @Nested
+    class CredentialsThatAreNotAUsernameAndPassword {
+
+        @Test
+        void reachTheChainWithTheirAttributesIntact() {
+            List<CallerCredentials> seen = new ArrayList<>();
+            var provider = new MultiSourceAuthenticationProvider(List.of(
+                    stub("bearer", 40, credentials -> {
+                        seen.add(credentials);
+                        return CallerIdentities.single("alice");
+                    })));
+
+            provider.authenticate(new PresentedCredentialsAuthentication(
+                    new CallerCredentials("", "", Map.of("bearer", "a.jwt.value"))));
+
+            // The attribute is the whole point: it is how a token travels without a PREFIX:: hack in the
+            // principal or a password field that another authenticator would forward to a repository.
+            assertThat(seen).hasSize(1);
+            assertThat(seen.get(0).attribute("bearer")).isEqualTo("a.jwt.value");
+            assertThat(seen.get(0).principal()).isEmpty();
+            assertThat(seen.get(0).hasNoPassword()).isTrue();
+        }
+
+        @Test
+        void carryNoClaimedPrincipalBeforeValidation() {
+            var request = new PresentedCredentialsAuthentication(
+                    new CallerCredentials("", "", Map.of("bearer", "a.jwt.value")));
+
+            // #162's failure mode: a caller-supplied name beside a caller-supplied token is two unbound
+            // inputs, and one caller can then be served another's results.
+            assertThat(request.getName()).isEmpty();
+            assertThat(request.isAuthenticated()).isFalse();
+        }
+
+        @Test
+        void cannotBeMarkedAuthenticated() {
+            var request = new PresentedCredentialsAuthentication(CallerCredentials.of("", ""));
+
+            assertThatThrownBy(() -> request.setAuthenticated(true))
+                    .isInstanceOf(IllegalArgumentException.class);
+            assertThat(request.isAuthenticated()).isFalse();
+        }
+
+        @Test
+        void areStillRejectedOnceWhenEveryAuthorityDeclines() {
+            var provider = new MultiSourceAuthenticationProvider(List.of(declining("bearer", 40)));
+
+            assertThatThrownBy(() -> provider.authenticate(new PresentedCredentialsAuthentication(
+                    new CallerCredentials("", "", Map.of("bearer", "expired")))))
+                    .isInstanceOf(BadCredentialsException.class);
+        }
     }
 }
