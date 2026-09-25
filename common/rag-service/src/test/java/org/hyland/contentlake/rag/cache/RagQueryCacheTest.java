@@ -3,6 +3,9 @@ package org.hyland.contentlake.rag.cache;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.hyland.contentlake.rag.config.RagProperties;
+import org.hyland.contentlake.security.CallerAuthentication;
+import org.hyland.contentlake.security.CallerIdentities;
+import org.hyland.contentlake.security.SourceIdentity;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.security.core.Authentication;
@@ -41,6 +44,45 @@ class RagQueryCacheTest {
 
         assertThat(RagQueryCache.principalScope(null)).isEqualTo("anon");
         assertThat(RagQueryCache.principalScope(alice)).isEqualTo("u:alice");
+    }
+
+    /** An {@link Authentication} carrying per-source identities, which is all principalScope reads. */
+    private static Authentication carrying(CallerIdentities identities) {
+        CallerAuthentication auth = mock(CallerAuthentication.class);
+        when(auth.identities()).thenReturn(identities);
+        return auth;
+    }
+
+    private static CallerIdentities twoIdentities(String alfrescoUser, String nuxeoUser) {
+        return CallerIdentities.builder()
+                .fallback(SourceIdentity.of("alfresco", alfrescoUser))
+                .add(SourceIdentity.of("nuxeo", nuxeoUser))
+                .build();
+    }
+
+    @Test
+    void principalScope_readsTheScopeKeyOfACallerCarryingSeveralIdentities() {
+        CallerIdentities identities = twoIdentities("alice", "bob");
+
+        assertThat(RagQueryCache.principalScope(carrying(identities)))
+                .isEqualTo(identities.scopeKey());
+    }
+
+    @Test
+    void principalScope_cannotBeSpelledToLookLikeAnotherCaller() {
+        // The separator-joined form this replaced was "alf:" + a + "|nux:" + b, which is not injective:
+        // both of these produced "alf:a|nux:b|nux:c", so one caller could be served the other's results.
+        Authentication first = carrying(twoIdentities("a", "b|nux:c"));
+        Authentication second = carrying(twoIdentities("a|nux:b", "c"));
+
+        assertThat(RagQueryCache.principalScope(first))
+                .isNotEqualTo(RagQueryCache.principalScope(second));
+    }
+
+    @Test
+    void principalScope_isStableForTheSameIdentities() {
+        assertThat(RagQueryCache.principalScope(carrying(twoIdentities("alice", "bob"))))
+                .isEqualTo(RagQueryCache.principalScope(carrying(twoIdentities("alice", "bob"))));
     }
 
     @Test

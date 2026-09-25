@@ -6,7 +6,8 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.rag.config.RagProperties;
-import org.hyland.contentlake.rag.security.DualSourceAuthentication;
+import org.hyland.contentlake.security.CallerAuthentication;
+import org.hyland.contentlake.security.CallerIdentities;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
@@ -134,13 +135,21 @@ public class RagQueryCache {
      * key. Two requests from the same principal within the TTL window share retrieval results;
      * different principals never do. Deliberately avoids resolving group membership (which costs REST
      * calls) - the TTL bounds the staleness that introduces.
+     *
+     * <p>A caller carrying more than one identity is keyed by {@link CallerIdentities#scopeKey()}, which is
+     * length-prefixed. The separator-joined form this replaced was not injective: a username containing the
+     * separator produced another caller's key, and this string is what decides whether one caller is served
+     * another's retrieval results.</p>
+     *
+     * <p>Static, and reads the marker interface rather than taking {@code CallerIdentityService}, because
+     * both search services call it statically while building their cache key.</p>
      */
     public static String principalScope(Authentication auth) {
         if (auth == null) {
             return "anon";
         }
-        if (auth instanceof DualSourceAuthentication dual) {
-            return "alf:" + dual.getAlfrescoUsername() + "|nux:" + dual.getNuxeoUsername();
+        if (auth instanceof CallerAuthentication caller) {
+            return caller.identities().scopeKey();
         }
         return "u:" + auth.getName();
     }
