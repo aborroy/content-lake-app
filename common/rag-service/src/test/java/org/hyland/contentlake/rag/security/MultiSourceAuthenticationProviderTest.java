@@ -3,6 +3,7 @@ package org.hyland.contentlake.rag.security;
 import org.hyland.contentlake.security.CallerAuthenticator;
 import org.hyland.contentlake.security.CallerCredentials;
 import org.hyland.contentlake.security.CallerIdentities;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -170,6 +171,40 @@ class MultiSourceAuthenticationProviderTest {
         assertThat(seen.get(0).password()).isEqualTo("secret");
         assertThat(seen.get(1).password()).isEmpty();
         assertThat(seen.get(1).hasNoPassword()).isTrue();
+    }
+
+    @Nested
+    class WithCmisRegistered {
+
+        /** The three shipped orders, so these cases exercise the real positions rather than invented ones. */
+        private MultiSourceAuthenticationProvider providerWith(CallerAuthenticator... extra) {
+            List<CallerAuthenticator> all = new ArrayList<>(List.of(
+                    declining("alfresco-password", CallerAuthenticatorOrder.ALFRESCO),
+                    declining("nuxeo-password", CallerAuthenticatorOrder.NUXEO)));
+            all.addAll(List.of(extra));
+            return new MultiSourceAuthenticationProvider(all);
+        }
+
+        @Test
+        void cmisIsReachedWhenTheOtherTwoDecline() {
+            var provider = providerWith(
+                    accepting("cmis-password", CallerAuthenticatorOrder.CMIS, "alice"));
+
+            assertThat(provider.authenticate(login("alice", "secret")).getName()).isEqualTo("alice");
+            assertThat(consulted).containsExactly("alfresco-password", "nuxeo-password", "cmis-password");
+        }
+
+        @Test
+        void cmisIsNotConsultedWhenAlfrescoAccepts() {
+            var provider = new MultiSourceAuthenticationProvider(List.of(
+                    accepting("alfresco-password", CallerAuthenticatorOrder.ALFRESCO, "alice"),
+                    declining("nuxeo-password", CallerAuthenticatorOrder.NUXEO),
+                    declining("cmis-password", CallerAuthenticatorOrder.CMIS)));
+
+            assertThat(provider.authenticate(login("alice", "secret")).getName()).isEqualTo("alice");
+            // The caller's password is never shown to a third repository once an earlier authority accepted.
+            assertThat(consulted).containsExactly("alfresco-password");
+        }
     }
 
     @Test
