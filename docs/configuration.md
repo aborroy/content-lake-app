@@ -250,7 +250,9 @@ Three limits, and the first two are limits of CMIS rather than of this implement
   the caller sees fewer documents rather than an error. The login string is deliberately not lower-cased and
   its domain is not stripped: CMIS principal ids are repository-defined and some repositories are
   case-sensitive, so normalising would break the ones that are.
-- **Group grants do not resolve.** See [security-model.md](security-model.md) for what that costs a caller.
+- **Group grants do not resolve**, so a document granted only to a group is absent for its members. See
+  [Which sources support nominal users](security-model.md#which-sources-support-nominal-users) for what that
+  costs a caller, and how CMIS compares with the other sources.
 - **The response shape is checked, not just the status code.** A 2xx alone would authenticate callers against
   whatever is at the configured URL, so the body has to look like a CMIS service document. For the browser
   binding that is checked properly; for AtomPub it is a substring check, which is crude.
@@ -294,7 +296,10 @@ Two things worth stating where an operator will hit them:
 
 - **A filesystem has no permissions to map**, so `filesystem.read-principals` is the only thing deciding who
   can retrieve the content, and it defaults to everyone. That is right for a corpus already shared with
-  everyone who can reach the search endpoint, and wrong for anything else.
+  everyone who can reach the search endpoint, and wrong for anything else. There is no nominal-user support for
+  this source and none planned: nobody signs in as a filesystem user, so the default publishes the whole corpus
+  to any caller who can authenticate at all. See
+  [Which sources support nominal users](security-model.md#which-sources-support-nominal-users).
 - **`root-path` is validated as a directory that must exist.** It is the one startup check here with real
   teeth: an ingester pointed at a path that was never mounted reports zero documents and reads as an empty
   source rather than as a misconfiguration.
@@ -442,6 +447,12 @@ setting that widens a group grant to the whole tenant.
 `sharepoint.acl-fallback` decides what happens to an item whose permissions cannot be read: `fail-closed`
 does not ingest it, `public` makes it readable by everyone. There is no `sync-account` option as there is for
 CMIS, because app-only auth has no user account whose access could stand in for a document's.
+
+**A SharePoint user cannot yet sign in as themselves.** The group resolver above is the authorization half of
+query-side security; the identification half has no SharePoint implementation, so a caller authenticates
+against another source and their SharePoint documents are filtered against that name. See
+[Which sources support nominal users](security-model.md#which-sources-support-nominal-users) for how this
+source compares with the others.
 
 #### Running it without a tenant
 

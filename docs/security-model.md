@@ -231,6 +231,52 @@ Stated plainly, because each of these is a reasonable thing to assume and none o
   deny-overrides-grant semantics evaluated at query time does not get them here.
 - **No OAuth2, OIDC, JWT or API keys.** Bearer-token authentication is not supported at either hop.
 
+## Which sources support nominal users
+
+"Nominal users" means a caller signs in as themselves and retrieves exactly what that person may read. It
+needs both halves of query-side security for the source in question, and support is uneven. None of this is
+visible from the code, and the worst gap reads as a harmless limitation.
+
+| Source | Authenticate a caller | Resolve their groups |
+|---|---|---|
+| Alfresco | Yes, tickets API or password | Yes, `AlfrescoGroupResolver` |
+| Nuxeo | Yes, token or password | Yes, `NuxeoGroupResolver` |
+| CMIS | Yes, service-document attempt | **No.** CMIS has no `memberOf`; name grants and public documents only |
+| SharePoint | **Not yet.** No authenticator exists | `EntraGroupResolver` exists, off by default, needs a credential |
+| Filesystem | **No**, by decision. No authenticator and none planned | n/a, the filesystem has no groups |
+
+Five consequences, stated because each one is invisible from the code and three of them read as something
+milder than they are.
+
+**A source with no authenticator is not unreachable, it is reached under someone else's identity.** A caller
+authenticated by any authority carries an untyped identity that answers for every source type, so a SharePoint
+or filesystem document is filtered against the name they signed in with. That is what makes an unsupported
+source safe rather than broken, and it is also why it is not the same as nominal-user support: the name is
+only meaningful in the source that issued it.
+
+**Filesystem documents are visible to every authenticated caller by default.** The filesystem has no ACL model,
+so `FILESYSTEM_READ_PRINCIPALS` is the only thing deciding who may read what, and when it is unset the
+connector writes `__Everyone__`. The limitation on its own sounds harmless; the consequence is that an
+unconfigured filesystem source publishes its whole corpus to anyone who can sign in at all. Set that property
+for anything that is not already public.
+
+**CMIS group grants do not resolve, so those documents are absent for their members.** Fail-closed, so nothing
+leaks, but results are incomplete and nothing in the answer says why. See the entry in
+[What the model does not do](#what-the-model-does-not-do).
+
+**`rag.security.entra.enabled` is off by default, and while it is off, group-granted SharePoint documents are
+invisible to everyone.** Group grants are the normal way SharePoint is administered, so that is most of a real
+corpus. It reads as missing content rather than as a configuration gap, which is exactly why it is written
+down here.
+
+**A source with no resolver falls back to the caller's own name plus `GROUP_EVERYONE`, never to nothing.**
+That is the documented fail-closed default in `SourceGroupResolverRegistry`, and it is distinct from a resolver
+that exists and fails: an unreachable directory yields an empty list and `group-resolution-failure` decides
+what that costs. Confusing the two in either direction is a defect, which is why no resolver is registered for
+a source type that cannot answer.
+
+Per-source configuration is in [configuration.md](configuration.md), under each connector's section.
+
 ## Rejected alternatives
 
 **A caller-supplied principals list on the query API.** Letting the client pass the principals to
