@@ -28,8 +28,10 @@ import static org.mockito.Mockito.when;
  */
 class DualSourceAuthenticationFilterTest {
 
-    private final MultiSourceAuthenticationProvider provider = mock(MultiSourceAuthenticationProvider.class);
-    private final DualSourceAuthenticationFilter filter = new DualSourceAuthenticationFilter(provider);
+    private final AlfrescoDirectory alfrescoDirectory = mock(AlfrescoDirectory.class);
+    private final NuxeoDirectory nuxeoDirectory = mock(NuxeoDirectory.class);
+    private final DualSourceAuthenticationFilter filter =
+            new DualSourceAuthenticationFilter(alfrescoDirectory, nuxeoDirectory);
 
     @AfterEach
     void clearSecurityContext() {
@@ -38,17 +40,19 @@ class DualSourceAuthenticationFilterTest {
 
     @Test
     void establishesBothIdentitiesAndHidesBothHeadersFromDownstreamFilters() throws Exception {
-        when(provider.validateAlfrescoTicket("TICKET_ui-demo")).thenReturn("alice");
-        when(provider.validateNuxeoCredentials("jdoe", "secret")).thenReturn("jdoe");
+        when(alfrescoDirectory.validateTicket("TICKET_ui-demo")).thenReturn("alice");
+        when(nuxeoDirectory.authenticate("jdoe", "secret")).thenReturn(true);
 
         MockHttpServletRequest request = dualRequest(basic("TICKET_ui-demo:"), basic("jdoe:secret"));
         String[] forwarded = runFilter(request);
 
         var authentication = SecurityContextHolder.getContext().getAuthentication();
-        assertThat(authentication).isInstanceOf(DualSourceAuthentication.class);
-        var dual = (DualSourceAuthentication) authentication;
-        assertThat(dual.getAlfrescoUsername()).isEqualTo("alice");
-        assertThat(dual.getNuxeoUsername()).isEqualTo("jdoe");
+        assertThat(authentication).isInstanceOf(MultiIdentityAuthentication.class);
+        var identities = ((MultiIdentityAuthentication) authentication).identities();
+        assertThat(identities.usernameFor("alfresco")).isEqualTo("alice");
+        assertThat(identities.usernameFor("nuxeo")).isEqualTo("jdoe");
+        // Alfresco remains the fallback, so a third source type still resolves to it.
+        assertThat(identities.usernameFor("sharepoint")).isEqualTo("alice");
         assertThat(forwarded).containsExactly(null, null);
     }
 
@@ -58,7 +62,7 @@ class DualSourceAuthenticationFilterTest {
 
         runFilter(request);
 
-        verify(provider, never()).validateAlfrescoTicket(any());
+        verify(alfrescoDirectory, never()).validateTicket(any());
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
     }
 
@@ -69,7 +73,7 @@ class DualSourceAuthenticationFilterTest {
 
         runFilter(request);
 
-        verify(provider, never()).validateAlfrescoTicket(any());
+        verify(alfrescoDirectory, never()).validateTicket(any());
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
     }
 
@@ -79,14 +83,14 @@ class DualSourceAuthenticationFilterTest {
 
         runFilter(request);
 
-        verify(provider, never()).validateAlfrescoTicket(any());
+        verify(alfrescoDirectory, never()).validateTicket(any());
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
     }
 
     @Test
     void fallsThroughAndLeavesBothHeadersWhenTheNuxeoCredentialIsRejected() throws Exception {
-        when(provider.validateAlfrescoTicket("TICKET_ui-demo")).thenReturn("alice");
-        when(provider.validateNuxeoCredentials("jdoe", "wrong")).thenReturn(null);
+        when(alfrescoDirectory.validateTicket("TICKET_ui-demo")).thenReturn("alice");
+        when(nuxeoDirectory.authenticate("jdoe", "wrong")).thenReturn(false);
 
         MockHttpServletRequest request = dualRequest(basic("TICKET_ui-demo:"), basic("jdoe:wrong"));
         String[] forwarded = runFilter(request);

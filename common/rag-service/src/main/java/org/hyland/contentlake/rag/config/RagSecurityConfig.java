@@ -1,9 +1,11 @@
 package org.hyland.contentlake.rag.config;
 
 import jakarta.servlet.DispatcherType;
+import org.hyland.contentlake.rag.security.AlfrescoDirectory;
 import org.hyland.contentlake.rag.security.AlfrescoTicketAuthenticationFilter;
 import org.hyland.contentlake.rag.security.DualSourceAuthenticationFilter;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
+import org.hyland.contentlake.rag.security.NuxeoDirectory;
 import org.hyland.contentlake.rag.security.NuxeoTokenAuthenticationFilter;
 import org.hyland.contentlake.rag.security.RagAuthenticationEntryPoint;
 import org.hyland.contentlake.rag.security.RateLimitFilter;
@@ -33,13 +35,15 @@ public class RagSecurityConfig {
     SecurityFilterChain securityFilterChain(HttpSecurity http,
                                             AuthenticationManager authenticationManager,
                                             MultiSourceAuthenticationProvider provider,
+                                            AlfrescoDirectory alfrescoDirectory,
+                                            NuxeoDirectory nuxeoDirectory,
                                             RagProperties ragProperties) throws Exception {
         return http
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authenticationProvider(provider)
-                .addFilterBefore(new DualSourceAuthenticationFilter(provider),
+                .addFilterBefore(new DualSourceAuthenticationFilter(alfrescoDirectory, nuxeoDirectory),
                         BasicAuthenticationFilter.class)
                 .addFilterBefore(new AlfrescoTicketAuthenticationFilter(authenticationManager),
                         BasicAuthenticationFilter.class)

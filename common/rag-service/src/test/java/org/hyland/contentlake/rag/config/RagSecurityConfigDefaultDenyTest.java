@@ -1,6 +1,8 @@
 package org.hyland.contentlake.rag.config;
 
+import org.hyland.contentlake.rag.security.AlfrescoDirectory;
 import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
+import org.hyland.contentlake.rag.security.NuxeoDirectory;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringBootConfiguration;
@@ -30,6 +32,16 @@ class RagSecurityConfigDefaultDenyTest {
 
     @MockitoBean
     private MultiSourceAuthenticationProvider multiSourceAuthenticationProvider;
+
+    /**
+     * The filter chain builds {@code DualSourceAuthenticationFilter} from these two directly, so without
+     * them this slice fails on bean creation rather than on any assertion below.
+     */
+    @MockitoBean
+    private AlfrescoDirectory alfrescoDirectory;
+
+    @MockitoBean
+    private NuxeoDirectory nuxeoDirectory;
 
     @Test
     void sensitiveActuatorEndpoint_requiresAuthentication() throws Exception {

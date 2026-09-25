@@ -1,126 +1,184 @@
 package org.hyland.contentlake.rag.security;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
-import org.junit.jupiter.api.AfterEach;
+import org.hyland.contentlake.security.CallerAuthenticator;
+import org.hyland.contentlake.security.CallerCredentials;
+import org.hyland.contentlake.security.CallerIdentities;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.security.core.Authentication;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * The chain, and nothing about HTTP.
+ *
+ * <p>All this class does is run registered authenticators in order, so its test stubs them. The HTTP
+ * validation these assertions used to reach through lives in {@link SourceDirectoryHttpTest}.</p>
+ */
 class MultiSourceAuthenticationProviderTest {
 
-    private HttpServer server;
+    /** Ids of the authenticators consulted, in the order they were asked. */
+    private final List<String> consulted = new ArrayList<>();
 
-    @AfterEach
-    void tearDown() {
-        if (server != null) {
-            server.stop(0);
-        }
+    private CallerAuthenticator stub(String id, int order,
+                                    Function<CallerCredentials, CallerIdentities> answer) {
+        return new CallerAuthenticator() {
+            @Override
+            public String id() {
+                return id;
+            }
+
+            @Override
+            public int order() {
+                return order;
+            }
+
+            @Override
+            public boolean supports(CallerCredentials credentials) {
+                return true;
+            }
+
+            @Override
+            public CallerIdentities authenticate(CallerCredentials credentials) {
+                consulted.add(id);
+                return answer.apply(credentials);
+            }
+        };
+    }
+
+    private CallerAuthenticator declining(String id, int order) {
+        return stub(id, order, credentials -> null);
+    }
+
+    private CallerAuthenticator accepting(String id, int order, String username) {
+        return stub(id, order, credentials -> CallerIdentities.single(username));
+    }
+
+    private static Authentication login(String principal, String password) {
+        return new UsernamePasswordAuthenticationToken(principal, password);
     }
 
     @Test
-    void authenticatesAlfrescoTicketAndResolvesUsername() throws Exception {
-        String ticket = "TICKET_demo-ticket";
-        server = startServer(exchange -> {
-            if (!"GET".equals(exchange.getRequestMethod())) {
-                sendResponse(exchange, 404, "");
-                return;
-            }
+    void consultsAuthenticatorsInAscendingOrderRegardlessOfBeanOrder() {
+        // Registered out of order deliberately: the chain's order is the declared one, not Spring's.
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                declining("third", 30), declining("first", 10), accepting("second", 20, "alice")));
 
-            String expectedHeader = "Basic " + Base64.getEncoder()
-                    .encodeToString(ticket.getBytes(StandardCharsets.UTF_8));
-            if (!expectedHeader.equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
-                sendResponse(exchange, 401, "");
-                return;
-            }
+        assertThat(provider.authenticatorIds()).containsExactly("first", "second", "third");
 
-            if ("/alfresco/api/-default-/public/authentication/versions/1/tickets/-me-"
-                    .equals(exchange.getRequestURI().getPath())) {
-                sendResponse(exchange, 200, "{\"entry\":{\"id\":\"" + ticket + "\"}}");
-                return;
-            }
+        Authentication authenticated = provider.authenticate(login("alice", "secret"));
 
-            if ("/alfresco/api/-default-/public/alfresco/versions/1/people/-me-"
-                    .equals(exchange.getRequestURI().getPath())) {
-                sendResponse(exchange, 200, "{\"entry\":{\"id\":\"rag-user\"}}");
-                return;
-            }
-
-            sendResponse(exchange, 404, "");
-        });
-
-        MultiSourceAuthenticationProvider provider = new MultiSourceAuthenticationProvider();
-        ReflectionTestUtils.setField(provider, "alfrescoUrl", baseUrl());
-        ReflectionTestUtils.setField(provider, "nuxeoUrl", "");
-
-        var authentication = provider.authenticate(new UsernamePasswordAuthenticationToken(ticket, ""));
-
-        assertThat(authentication.getName()).isEqualTo("rag-user");
+        assertThat(authenticated.getName()).isEqualTo("alice");
+        // Stopped at the one that accepted; the later authority was never shown the credentials.
+        assertThat(consulted).containsExactly("first", "second");
     }
 
     @Test
-    void authenticatesNuxeoTokenAndResolvesUsername() throws Exception {
-        String token = "nuxeo-token-demo";
-        server = startServer(exchange -> {
-            if (!"GET".equals(exchange.getRequestMethod())
-                    || !"/nuxeo/api/v1/me".equals(exchange.getRequestURI().getPath())) {
-                sendResponse(exchange, 404, "");
-                return;
+    void aDeclineFallsThroughToTheNextAuthority() {
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                declining("alfresco", 10), accepting("nuxeo", 20, "bob")));
+
+        assertThat(provider.authenticate(login("bob", "secret")).getName()).isEqualTo("bob");
+        assertThat(consulted).containsExactly("alfresco", "nuxeo");
+    }
+
+    @Test
+    void everyAuthorityDeclining_isOneRejectionAtTheEnd() {
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                declining("alfresco", 10), declining("nuxeo", 20)));
+
+        assertThatThrownBy(() -> provider.authenticate(login("nobody", "secret")))
+                .isInstanceOf(BadCredentialsException.class)
+                .hasMessageContaining("nobody");
+        assertThat(consulted).containsExactly("alfresco", "nuxeo");
+    }
+
+    @Test
+    void anAuthenticationExceptionPropagatesAndStopsTheChain() {
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                stub("alfresco-ticket", 10, credentials -> {
+                    throw new BadCredentialsException("Invalid or expired Alfresco ticket");
+                }),
+                accepting("nuxeo", 20, "bob")));
+
+        assertThatThrownBy(() -> provider.authenticate(login("TICKET_expired", "")))
+                .isInstanceOf(BadCredentialsException.class)
+                .hasMessageContaining("Alfresco ticket");
+        // The credential was addressed to the first authority, so the second never saw it.
+        assertThat(consulted).containsExactly("alfresco-ticket");
+    }
+
+    @Test
+    void anUnsupportedCredentialIsSkippedWithoutBeingAdjudicated() {
+        CallerAuthenticator neverSupports = new CallerAuthenticator() {
+            @Override
+            public String id() {
+                return "abstains";
             }
 
-            if (!token.equals(exchange.getRequestHeaders().getFirst("X-Authentication-Token"))) {
-                sendResponse(exchange, 401, "");
-                return;
+            @Override
+            public int order() {
+                return 10;
             }
 
-            sendResponse(exchange, 200, "{\"id\":\"rag-user\"}");
-        });
-
-        MultiSourceAuthenticationProvider provider = new MultiSourceAuthenticationProvider();
-        ReflectionTestUtils.setField(provider, "alfrescoUrl", "");
-        ReflectionTestUtils.setField(provider, "nuxeoUrl", baseUrl() + "/nuxeo");
-
-        var authentication = provider.authenticate(new UsernamePasswordAuthenticationToken(
-                MultiSourceAuthenticationProvider.NUXEO_TOKEN_PRINCIPAL_PREFIX + token,
-                ""
-        ));
-
-        assertThat(authentication.getName()).isEqualTo("rag-user");
-    }
-
-    private HttpServer startServer(ExchangeHandler handler) throws IOException {
-        HttpServer httpServer = HttpServer.create(new InetSocketAddress(0), 0);
-        httpServer.createContext("/", exchange -> {
-            try {
-                handler.handle(exchange);
-            } finally {
-                exchange.close();
+            @Override
+            public boolean supports(CallerCredentials credentials) {
+                return false;
             }
-        });
-        httpServer.start();
-        return httpServer;
+
+            @Override
+            public CallerIdentities authenticate(CallerCredentials credentials) {
+                consulted.add(id());
+                return CallerIdentities.single("should-not-happen");
+            }
+        };
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                neverSupports, accepting("nuxeo", 20, "bob")));
+
+        assertThat(provider.authenticate(login("bob", "secret")).getName()).isEqualTo("bob");
+        assertThat(consulted).containsExactly("nuxeo");
     }
 
-    private String baseUrl() {
-        return "http://127.0.0.1:" + server.getAddress().getPort();
+    @Test
+    void anEmptyIdentitySetIsADeclineRatherThanAnAuthenticatedCaller() {
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                stub("empty", 10, credentials -> CallerIdentities.EMPTY),
+                accepting("nuxeo", 20, "bob")));
+
+        assertThat(provider.authenticate(login("bob", "secret")).getName()).isEqualTo("bob");
+        assertThat(consulted).containsExactly("empty", "nuxeo");
     }
 
-    private static void sendResponse(HttpExchange exchange, int statusCode, String body) throws IOException {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "application/json");
-        exchange.sendResponseHeaders(statusCode, bytes.length);
-        exchange.getResponseBody().write(bytes);
+    @Test
+    void thePasswordReachesTheAuthenticatorAndANullOneBecomesBlank() {
+        List<CallerCredentials> seen = new ArrayList<>();
+        var provider = new MultiSourceAuthenticationProvider(List.of(
+                stub("recording", 10, credentials -> {
+                    seen.add(credentials);
+                    return CallerIdentities.single(credentials.principal());
+                })));
+
+        provider.authenticate(login("alice", "secret"));
+        provider.authenticate(new UsernamePasswordAuthenticationToken("TICKET_x", null));
+
+        assertThat(seen.get(0).password()).isEqualTo("secret");
+        assertThat(seen.get(1).password()).isEmpty();
+        assertThat(seen.get(1).hasNoPassword()).isTrue();
     }
 
-    @FunctionalInterface
-    private interface ExchangeHandler {
-        void handle(HttpExchange exchange) throws IOException;
+    @Test
+    void supportsOnlyTheUsernamePasswordTokenTheFiltersProduce() {
+        var provider = new MultiSourceAuthenticationProvider(List.of(declining("alfresco", 10)));
+
+        assertThat(provider.supports(UsernamePasswordAuthenticationToken.class)).isTrue();
+        // ProviderManager holds this provider alone, so a token rejected here is a 401. Widening this is
+        // the first commit of any authenticator whose credential does not arrive as user and password.
+        assertThat(provider.supports(MultiIdentityAuthentication.class)).isFalse();
     }
 }

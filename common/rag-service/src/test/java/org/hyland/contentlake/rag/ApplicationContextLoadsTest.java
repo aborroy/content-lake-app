@@ -3,6 +3,7 @@ package org.hyland.contentlake.rag;
 import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.observability.RagObservations;
 import org.hyland.contentlake.rag.observability.RetrievalFeatureSet;
+import org.hyland.contentlake.rag.security.MultiSourceAuthenticationProvider;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -43,9 +44,26 @@ class ApplicationContextLoadsTest {
     @Autowired
     RetrievalFeatureSet retrievalFeatureSet;
 
+    @Autowired
+    MultiSourceAuthenticationProvider callerAuthentication;
+
     @Test
     void contextLoads() {
         // Success = the ApplicationContext refreshed without an unresolvable circular reference.
+    }
+
+    @Test
+    void theCallerAuthenticationChainIsRegisteredInOrder() {
+        // The only place the runtime order of the chain is protected. It is a security property: it decides
+        // which system is shown a caller's credentials first, so an authenticator registered with a lower
+        // order silently changes where an existing deployment sends its passwords.
+        //
+        // Both Alfresco authenticators share one order and both Nuxeo ones share the next, so what this pins
+        // is that every Alfresco authority precedes every Nuxeo one. Within a pair the two are mutually
+        // exclusive by supports() (a marker-prefixed principal and a password login), so their relative
+        // position cannot affect an outcome; it is settled by id only to keep the chain deterministic.
+        assertThat(callerAuthentication.authenticatorIds()).containsExactly(
+                "alfresco-password", "alfresco-ticket", "nuxeo-password", "nuxeo-token");
     }
 
     @Test

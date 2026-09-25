@@ -1,269 +1,96 @@
 package org.hyland.contentlake.rag.security;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.hyland.contentlake.security.CallerAuthenticator;
+import org.hyland.contentlake.security.CallerCredentials;
+import org.hyland.contentlake.security.CallerIdentities;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
 
-import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
 
 /**
- * Validates HTTP Basic Auth credentials against Alfresco and/or Nuxeo.
+ * Identifies a caller by asking each registered {@link CallerAuthenticator} in turn.
  *
- * <p>Tries Alfresco first (via the tickets API), then Nuxeo (via {@code /me}).
- * A successful response from either source grants the authenticated principal.</p>
+ * <p>What this used to be: a fixed chain of {@code if} branches naming Alfresco's tickets API and Nuxeo's
+ * {@code /me}, with nowhere to put a third authority. Now it knows only how to run a chain, and every
+ * authority is a bean. Adding one is a new {@code CallerAuthenticator}, not an edit here.</p>
+ *
+ * <p>The loop is the whole policy, and it has exactly three exits:</p>
+ *
+ * <ul>
+ *   <li>An authenticator returns identities: the caller is authenticated as those, and nothing further is
+ *       consulted.</li>
+ *   <li>An authenticator throws: the credential was addressed to that authority and is invalid, so it
+ *       propagates and no other authority is shown the credential.</li>
+ *   <li>Every authenticator declines: one rejection, at the end.</li>
+ * </ul>
+ *
+ * <p>Order is ascending {@link CallerAuthenticator#order()}, which is a security property rather than a
+ * detail: it decides which system is shown a caller's credentials first. {@code ApplicationContextLoadsTest}
+ * pins the resolved order, because that is the only place it is protected.</p>
  */
 @Slf4j
 @Component
 public class MultiSourceAuthenticationProvider implements AuthenticationProvider {
 
-    private static final int CONNECT_TIMEOUT_MS = 3_000;
-    private static final int READ_TIMEOUT_MS = 5_000;
+    /**
+     * Keeps its name and package-private visibility: {@link NuxeoTokenAuthenticationFilter} builds a principal
+     * with it, and {@link ReservedPrincipals} tests for it.
+     */
     static final String NUXEO_TOKEN_PRINCIPAL_PREFIX = "NUXEO_TOKEN::";
 
-    @Value("${content.service.url}")
-    private String alfrescoUrl;
+    private final List<CallerAuthenticator> authenticators;
 
-    @Value("${nuxeo.base-url:}")
-    private String nuxeoUrl;
+    public MultiSourceAuthenticationProvider(List<CallerAuthenticator> authenticators) {
+        this.authenticators = authenticators.stream()
+                .sorted(Comparator.comparingInt(CallerAuthenticator::order)
+                        .thenComparing(CallerAuthenticator::id))
+                .toList();
+        log.info("Caller authentication chain: {}",
+                this.authenticators.stream().map(CallerAuthenticator::id).toList());
+    }
+
+    /** The chain in the order it is consulted. Read by the test that pins that order. */
+    public List<String> authenticatorIds() {
+        return authenticators.stream().map(CallerAuthenticator::id).toList();
+    }
 
     @Override
     public Authentication authenticate(Authentication authentication) throws AuthenticationException {
-        String principal = authentication.getName();
-        Object credentials = authentication.getCredentials();
-        String password = credentials == null ? "" : credentials.toString();
+        Object presented = authentication.getCredentials();
+        CallerCredentials credentials = CallerCredentials.of(
+                authentication.getName(), presented == null ? "" : presented.toString());
 
-        if (principal.startsWith("TICKET_") && password.isEmpty()) {
-            String resolvedUsername = tryAlfrescoTicketAuth(principal);
-            if (resolvedUsername != null) {
-                log.debug("Authenticated Alfresco ticket '{}' as '{}'",
-                        principal.substring(0, Math.min(principal.length(), 20)),
-                        resolvedUsername);
-                return authenticatedUser(resolvedUsername);
+        for (CallerAuthenticator authenticator : authenticators) {
+            if (!authenticator.supports(credentials)) {
+                continue;
             }
-            log.warn("Alfresco ticket validation failed for '{}'",
-                    principal.substring(0, Math.min(principal.length(), 20)));
-            throw new BadCredentialsException("Invalid or expired Alfresco ticket");
-        }
-
-        if (principal.startsWith(NUXEO_TOKEN_PRINCIPAL_PREFIX) && password.isEmpty()) {
-            String token = principal.substring(NUXEO_TOKEN_PRINCIPAL_PREFIX.length());
-            String resolvedUsername = tryNuxeoTokenAuth(token);
-            if (resolvedUsername != null) {
-                log.debug("Authenticated Nuxeo token as '{}'", resolvedUsername);
-                return authenticatedUser(resolvedUsername);
+            CallerIdentities identities = authenticator.authenticate(credentials);
+            if (identities != null && !identities.isEmpty()) {
+                log.debug("Authenticated '{}' via {}", identities.describe(), authenticator.id());
+                return new MultiIdentityAuthentication(identities);
             }
-            log.warn("Nuxeo token validation failed");
-            throw new BadCredentialsException("Invalid or expired Nuxeo authentication token");
         }
 
-        if (tryAlfrescoAuth(principal, password) || tryNuxeoAuth(principal, password)) {
-            log.debug("Authenticated user '{}'", principal);
-            return authenticatedUser(principal);
-        }
-
-        log.warn("Authentication failed for user '{}'", principal);
-        throw new BadCredentialsException("Invalid credentials for user: " + principal);
+        log.warn("Authentication failed for user '{}'", credentials.principal());
+        throw new BadCredentialsException("Invalid credentials for user: " + credentials.principal());
     }
 
+    /**
+     * Only the token Spring's {@code BasicAuthenticationFilter} and the two header filters produce.
+     *
+     * <p>{@code ProviderManager} holds this provider alone, so any token class rejected here gets a
+     * {@code ProviderNotFoundException} and a 401. An authenticator whose credential arrives as something
+     * other than a username and password has to widen this first.</p>
+     */
     @Override
     public boolean supports(Class<?> authentication) {
         return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);
-    }
-
-    private Authentication authenticatedUser(String username) {
-        return new UsernamePasswordAuthenticationToken(
-                username, null, List.of(new SimpleGrantedAuthority("ROLE_USER")));
-    }
-
-    @SuppressWarnings("unchecked")
-    private String tryAlfrescoTicketAuth(String ticket) {
-        if (alfrescoUrl == null || alfrescoUrl.isBlank()) {
-            return null;
-        }
-        try {
-            RestTemplate restTemplate = newRestTemplate();
-            String validateUrl = alfrescoUrl
-                    + "/alfresco/api/-default-/public/authentication/versions/1/tickets/-me-";
-            HttpHeaders headers = alfrescoTicketHeaders(ticket);
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    validateUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                return null;
-            }
-            String resolvedUsername = extractAlfrescoUsername(response.getBody());
-            if (resolvedUsername != null && !resolvedUsername.startsWith("TICKET_")) {
-                return resolvedUsername;
-            }
-
-            String meUrl = alfrescoUrl
-                    + "/alfresco/api/-default-/public/alfresco/versions/1/people/-me-";
-            ResponseEntity<Map> meResponse = restTemplate.exchange(
-                    meUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-            if (!meResponse.getStatusCode().is2xxSuccessful()) {
-                return null;
-            }
-            return extractAlfrescoUsername(meResponse.getBody());
-        } catch (Exception e) {
-            log.debug("Alfresco ticket validation unavailable: {}", e.getMessage());
-        }
-        return null;
-    }
-
-    private HttpHeaders alfrescoTicketHeaders(String ticket) {
-        HttpHeaders headers = new HttpHeaders();
-        // Alfresco validates UI tickets with Basic base64(ticket) rather than user:password.
-        String encoded = Base64.getEncoder().encodeToString(ticket.getBytes());
-        headers.set(HttpHeaders.AUTHORIZATION, "Basic " + encoded);
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-        return headers;
-    }
-
-    private boolean tryAlfrescoAuth(String username, String password) {
-        if (alfrescoUrl == null || alfrescoUrl.isBlank()) {
-            return false;
-        }
-        try {
-            RestTemplate restTemplate = newRestTemplate();
-            String ticketUrl = alfrescoUrl
-                    + "/alfresco/api/-default-/public/authentication/versions/1/tickets";
-            HttpHeaders headers = new HttpHeaders();
-            headers.setContentType(MediaType.APPLICATION_JSON);
-            Map<String, String> body = Map.of("userId", username, "password", password);
-            ResponseEntity<Void> response = restTemplate.exchange(
-                    ticketUrl, HttpMethod.POST, new HttpEntity<>(body, headers), Void.class);
-            if (response.getStatusCode().is2xxSuccessful()) {
-                log.debug("Authenticated '{}' via Alfresco", username);
-                return true;
-            }
-        } catch (Exception e) {
-            log.debug("Alfresco auth unavailable for '{}': {}", username, e.getMessage());
-        }
-        return false;
-    }
-
-    @SuppressWarnings("unchecked")
-    private String tryNuxeoTokenAuth(String token) {
-        if (nuxeoUrl == null || nuxeoUrl.isBlank()) {
-            return null;
-        }
-        try {
-            RestTemplate restTemplate = newRestTemplate();
-            String meUrl = buildNuxeoApiUrl() + "/me";
-            HttpHeaders headers = new HttpHeaders();
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-            headers.set("X-Authentication-Token", token);
-            ResponseEntity<Map> response = restTemplate.exchange(
-                    meUrl, HttpMethod.GET, new HttpEntity<>(headers), Map.class);
-            if (!response.getStatusCode().is2xxSuccessful()) {
-                return null;
-            }
-            return extractNuxeoUsername(response.getBody());
-        } catch (Exception e) {
-            log.debug("Nuxeo token validation unavailable: {}", e.getMessage());
-        }
-        return null;
-    }
-
-    private boolean tryNuxeoAuth(String username, String password) {
-        if (nuxeoUrl == null || nuxeoUrl.isBlank()) {
-            return false;
-        }
-        try {
-            RestTemplate restTemplate = newRestTemplate();
-            String meUrl = buildNuxeoApiUrl() + "/me";
-            HttpHeaders headers = new HttpHeaders();
-            headers.setBasicAuth(username, password);
-            headers.setAccept(List.of(MediaType.APPLICATION_JSON));
-            ResponseEntity<Void> response = restTemplate.exchange(
-                    meUrl, HttpMethod.GET, new HttpEntity<>(headers), Void.class);
-            if (response.getStatusCode().is2xxSuccessful()) {
-                log.debug("Authenticated '{}' via Nuxeo", username);
-                return true;
-            }
-        } catch (Exception e) {
-            log.debug("Nuxeo auth unavailable for '{}': {}", username, e.getMessage());
-        }
-        return false;
-    }
-
-    // ---------------------------------------------------------------
-    // Package-private validation helpers for DualSourceAuthenticationFilter
-    // ---------------------------------------------------------------
-
-    /**
-     * Validates an Alfresco ticket and returns the resolved username, or {@code null} on failure.
-     */
-    String validateAlfrescoTicket(String ticket) {
-        return tryAlfrescoTicketAuth(ticket);
-    }
-
-    /**
-     * Validates Nuxeo Basic credentials and returns the username on success, or {@code null} on failure.
-     */
-    String validateNuxeoCredentials(String username, String password) {
-        return tryNuxeoAuth(username, password) ? username : null;
-    }
-
-    private RestTemplate newRestTemplate() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(CONNECT_TIMEOUT_MS);
-        factory.setReadTimeout(READ_TIMEOUT_MS);
-        return new RestTemplate(factory);
-    }
-
-    private String buildNuxeoApiUrl() {
-        String trimmed = nuxeoUrl.endsWith("/") ? nuxeoUrl.substring(0, nuxeoUrl.length() - 1) : nuxeoUrl;
-        return trimmed.endsWith("/api/v1") ? trimmed : trimmed + "/api/v1";
-    }
-
-    @SuppressWarnings("unchecked")
-    private String extractAlfrescoUsername(Map body) {
-        if (body == null) {
-            return null;
-        }
-        Object entry = body.get("entry");
-        if (entry instanceof Map entryMap) {
-            String username = firstString(entryMap.get("id"), entryMap.get("userName"), entryMap.get("userId"));
-            if (username != null) {
-                return username;
-            }
-        }
-        return firstString(body.get("id"), body.get("userName"), body.get("userId"));
-    }
-
-    @SuppressWarnings("unchecked")
-    private String extractNuxeoUsername(Map body) {
-        if (body == null) {
-            return null;
-        }
-        String username = firstString(body.get("id"), body.get("username"), body.get("userName"));
-        if (username != null) {
-            return username;
-        }
-        Object properties = body.get("properties");
-        if (properties instanceof Map propertyMap) {
-            return firstString(propertyMap.get("username"), propertyMap.get("userName"));
-        }
-        return null;
-    }
-
-    private String firstString(Object... values) {
-        for (Object value : values) {
-            if (value instanceof String text && !text.isBlank()) {
-                return text;
-            }
-        }
-        return null;
     }
 }

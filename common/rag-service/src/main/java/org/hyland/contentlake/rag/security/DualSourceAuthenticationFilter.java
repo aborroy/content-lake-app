@@ -7,6 +7,8 @@ import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.hyland.contentlake.security.AlfrescoTicketHeader;
+import org.hyland.contentlake.security.CallerIdentities;
+import org.hyland.contentlake.security.SourceIdentity;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -27,9 +29,10 @@ import java.util.List;
  *   <li>{@code X-Nuxeo-Authorization: Basic base64(user:pass)} — Nuxeo Basic credentials</li>
  * </ul>
  *
- * <p>Both credentials are validated independently. On success a {@link DualSourceAuthentication}
- * is stored in the security context, allowing permission filters to cover both repositories in
- * a single request. If either header is absent this filter does nothing and the standard
+ * <p>Both credentials are validated independently. On success a {@link MultiIdentityAuthentication}
+ * carrying one identity per repository is stored in the security context, allowing permission filters to
+ * cover both repositories in a single request. If either header is absent this filter does nothing and the
+ * standard
  * single-source filters ({@link AlfrescoTicketAuthenticationFilter} /
  * {@link NuxeoTokenAuthenticationFilter}) take over.</p>
  *
@@ -42,10 +45,13 @@ public class DualSourceAuthenticationFilter extends OncePerRequestFilter {
     static final String NUXEO_AUTHORIZATION_HEADER = "X-Nuxeo-Authorization";
     private static final String AUTHORIZATION_HEADER = "Authorization";
 
-    private final MultiSourceAuthenticationProvider provider;
+    private final AlfrescoDirectory alfrescoDirectory;
+    private final NuxeoDirectory nuxeoDirectory;
 
-    public DualSourceAuthenticationFilter(MultiSourceAuthenticationProvider provider) {
-        this.provider = provider;
+    public DualSourceAuthenticationFilter(AlfrescoDirectory alfrescoDirectory,
+                                          NuxeoDirectory nuxeoDirectory) {
+        this.alfrescoDirectory = alfrescoDirectory;
+        this.nuxeoDirectory = nuxeoDirectory;
     }
 
     @Override
@@ -82,23 +88,28 @@ public class DualSourceAuthenticationFilter extends OncePerRequestFilter {
         }
 
         // Validate each credential independently — neither short-circuits the other
-        String alfrescoUsername = provider.validateAlfrescoTicket(ticket);
+        String alfrescoUsername = alfrescoDirectory.validateTicket(ticket);
         if (alfrescoUsername == null) {
             log.debug("Dual-auth: Alfresco ticket validation failed — falling through to single-source filters");
             chain.doFilter(request, response);
             return;
         }
 
-        String nuxeoUsername = provider.validateNuxeoCredentials(nuxeoCreds[0], nuxeoCreds[1]);
-        if (nuxeoUsername == null) {
+        if (!nuxeoDirectory.authenticate(nuxeoCreds[0], nuxeoCreds[1])) {
             log.debug("Dual-auth: Nuxeo credentials validation failed — falling through to single-source filters");
             chain.doFilter(request, response);
             return;
         }
+        String nuxeoUsername = nuxeoCreds[0];
 
         log.debug("Dual-auth: established alfresco='{}' nuxeo='{}'", alfrescoUsername, nuxeoUsername);
-        SecurityContextHolder.getContext()
-                .setAuthentication(new DualSourceAuthentication(alfrescoUsername, nuxeoUsername));
+        SecurityContextHolder.getContext().setAuthentication(
+                new MultiIdentityAuthentication(CallerIdentities.builder()
+                        // Alfresco is the fallback, so a source of a third type resolves to it exactly as
+                        // the ternary this replaced sent it there.
+                        .fallback(SourceIdentity.of("alfresco", alfrescoUsername))
+                        .add(SourceIdentity.of("nuxeo", nuxeoUsername))
+                        .build()));
 
         chain.doFilter(new DualAuthorizationHeaderStrippingRequest(request), response);
     }
