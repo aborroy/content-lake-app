@@ -200,6 +200,16 @@ Stated plainly, because each of these is a reasonable thing to assume and none o
   paths are treated as content for the same reason chunk text is, because a path like
   `/HR/Terminations/2026/jsmith-severance.pdf` discloses more than most chunk bodies. Both switches
   default to off, and turning the first on does not turn the second on.
+- **No group expansion for a CMIS source, so its group-granted documents are invisible to their
+  members.** CMIS has no `memberOf` operation in the specification, and the connector's ACL mapper reads
+  raw principal ids, so it cannot tell a user from a group; the only group-shaped principal it
+  recognises is the repository's "anyone", mapped to `GROUP_EVERYONE`. A CMIS caller can sign in and is
+  trimmed to their own name plus `__Everyone__`, which means public documents and documents granted to
+  them by name are retrievable and documents granted only to a group they belong to are not. This is
+  fail-closed, so nothing leaks, but results are **incomplete and nothing in the answer says why**: to a
+  user it reads as a document that is not in the index. No resolver is written for the type deliberately,
+  because a resolver that exists and cannot work is worse than none: `group-resolution-failure` could
+  then cost a caller the whole source rather than only its group grants.
 - **No federation and no SSO across repositories.** Principals stay source-native and namespaced per
   source instance, and nothing maps one repository's identity onto another's. A caller may hold a
   separate identity per source and be trimmed to each one independently, but each of those identities

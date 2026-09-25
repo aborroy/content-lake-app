@@ -215,6 +215,46 @@ Three limits, stated because they are properties of CMIS rather than of this imp
 twice, once through the native adapter and once over CMIS, compares the document sets, and asserts that a
 document restricted in Alfresco is not retrievable by a user the ACL excludes.
 
+#### Signing callers in against the CMIS repository
+
+The settings above are the connector's, and they ingest with one account. Letting a *caller* sign in as
+themselves and be trimmed to what they may read is a separate, query-side setting, off by default:
+
+```yaml
+rag:
+  security:
+    cmis:
+      enabled: ${RAG_SECURITY_CMIS_ENABLED:false}
+      url: ${RAG_SECURITY_CMIS_URL:}
+      repository-id: ${RAG_SECURITY_CMIS_REPOSITORY_ID:}
+```
+
+| Setting | Effect |
+|---|---|
+| `enabled` | Whether the authenticator exists at all. Off by default, and when off a CMIS caller cannot sign in |
+| `url` | The same value the connector takes as `cmis.url`. Required when enabled: startup fails naming this setting rather than silently rejecting every CMIS caller |
+| `repository-id` | Optional. When set, the service document must name this repository, so a URL pointed at the wrong CMIS server is rejected rather than trusted. When unset, any entry declaring a `repositoryId` is accepted |
+
+Unlike every group resolver, this uses the **caller's own** credentials. There is no service account and no
+secret to configure. It is consulted only after Alfresco and Nuxeo have declined, so enabling it cannot change
+where an existing deployment's passwords are sent first, and a rejected password is a decline rather than a
+rejection: a caller Alfresco would have accepted is not denied by a CMIS 401.
+
+Three limits, and the first two are limits of CMIS rather than of this implementation:
+
+- **The principal is the login string exactly as presented.** A CMIS session confirms credentials are valid
+  but reports no canonical username, because the specification has no "who am I" operation. Alfresco's tickets
+  API and Nuxeo's `/me` both return one; CMIS cannot. So a repository that authenticates `Admin`
+  case-insensitively while storing its ACE as `admin` yields a principal matching nothing, and one fronted by
+  a directory may accept `alice@corp.example` for an ACE stored as `alice`. Both fail closed and silently, so
+  the caller sees fewer documents rather than an error. The login string is deliberately not lower-cased and
+  its domain is not stripped: CMIS principal ids are repository-defined and some repositories are
+  case-sensitive, so normalising would break the ones that are.
+- **Group grants do not resolve.** See [security-model.md](security-model.md) for what that costs a caller.
+- **The response shape is checked, not just the status code.** A 2xx alone would authenticate callers against
+  whatever is at the configured URL, so the body has to look like a CMIS service document. For the browser
+  binding that is checked properly; for AtomPub it is a substring check, which is crude.
+
 ### The Filesystem Connector
 
 `plugins/filesystem-connector/` ingests a local or mounted directory. It was an in-tree module group with a
@@ -794,6 +834,17 @@ It consumes the same `group-cache` and `group-resolution-failure` settings as th
 membership change takes effect within the cache TTL and a Graph outage costs what
 `group-resolution-failure` says it costs. A 404 for an identity is "no such user here", which costs that
 caller only this source's group grants; anything else is a failure and is never cached.
+
+##### Signing a caller in against a CMIS repository
+
+Group expansion is one half of query-side security; identifying the caller is the other. `rag.security.cmis.*`
+is the CMIS authenticator, documented with the connector it belongs to under
+[The CMIS Connector](#the-cmis-connector). It is the counterpart to the resolvers above and needs no service
+account, because it validates the caller's own credentials.
+
+CMIS is the case where the two halves come apart, and it is worth knowing which half is missing: a CMIS caller
+can sign in, and their group-granted documents are still invisible, because CMIS has no `memberOf` for a
+resolver to call.
 
 #### Optional Retrieval and Generation Features
 
