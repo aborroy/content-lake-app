@@ -133,5 +133,8 @@ management:
 
 logging:
   level:
-    org.hyland.contentlake: ${LOG_LEVEL:INFO}
-    org.hyland.contentlake.pluginhost: ${LOG_LEVEL:INFO}
+    # org.hyland covers every package this project ships: each service's own root, plus
+    # content-lake-core and content-lake-spi, where the shared pipeline logs. A per-service root
+    # would miss core, which is most of what an operator raising this level wants to see. Nothing
+    # third-party lives under org.hyland, so this widens no further than the project.
+    org.hyland: ${LOG_LEVEL:INFO}
