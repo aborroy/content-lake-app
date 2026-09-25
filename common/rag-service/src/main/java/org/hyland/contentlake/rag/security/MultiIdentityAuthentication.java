@@ -56,4 +56,29 @@ public class MultiIdentityAuthentication extends AbstractAuthenticationToken imp
     public String getName() {
         return identities.describe();
     }
+
+    /**
+     * Equal only to a token carrying the same identities.
+     *
+     * <p>{@link AbstractAuthenticationToken} compares the principal, which here is the primary username
+     * alone. That would make a caller holding one identity per source equal to a caller holding only the
+     * first of them, since both report the same primary. Those are different callers and are trimmed to
+     * different documents, which is why {@code RagQueryCache} keys on the whole identity set rather than on
+     * a name. Equality has to draw the same distinction, or the two disagree about who a caller is.</p>
+     */
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof MultiIdentityAuthentication that) || !super.equals(other)) {
+            return false;
+        }
+        return identities.equals(that.identities);
+    }
+
+    @Override
+    public int hashCode() {
+        return 31 * super.hashCode() + identities.hashCode();
+    }
 }
