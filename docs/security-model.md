@@ -54,6 +54,53 @@ as a ticket falls through to Spring's Basic auth filter, which tries to authenti
 username and returns 401, so the symptom is a feature that stops working rather than a message
 naming the cause.
 
+## Adding a credential authority
+
+Authentication and authorization are both extension points, and they are separate because they answer
+separate questions. A source needs one of each to support nominal users, and each is useful without
+the other:
+
+| Half | Interface | Question | Absent implementation means |
+|---|---|---|---|
+| Identification | `CallerAuthenticator` | who is this caller? | that source's users cannot sign in, so they hold no identity here |
+| Authorization | `SourceGroupResolver` | which groups are they in? | group-granted documents in that source are invisible to their members |
+
+Both live in `common/content-lake-core/.../security/` and both are implemented in
+`common/rag-service`. Neither is part of `content-lake-spi` and neither is loaded from a connector
+jar. That is deliberate and not a convenience: this code decides who a caller is and what they may
+read, inside the service that enforces trimming, so plugin code must not be able to participate.
+A connector that ingests ACLs correctly needs no implementation of either to do so; a deployment that
+wants those ACLs to be actionable for nominal users needs both.
+
+`MultiSourceAuthenticationProvider` runs the registered authenticators in ascending
+`CallerAuthenticator.order()`, with exactly three outcomes:
+
+- **Identities.** The authority recognised the caller. The chain stops, and nothing else is shown the
+  credential.
+- **A decline** (`null` or an empty result). This authority cannot speak to these credentials, or
+  rejected them and that says nothing about the others. The chain continues, and if every authority
+  declines the caller is rejected once, at the end. An ordinary password login declines, because a
+  password one repository refuses may be valid at another.
+- **A thrown `AuthenticationException`.** The credential was addressed to this authority and is
+  invalid, so it propagates and no other authority sees it. An Alfresco ticket or a Nuxeo token does
+  this, because its marker prefix says unambiguously where it was meant to go.
+
+Two properties of the chain that are security properties rather than details:
+
+- **Order decides which system is shown a caller's credentials first**, so the shipped orders are
+  named constants rather than literals, and the resolved chain is pinned by a test. Alfresco is 10 and
+  Nuxeo is 20, spaced so an authority can be added without changing where an existing deployment sends
+  its passwords.
+- **A credential addressed to one authority never reaches another.** A `TICKET_` or `NUXEO_TOKEN::`
+  principal is a whole credential presented as a username, so every authenticator that does not own
+  that marker declines it without making a call. Forwarding an Alfresco ticket to a third system as a
+  username would put it in that system's access log.
+
+An identity may be untyped, and for a single login it always is. An untyped identity answers for every
+source type, which is what lets one credential cover a source that has no authenticator of its own.
+It also keeps `getName()` the bare username, which matters because that string is a rate-limit bucket
+key and the stored author of a feedback row.
+
 ## Why the enforcement point is the service
 
 The community index engine offers no delegation primitive. Authentication is HTTP Basic against a
@@ -153,10 +200,13 @@ Stated plainly, because each of these is a reasonable thing to assume and none o
   paths are treated as content for the same reason chunk text is, because a path like
   `/HR/Terminations/2026/jsmith-severance.pdf` discloses more than most chunk bodies. Both switches
   default to off, and turning the first on does not turn the second on.
-- **No cross-source identity unification.** There is no federation and no SSO across repositories.
-  Principals stay source-native and namespaced per source instance. The multi-source mode assumes the
-  authenticated username is the same login string in each source you want to query; it does not map
-  one repository's identity onto another's.
+- **No federation and no SSO across repositories.** Principals stay source-native and namespaced per
+  source instance, and nothing maps one repository's identity onto another's. A caller may hold a
+  separate identity per source and be trimmed to each one independently, but each of those identities
+  has to be established by a credential that source accepts. Where a caller has no identity for a
+  source, the fallback identity is used as-is, which assumes the same login string is valid there;
+  that assumption is the reason a source whose usernames differ needs its own authenticator rather
+  than the fallback.
 - **No write authorization.** `rag-service` is read-only. Ingestion runs with the ingesters' service
   accounts, and what lands in the index is decided by scope configuration, not by an end user's
   permissions.
@@ -252,7 +302,11 @@ Before any deployment reachable by someone else:
 | The permission predicate, both directions of the ACL encoding, HXQL escaping | `common/content-lake-core/.../security/AclFilterBuilder.java` |
 | Caller identity, and the refusal to invent one | `common/content-lake-core/.../security/SecurityContextService.java` |
 | Filter chain, public paths, MCP invariants | `common/rag-service/.../config/RagSecurityConfig.java` |
-| Credential validation against the source repositories | `alfresco/content-lake-source-alfresco/.../security/` |
+| The authenticator contract, and what each of its three outcomes means | `common/content-lake-core/.../security/CallerAuthenticator.java` |
+| The chain, its order, and the one rejection at the end | `common/rag-service/.../security/MultiSourceAuthenticationProvider.java` |
+| Credential validation against the source repositories | `common/rag-service/.../security/AlfrescoDirectory.java`, `NuxeoDirectory.java` |
+| Which principal forms are a credential rather than a username | `common/rag-service/.../security/ReservedPrincipals.java` |
+| A caller's identities, and the single untyped case | `common/content-lake-core/.../security/CallerIdentities.java`, `CallerIdentityService.java` |
 | Predicate construction per query | `common/rag-service/.../service/SemanticSearchService.java`, `HybridSearchService.java` |
 | The resolver contract, and what each of its three answers means | `common/content-lake-core/.../security/SourceGroupResolver.java` |
 | Resolver selection, the failure policy, the membership cache | `common/rag-service/.../security/SourceGroupResolverRegistry.java` |
