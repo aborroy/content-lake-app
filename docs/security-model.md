@@ -242,7 +242,7 @@ visible from the code, and the worst gap reads as a harmless limitation.
 | Alfresco | Yes, tickets API or password | Yes, `AlfrescoGroupResolver` |
 | Nuxeo | Yes, token or password | Yes, `NuxeoGroupResolver` |
 | CMIS | Yes, service-document attempt | **No.** CMIS has no `memberOf`; name grants and public documents only |
-| SharePoint | **Not yet.** No authenticator exists | `EntraGroupResolver` exists, off by default, needs a credential |
+| SharePoint | Yes, Entra bearer token, off by default and needs the app registration's values | `EntraGroupResolver` exists, off by default, needs a credential |
 | Filesystem | **No**, by decision. No authenticator and none planned | n/a, the filesystem has no groups |
 
 Five consequences, stated because each one is invisible from the code and three of them read as something
@@ -268,6 +268,12 @@ leaks, but results are incomplete and nothing in the answer says why. See the en
 invisible to everyone.** Group grants are the normal way SharePoint is administered, so that is most of a real
 corpus. It reads as missing content rather than as a configuration gap, which is exactly why it is written
 down here.
+
+**SharePoint's two halves are separately switched on, and each is useful without the other.**
+`rag.security.entra.caller-auth.enabled` lets a user sign in; `rag.security.entra.enabled` resolves their
+groups. Sign-in alone gives a caller their name-granted and public documents. Group resolution alone gives
+nobody anything extra, because without sign-in no caller holds a SharePoint identity for those groups to be
+attached to. Both need values from the app registration, so neither is usable until that exists.
 
 **A source with no resolver falls back to the caller's own name plus `GROUP_EVERYONE`, never to nothing.**
 That is the documented fail-closed default in `SourceGroupResolverRegistry`, and it is distinct from a resolver

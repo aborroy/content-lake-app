@@ -846,6 +846,55 @@ membership change takes effect within the cache TTL and a Graph outage costs wha
 `group-resolution-failure` says it costs. A 404 for an identity is "no such user here", which costs that
 caller only this source's group grants; anything else is a failure and is never cached.
 
+##### Signing a caller in from an Entra ID token
+
+The resolver above answers "which groups is this caller in". This answers "who is this caller", from an
+Entra-issued bearer token on `Authorization: Bearer <token>`. Separate settings and separately enabled, because
+they belong to two different app registrations: the resolver uses a service credential, this validates tokens
+minted for the sign-in application and holds no credential at all.
+
+```yaml
+rag:
+  security:
+    entra:
+      tenant-id: ${RAG_SECURITY_ENTRA_TENANT_ID:}
+      caller-auth:
+        enabled: ${RAG_SECURITY_ENTRA_CALLER_AUTH_ENABLED:false}
+        client-id: ${RAG_SECURITY_ENTRA_CALLER_AUTH_CLIENT_ID:}
+        audience: ${RAG_SECURITY_ENTRA_CALLER_AUTH_AUDIENCE:}
+        issuer: ${RAG_SECURITY_ENTRA_CALLER_AUTH_ISSUER:}
+        jwks-uri: ${RAG_SECURITY_ENTRA_CALLER_AUTH_JWKS_URI:}
+        principal-claim: ${RAG_SECURITY_ENTRA_CALLER_AUTH_PRINCIPAL_CLAIM:oid}
+```
+
+| Setting | Effect |
+|---|---|
+| `enabled` | Whether the authenticator exists at all. Off by default; when off, a bearer token gets 401 |
+| `client-id` | The sign-in application's client id. Required when enabled, with `tenant-id`; startup fails naming both |
+| `audience` | What the token's `aud` must name. Defaults to `api://<client-id>`, the Application ID URI that "Expose an API" sets |
+| `issuer` / `jwks-uri` | Default to the tenant's v2.0 endpoints. Override only for a test or a sovereign cloud |
+| `principal-claim` | Which claim becomes the caller's principal. `oid` by default; see below before changing it |
+
+**The audience check is the point, not a formality.** For a token minted for Microsoft Graph, the signature and
+the issuer are both perfectly valid; only the audience distinguishes it from a token minted for this service.
+Without that check, any token a user can obtain anywhere in the tenant could be replayed here. It is why the
+registration publishes an `access_as_user` scope at all.
+
+**The principal is the `oid` claim, and that is a decision.** The SharePoint connector emits three principals
+for a named user grant: the Entra object id, plus `userPrincipalName` and `email` where each is present. The
+object id is the only one always emitted and the only one that cannot change, and a real SharePoint identity
+often carries `email` and no `userPrincipalName`, so taking either address would make trimming depend on which
+one a tenant happens to send. **Never set this to `sub`**: it is pairwise per application, matches no stored
+principal, and would show a valid caller an empty result set with no error.
+
+**The identity is typed `sharepoint:<object-id>`**, unlike the other authenticators, which produce an untyped
+identity that answers for every source. A GUID is meaningless as an Alfresco or Nuxeo username, so typing it
+scopes it to the source whose ACLs actually hold object ids and drops the others. An Entra-signed-in caller
+therefore retrieves SharePoint documents and nothing else.
+
+Group expansion still needs `rag.security.entra.enabled` and its own credential. Signing in without it means a
+caller retrieves what is granted to them by name and what is public, and not what is granted to their groups.
+
 ##### Signing a caller in against a CMIS repository
 
 Group expansion is one half of query-side security; identifying the caller is the other. `rag.security.cmis.*`
