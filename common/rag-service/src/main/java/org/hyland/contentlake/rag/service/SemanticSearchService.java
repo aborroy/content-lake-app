@@ -801,12 +801,6 @@ public class SemanticSearchService {
     }
 
     /**
-     * The catalogue of sources to filter on: the injected bean when there is one, otherwise a private
-     * instance built lazily so it is available to a unit test that never runs {@code @PostConstruct}. It
-     * holds only what came from the index; the configured ids are read from this service's own fields on
-     * every call, which is what keeps the two from disagreeing.
-     */
-    /**
      * The permission-filter builder, or one with no group resolvers when this service was constructed
      * without it. A builder with no resolvers yields the caller's default authorities for every source,
      * which is the same answer this service gave for a source it had no directory client for.
@@ -843,6 +837,12 @@ public class SemanticSearchService {
         return new PermissionFilterBuilder.Settings(configuredSources(), adminBypassEnabled);
     }
 
+    /**
+     * The catalogue of sources to filter on: the injected bean when there is one, otherwise a private
+     * instance built lazily so it is available to a unit test that never runs {@code @PostConstruct}. It
+     * holds only what came from the index; the configured ids are read from this service's own fields on
+     * every call, which is what keeps the two from disagreeing.
+     */
     private PermissionSourceCatalog sourceCatalog() {
         if (permissionSourceCatalog != null) {
             return permissionSourceCatalog;

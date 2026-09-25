@@ -10,24 +10,25 @@ import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.model.HybridSearchRequest;
 import org.hyland.contentlake.rag.model.HybridSearchResponse;
 import org.hyland.contentlake.rag.service.HybridSearchService.FusedResult;
-import org.hyland.contentlake.rag.security.SourceGroupResolverRegistry;
 import org.hyland.contentlake.rag.service.HybridSearchService.ScoredChunk;
-import org.hyland.contentlake.security.GroupResolutionFailurePolicy;
+import org.hyland.contentlake.security.CallerIdentities;
 import org.hyland.contentlake.security.SecurityContextService;
-import org.hyland.contentlake.security.SourceGroupResolver;
 import org.hyland.contentlake.service.EmbeddingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.Map;
-import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.within;
@@ -69,27 +70,6 @@ class HybridSearchServiceTest {
         ReflectionTestUtils.setField(service, "alfrescoSourceId", "test-repo");
         ReflectionTestUtils.setField(service, "permissionSourceIds", "");
         ReflectionTestUtils.setField(service, "nuxeoSourceId", "");
-    }
-
-    /** A resolver for the {@code alfresco} type whose single answer is whatever the supplier does. */
-    private static SourceGroupResolver alfrescoResolver(Supplier<List<String>> answer) {
-        return new SourceGroupResolver() {
-            @Override
-            public String sourceType() {
-                return "alfresco";
-            }
-
-            @Override
-            public List<String> resolveGroups(String username) {
-                return answer.get();
-            }
-        };
-    }
-
-    /** Wires a registry with no cache, so each test's resolver answer is the one that is read. */
-    private void withRegistry(GroupResolutionFailurePolicy policy, SourceGroupResolver... resolvers) {
-        ReflectionTestUtils.setField(service, "groupResolverRegistry",
-                new SourceGroupResolverRegistry(List.of(resolvers), policy, 0L, 0L, null));
     }
 
     // -----------------------------------------------------------------------
@@ -516,331 +496,92 @@ class HybridSearchServiceTest {
     }
 
     // -----------------------------------------------------------------------
-    // Permission filter
+    // Permission filter: this service only delegates now
     // -----------------------------------------------------------------------
 
-    @Nested
-    class GroupResolutionFailure {
+    /**
+     * Stubs the source discovery the permission filter runs: one terms aggregation over
+     * {@code cin_sourceId}, whose bucket keys are the stored {@code <sourceType>:<sourceId>} values.
+     */
+    private void stubIndexedSources(String... qualifiedSourceIds) {
+        HxprTermsAggregationResult aggregation = new HxprTermsAggregationResult();
+        aggregation.setAggregationsBuckets(java.util.Arrays.stream(qualifiedSourceIds).map(key -> {
+            HxprTermsAggregationResult.Bucket bucket = new HxprTermsAggregationResult.Bucket();
+            bucket.setKey(key);
+            bucket.setDocCount(1L);
+            return bucket;
+        }).toList());
+        when(hxprService.termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt()))
+                .thenReturn(aggregation);
+    }
 
-        @Test
-        void failClosed_resolvesNoAuthoritiesWhenTheLookupThrows() {
-            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> {
-                throw new IllegalStateException("directory down");
-            }));
+    @Test
+    void buildCurrentUserPermissionFilter_passesTheCallersIdentitiesAndThisServicesSettings() {
+        PermissionFilterBuilder builder = mock(PermissionFilterBuilder.class);
+        ReflectionTestUtils.setField(service, "permissionFilterBuilder", builder);
+        // A plain token carries no per-source identity, so the caller's name comes from here.
+        when(securityContextService.getCurrentUsername()).thenReturn("alice");
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken("alice", null,
+                        List.of(new SimpleGrantedAuthority("ROLE_USER"))));
+        when(builder.query(any(), any(), any(), any())).thenReturn("SELECT * FROM SysContent WHERE 1=1");
 
-            assertThat(service.getUserAuthorities("alice", "test-repo")).isEmpty();
-        }
+        try {
+            String filter = service.buildCurrentUserPermissionFilter("alfresco", "cin_sourceId = 'x'");
 
-        @Test
-        void degrade_keepsUsernameAndEveryoneWhenTheLookupThrows() {
-            withRegistry(GroupResolutionFailurePolicy.DEGRADE, alfrescoResolver(() -> {
-                throw new IllegalStateException("directory down");
-            }));
+            assertThat(filter).isEqualTo("SELECT * FROM SysContent WHERE 1=1");
 
-            assertThat(service.getUserAuthorities("alice", "test-repo"))
-                    .containsExactly("alice", "GROUP_EVERYONE");
-        }
+            ArgumentCaptor<CallerIdentities> identities = ArgumentCaptor.forClass(CallerIdentities.class);
+            ArgumentCaptor<PermissionFilterBuilder.Settings> settings =
+                    ArgumentCaptor.forClass(PermissionFilterBuilder.Settings.class);
+            verify(builder).query(identities.capture(), settings.capture(),
+                    eq("alfresco"), eq("cin_sourceId = 'x'"));
 
-        @Test
-        void resolverKnowsTheUser_addsTheirGroups() {
-            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED,
-                    alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
-
-            assertThat(service.getUserAuthorities("alice", "test-repo"))
-                    .containsExactly("alice", "GROUP_EVERYONE", "GROUP_DEVELOPERS");
-        }
-
-        @Test
-        void resolverHasNoSuchIdentity_keepsTheSourceWithDefaults() {
-            // null is "not in this directory", which is not a directory failure.
-            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED, alfrescoResolver(() -> null));
-
-            assertThat(service.getUserAuthorities("alice", "test-repo"))
-                    .containsExactly("alice", "GROUP_EVERYONE");
-        }
-
-        @Test
-        void noResolverForTheSourceType_resolvesDefaultsOnly() {
-            withRegistry(GroupResolutionFailurePolicy.FAIL_CLOSED,
-                    alfrescoResolver(() -> List.of("GROUP_DEVELOPERS")));
-
-            assertThat(service.getUserAuthorities("alice", "sample-directory"))
-                    .containsExactly("alice", "GROUP_EVERYONE");
-        }
-
-        @Test
-        void unresolvedAuthorities_excludeTheSourceAndMatchNothing() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-
-            String filter = svc.buildPermissionFilter("alice", null);
-
-            assertThat(filter).contains("cin_sourceId = '__unresolved_permission_source__'");
-            assertThat(filter).doesNotContain("sys_racl");
-        }
-
-        @Test
-        void oneSourceUnresolved_keepsTheOther() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-            doReturn(List.of("alice", "GROUP_MEMBERS")).when(svc).getUserAuthorities("alice", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("alice", null);
-
-            assertThat(filter).contains("sys_racl = 'g:GROUP_MEMBERS_#_nuxeo-demo'");
-            assertThat(filter).doesNotContain("test-repo");
-        }
-
-        @Test
-        void dualAuth_unresolvedSourceIsNotGivenDefaultAuthorities() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            doReturn(List.of()).when(svc).getUserAuthorities("alice", "test-repo");
-            doReturn(List.of("bob")).when(svc).getUserAuthorities("bob", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("alice", "bob", null, null);
-
-            assertThat(filter).contains("sys_racl = 'u:bob_#_nuxeo-demo'");
-            assertThat(filter).doesNotContain("u:alice_#_test-repo");
+            // The identity reaches the builder untyped, so it answers for every source as it always has.
+            assertThat(identities.getValue().usernameFor("alfresco")).isEqualTo("alice");
+            assertThat(identities.getValue().usernameFor("sharepoint")).isEqualTo("alice");
+            // And the configured ids come from this service's own fields on every call.
+            assertThat(settings.getValue().sources().sourceIdOf("alfresco")).isEqualTo("test-repo");
+        } finally {
+            SecurityContextHolder.clearContext();
         }
     }
 
-    @Nested
-    class PermissionFilter {
+    // -----------------------------------------------------------------------
+    // logPermissionSourceIdConfiguration (startup validation)
+    // -----------------------------------------------------------------------
 
-        /**
-         * Stubs the source discovery both search paths run: one terms aggregation over
-         * {@code cin_sourceId}, whose bucket keys are the stored {@code <sourceType>:<sourceId>} values.
-         */
-        private void stubIndexedSources(String... qualifiedSourceIds) {
-            HxprTermsAggregationResult aggregation = new HxprTermsAggregationResult();
-            aggregation.setAggregationsBuckets(java.util.Arrays.stream(qualifiedSourceIds).map(key -> {
-                HxprTermsAggregationResult.Bucket bucket = new HxprTermsAggregationResult.Bucket();
-                bucket.setKey(key);
-                bucket.setDocCount(1L);
-                return bucket;
-            }).toList());
-            when(hxprService.termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt()))
-                    .thenReturn(aggregation);
-        }
+    @Test
+    void logPermissionSourceIdConfiguration_unset_skipsIndexProbe() {
+        ReflectionTestUtils.setField(service, "permissionSourceIds", "");
 
-        @Test
-        void buildPermissionFilter_thirdSourceInTheIndex_getsAClauseWithoutAPin() {
-            // #133: the hybrid path carried the same two-source assumption, and capping or fixing one
-            // path alone leaves whichever harness queries the other measuring no change.
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-            stubIndexedSources("sample-directory:sample-directory");
-            doReturn(List.of("alice", "GROUP_EVERYONE"))
-                    .when(svc).getUserAuthorities("alice", "sample-directory");
+        service.logPermissionSourceIdConfiguration();
 
-            String filter = svc.buildPermissionFilter("alice", null);
+        verify(hxprService, never()).query(anyString(), anyInt(), anyInt());
+        verify(hxprService, never()).termsAggregation(any(), any(), any(), anyInt());
+    }
 
-            assertThat(filter).doesNotContain("__unresolved_permission_source__");
-            assertThat(filter).contains("sys_racl = '__Everyone__'");
-            assertThat(filter).contains("sys_racl = 'u:alice_#_sample-directory'");
-        }
+    @Test
+    void logPermissionSourceIdConfiguration_pinnedAndCovers_doesNotMisreport() {
+        ReflectionTestUtils.setField(service, "permissionSourceIds", "covered-repo");
 
-        @Test
-        void buildPermissionFilter_thirdSource_isNotGivenAnAlfrescoAdminBypass() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-            stubIndexedSources("cmis:docbase-1");
-            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "docbase-1");
+        stubIndexedSources("alfresco:covered-repo");
 
-            String filter = svc.buildPermissionFilter("admin", null);
+        service.logPermissionSourceIdConfiguration();
 
-            // The bypass is Alfresco's policy and must not follow the group onto another source.
-            assertThat(filter).doesNotContain("cin_sourceId = 'cmis:docbase-1'");
-            assertThat(filter).doesNotContain("cin_sourceId = 'docbase-1'");
-            assertThat(filter).contains("sys_racl = 'u:admin_#_docbase-1'");
-        }
+        verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
+    }
 
-        @Test
-        void buildPermissionFilter_includesEveryoneAndUser() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of("alice", "GROUP_EVERYONE")).when(svc).getUserAuthorities("alice", "test-repo");
+    @Test
+    void logPermissionSourceIdConfiguration_pinnedMissesIndexedAlfrescoSource_probesIndex() {
+        // Mirrors the incident: pinned "default,local" misses the real Alfresco repo UUID.
+        ReflectionTestUtils.setField(service, "permissionSourceIds", "default,local");
 
-            String filter = svc.buildPermissionFilter("alice", null);
+        stubIndexedSources("alfresco:de0b9044-4790-4006-8b90-44479030061f");
 
-            assertThat(filter).contains("sys_racl = '__Everyone__'");
-            assertThat(filter).contains("sys_racl = 'u:alice_#_test-repo'");
-        }
+        service.logPermissionSourceIdConfiguration();
 
-        @Test
-        void buildPermissionFilter_withGroups() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of("bob", "GROUP_EVERYONE", "GROUP_ENGINEERING"))
-                    .when(svc).getUserAuthorities("bob", "test-repo");
-
-            String filter = svc.buildPermissionFilter("bob", null);
-
-            assertThat(filter).contains("g:GROUP_ENGINEERING_#_test-repo");
-        }
-
-        @Test
-        void buildPermissionFilter_withAdditionalFilter() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "my-repo");
-
-            String filter = svc.buildPermissionFilter("user", "cin_sourceId = 'my-repo'");
-
-            assertThat(filter).contains(" AND ");
-            assertThat(filter).contains("cin_sourceId = 'my-repo'");
-        }
-
-        @Test
-        void buildPermissionFilter_withSourceFilter_usesFilteredSourceId() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("user", "cin_sourceId = 'nuxeo:nuxeo-demo'");
-
-            assertThat(filter).contains("sys_racl = 'u:user_#_nuxeo-demo'");
-            assertThat(filter).doesNotContain("u:user_#_test-repo");
-        }
-
-        @Test
-        void buildPermissionFilter_keepsGroupsScopedToTheirSource() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-            doReturn(List.of("user", "GROUP_ACCOUNTING")).when(svc).getUserAuthorities("user", "test-repo");
-            doReturn(List.of("user", "GROUP_MEMBERS")).when(svc).getUserAuthorities("user", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("user", null);
-
-            assertThat(filter).contains("g:GROUP_ACCOUNTING_#_test-repo");
-            assertThat(filter).contains("g:GROUP_MEMBERS_#_nuxeo-demo");
-            assertThat(filter).doesNotContain("g:GROUP_MEMBERS_#_test-repo");
-        }
-
-        @Test
-        void buildPermissionFilter_withSourceType_usesOnlyMatchingSourceId() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("user", "nuxeo", null);
-
-            assertThat(filter).contains("sys_racl = 'u:user_#_nuxeo-demo'");
-            assertThat(filter).doesNotContain("u:user_#_test-repo");
-        }
-
-        @Test
-        void buildPermissionFilter_alfrescoAdminDoesNotRestrictToAdminAuthorities() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "test-repo");
-
-            String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-            assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
-            assertThat(filter).doesNotContain("sys_racl = 'u:admin_#_test-repo'");
-            assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
-        }
-
-        @Test
-        void buildPermissionFilter_adminBypassOffByDefault_alfrescoAdminIsAclFilteredLikeAnyoneElse() {
-            HybridSearchService svc = spy(service);
-            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "test-repo");
-
-            String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-            assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
-            assertThat(filter).contains("sys_racl = 'u:admin_#_test-repo'");
-            assertThat(filter).contains("sys_racl = '__Everyone__'");
-            assertThat(filter).contains("sys_racl = 'g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo'");
-        }
-
-        @Test
-        void buildPermissionFilter_adminBypassOn_doesNotLeakIntoANuxeoSource() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "permissionSourceIds", "nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-            doReturn(List.of("admin", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("admin", null);
-
-            assertThat(filter).doesNotContain("cin_sourceId = 'nuxeo:nuxeo-demo'");
-            assertThat(filter).contains("sys_racl = 'u:admin_#_nuxeo-demo'");
-        }
-
-        @Test
-        void buildPermissionFilter_discoversAlfrescoSourceIdFromTheIndex() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "alfrescoSourceId", "");
-            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-
-            stubIndexedSources("alfresco:discovered-repo");
-            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "discovered-repo");
-
-            String filter = svc.buildPermissionFilter("admin", "alfresco", null);
-
-            assertThat(filter).contains("cin_sourceId = 'alfresco:discovered-repo'");
-            assertThat(filter).doesNotContain("cin_sourceId = 'alfresco:test-repo'");
-        }
-
-        @Test
-        void logPermissionSourceIdConfiguration_unset_skipsIndexProbe() {
-            ReflectionTestUtils.setField(service, "permissionSourceIds", "");
-
-            service.logPermissionSourceIdConfiguration();
-
-            verify(hxprService, never()).query(anyString(), anyInt(), anyInt());
-            verify(hxprService, never()).termsAggregation(any(), any(), any(), anyInt());
-        }
-
-        @Test
-        void logPermissionSourceIdConfiguration_pinnedAndCovers_doesNotMisreport() {
-            ReflectionTestUtils.setField(service, "permissionSourceIds", "covered-repo");
-
-            stubIndexedSources("alfresco:covered-repo");
-
-            service.logPermissionSourceIdConfiguration();
-
-            verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
-        }
-
-        @Test
-        void logPermissionSourceIdConfiguration_pinnedMissesIndexedAlfrescoSource_probesIndex() {
-            // Mirrors the incident: pinned "default,local" misses the real Alfresco repo UUID.
-            ReflectionTestUtils.setField(service, "permissionSourceIds", "default,local");
-
-            stubIndexedSources("alfresco:de0b9044-4790-4006-8b90-44479030061f");
-
-            service.logPermissionSourceIdConfiguration();
-
-            verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
-        }
-
-        @Test
-        void buildPermissionFilter_mixedSources_keepsAlfrescoAdminBypassScopedToAlfresco() {
-            HybridSearchService svc = spy(service);
-            ReflectionTestUtils.setField(svc, "permissionSourceIds", "test-repo,nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            ReflectionTestUtils.setField(svc, "adminBypassEnabled", true);
-            doReturn(List.of("admin", "GROUP_EVERYONE", "GROUP_ALFRESCO_ADMINISTRATORS"))
-                    .when(svc).getUserAuthorities("admin", "test-repo");
-            doReturn(List.of("admin", "GROUP_MEMBERS"))
-                    .when(svc).getUserAuthorities("admin", "nuxeo-demo");
-
-            String filter = svc.buildPermissionFilter("admin", null);
-
-            assertThat(filter).contains("cin_sourceId = 'alfresco:test-repo'");
-            assertThat(filter).contains("sys_racl = 'g:GROUP_MEMBERS_#_nuxeo-demo'");
-            assertThat(filter).doesNotContain("sys_racl = 'u:admin_#_test-repo'");
-            assertThat(filter).doesNotContain("g:GROUP_ALFRESCO_ADMINISTRATORS_#_test-repo");
-        }
+        verify(hxprService).termsAggregation(isNull(), eq("cin_sourceId"), isNull(), anyInt());
     }
 
     // -----------------------------------------------------------------------
@@ -864,7 +605,6 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -921,7 +661,6 @@ class HybridSearchServiceTest {
 
             HybridSearchService svc = spy(service);
             ReflectionTestUtils.setField(svc, "nuxeoSourceId", "nuxeo-demo");
-            doReturn(List.of("user")).when(svc).getUserAuthorities("user", "nuxeo-demo");
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             svc.search(HybridSearchRequest.builder()
@@ -934,7 +673,6 @@ class HybridSearchServiceTest {
                             && filter.contains("sys_racl = 'u:user_#_nuxeo-demo'")
                             && !filter.contains("u:user_#_test-repo")
             ), anyInt());
-            verify(svc, never()).getUserAuthorities(eq("user"), eq("test-repo"));
         }
 
         @Test
@@ -964,7 +702,6 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -1006,7 +743,6 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vectorResult);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             HybridSearchRequest request = HybridSearchRequest.builder().query("test").build();
@@ -1031,7 +767,6 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             HybridSearchRequest request = HybridSearchRequest.builder()
@@ -1056,7 +791,6 @@ class HybridSearchServiceTest {
 
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             HybridSearchRequest request = HybridSearchRequest.builder()
@@ -1101,7 +835,6 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(vr);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
 
             // Set minScore high enough to filter the second result
@@ -1156,7 +889,6 @@ class HybridSearchServiceTest {
             when(hxprService.vectorSearch(any(), any(), any(), anyInt())).thenReturn(result);
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
             return svc;
         }
@@ -1591,7 +1323,6 @@ class HybridSearchServiceTest {
             lenient().when(embeddingService.getModelName()).thenReturn("test-model");
 
             HybridSearchService svc = spy(service);
-            doReturn(List.of("user")).when(svc).getUserAuthorities(anyString(), anyString());
             doReturn(List.of()).when(svc).executeKeywordSearch(any(), any(), anyInt(), any(), any());
             return svc;
         }

@@ -238,14 +238,6 @@ final class PermissionSourceCatalog {
         return type == null ? sourceId : type + ":" + sourceId;
     }
 
-    boolean isAlfresco(Configured configured, String sourceId) {
-        return ALFRESCO.equals(sourceType(configured, sourceId));
-    }
-
-    boolean isNuxeo(Configured configured, String sourceId) {
-        return NUXEO.equals(sourceType(configured, sourceId));
-    }
-
     /** Bare source id to source type for every source in the index, cached for the TTL. */
     Map<String, String> indexedSources() {
         Map<String, String> current = cached;
