@@ -266,6 +266,27 @@ rag:
       # Appended to a bare username to form the Entra identity, since a caller's repository username is not
       # necessarily their Entra one. Anything already containing @ is left alone.
       username-suffix: ${RAG_SECURITY_ENTRA_USERNAME_SUFFIX:}
+    # Caller authentication against a CMIS repository (#169), so a deployment whose only source is the CMIS
+    # connector can be queried by its own users rather than by a service account.
+    #
+    # Unlike every group resolver above, this uses the CALLER'S OWN credentials. There is no service account
+    # and no secret to configure.
+    #
+    # Written out rather than left to relaxed binding, which would make RAG_SECURITY_CMIS_URL work with no
+    # block at all: the block is what makes the defaults and the requiredness discoverable.
+    #
+    # Consulted only after Alfresco and Nuxeo have declined, so enabling it cannot change where an existing
+    # deployment's passwords are sent first.
+    cmis:
+      enabled: ${RAG_SECURITY_CMIS_ENABLED:false}
+      # Required when enabled; startup fails naming this setting if it is blank. The same value the connector
+      # takes as cmis.url, for example
+      # http://host/alfresco/api/-default-/public/cmis/versions/1.1/browser
+      url: ${RAG_SECURITY_CMIS_URL:}
+      # Optional. When set, the service document must name this repository, which stops a URL pointed at the
+      # wrong CMIS server from authenticating callers against it. When unset, any entry declaring a
+      # repositoryId is accepted.
+      repository-id: ${RAG_SECURITY_CMIS_REPOSITORY_ID:}
   # User feedback capture (#74). Enabled by default; POST /api/rag/feedback persists a rating for an
   # answer as an hxpr document under base-path, feeding the offline evaluation corpus.
   feedback:

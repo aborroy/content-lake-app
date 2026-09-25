@@ -12,6 +12,11 @@ final class CallerAuthenticatorOrder {
 
     static final int ALFRESCO = 10;
     static final int NUXEO = 20;
+    /**
+     * After both, so an existing deployment's validation order is untouched and a CMIS repository is only
+     * shown a caller's password once Alfresco and Nuxeo have declined it.
+     */
+    static final int CMIS = 30;
 
     private CallerAuthenticatorOrder() {
     }
