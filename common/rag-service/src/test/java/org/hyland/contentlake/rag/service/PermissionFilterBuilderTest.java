@@ -258,6 +258,78 @@ class PermissionFilterBuilderTest {
         }
     }
 
+    /**
+     * The CMIS source, whose group grants do not resolve, asserted as the behaviour it actually is.
+     *
+     * <p>CMIS has no {@code memberOf} in the specification and {@code CmisAclMapper} reads raw
+     * {@code ace.getPrincipalId()} values, so it cannot tell a user from a group. No {@code SourceGroupResolver}
+     * claims the type and none is written: a source no resolver claims already falls back to the caller's own
+     * name plus {@code GROUP_EVERYONE}, which is never empty. The accepted outcome is therefore that a
+     * group-granted CMIS document is <em>unmatched</em>, not that the source is dropped, and these cases are
+     * what make the difference between those two verifiable rather than assumed.</p>
+     *
+     * <p>If a resolver is ever added for this type it must be mutually exclusive with this path rather than
+     * additive: {@code SourceGroupResolverRegistry} throws at startup when two beans claim one source type.</p>
+     */
+    @Nested
+    class ACmisSourceWithNoResolver {
+
+        private static PermissionFilterBuilder.Settings cmisOnly(boolean adminBypass) {
+            // No configured Alfresco or Nuxeo id, so the only source is the one discovered from the index.
+            return new PermissionFilterBuilder.Settings(
+                    PermissionSourceCatalog.Configured.of(null, null, null), adminBypass);
+        }
+
+        @Test
+        void buildsAClauseFromTheCallersOwnNameAndEveryone() {
+            stubIndexedSources("cmis:docbase-1");
+
+            String filter = builderWith().query(
+                    CallerIdentities.single("alice"), cmisOnly(false), null, null);
+
+            assertThat(filter).contains("sys_racl = 'u:alice_#_docbase-1'");
+            assertThat(filter).contains("sys_racl = '__Everyone__'");
+        }
+
+        @Test
+        void carriesNoGroupTermAtAll() {
+            stubIndexedSources("cmis:docbase-1");
+
+            String filter = builderWith().query(
+                    CallerIdentities.single("alice"), cmisOnly(false), null, null);
+
+            // The limitation, stated as an assertion: nothing can say which CMIS groups a caller is in, so a
+            // document granted only to a group they belong to is not matched by this clause.
+            assertThat(filter).doesNotContain("g:GROUP_");
+        }
+
+        @Test
+        void isNotDroppedFromTheFilter() {
+            stubIndexedSources("cmis:docbase-1");
+
+            String filter = builderWith().query(
+                    CallerIdentities.single("alice"), cmisOnly(false), null, null);
+
+            // The other half of the same point. Unresolved authorities drop a source and reach the sentinel;
+            // no resolver at all keeps it, so its public and by-name documents stay retrievable.
+            assertThat(filter).doesNotContain("__unresolved_permission_source__");
+        }
+
+        @Test
+        void isNeverCoveredByTheAlfrescoAdminBypass() {
+            stubIndexedSources("cmis:docbase-1");
+
+            String filter = builderWith().query(
+                    CallerIdentities.single("admin"), cmisOnly(true), null, null);
+
+            // The bypass is keyed on PermissionSourceCatalog.ALFRESCO, so admin is ACL-filtered here like
+            // anyone else. The E2E depends on this: a CMIS document must be granted to admin by name for an
+            // administrator to retrieve it.
+            assertThat(filter).contains("sys_racl = 'u:admin_#_docbase-1'");
+            assertThat(filter).doesNotContain("cin_sourceId = 'cmis:docbase-1'");
+        }
+    }
+
     @Nested
     class AdminBypass {
 
