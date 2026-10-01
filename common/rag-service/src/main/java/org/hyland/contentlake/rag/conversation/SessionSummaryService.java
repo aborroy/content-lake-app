@@ -15,7 +15,11 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -196,8 +200,17 @@ public class SessionSummaryService {
         return "/".equals(base) ? "/" + safeName(sessionId) : base + "/" + safeName(sessionId);
     }
 
-    /** Session ids carry ':' (e.g. "user:alice"); reduce to a filesystem/path-safe document name. */
+    /**
+     * Hex SHA-256 of the conversation key: path-safe, and unlike character substitution it cannot map
+     * two keys to one document, so one user's summary is never read or overwritten by another's.
+     */
     private String safeName(String sessionId) {
-        return sessionId.trim().replaceAll("[^A-Za-z0-9_.-]", "_");
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(sessionId.trim().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
+        }
     }
 }

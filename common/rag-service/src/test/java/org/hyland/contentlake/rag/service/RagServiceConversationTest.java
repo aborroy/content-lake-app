@@ -4,6 +4,7 @@ import org.hyland.contentlake.rag.config.HybridSearchProperties;
 import org.hyland.contentlake.rag.config.RagProperties;
 import org.hyland.contentlake.rag.observability.RagObservations;
 import org.hyland.contentlake.rag.observability.RetrievalFeatureSet;
+import org.hyland.contentlake.rag.conversation.ConversationKeys;
 import org.hyland.contentlake.rag.conversation.ConversationMemoryService;
 import org.hyland.contentlake.rag.conversation.ConversationTurn;
 import org.hyland.contentlake.rag.model.RagPromptRequest;
@@ -90,6 +91,7 @@ class RagServiceConversationTest {
         // ChatClient request-building reads the model's options; the mock returns null by default.
         lenient().when(chatModel.getDefaultOptions()).thenReturn(ChatOptions.builder().build());
         lenient().when(chatModel.getOptions()).thenReturn(ChatOptions.builder().build());
+        lenient().when(securityContextService.getCurrentUsername()).thenReturn("alice");
 
         HxprDocumentRetriever retriever =
                 new HxprDocumentRetriever(semanticSearchService, hybridSearchService, properties);
@@ -122,6 +124,11 @@ class RagServiceConversationTest {
         );
     }
 
+    /** The key conversation memory is stored under for a session the test user "alice" owns. */
+    private static String key(String sessionId) {
+        return ConversationKeys.of("alice", sessionId);
+    }
+
     private static ChatResponse chatResponse(String text, String model, int totalTokens) {
         ChatResponseMetadata metadata = ChatResponseMetadata.builder()
                 .model(model)
@@ -136,7 +143,7 @@ class RagServiceConversationTest {
                 ConversationTurn.builder().role(ConversationTurn.Role.USER).content("Summarize Q4 report").timestamp(Instant.now()).build(),
                 ConversationTurn.builder().role(ConversationTurn.Role.ASSISTANT).content("Revenue grew 12%").timestamp(Instant.now()).build()
         );
-        when(conversationMemoryService.getRecentTurns("session-1")).thenReturn(history);
+        when(conversationMemoryService.getRecentTurns(key("session-1"))).thenReturn(history);
         when(queryReformulationService.reformulate("Can you expand on the second point?", history))
                 .thenReturn("expand second point from Q4 report");
 
@@ -164,8 +171,8 @@ class RagServiceConversationTest {
         assertThat(response.getSessionId()).isEqualTo("session-1");
         assertThat(response.getHistoryTurnsUsed()).isEqualTo(2);
 
-        verify(conversationMemoryService).appendUserTurn("session-1", "Can you expand on the second point?");
-        verify(conversationMemoryService).appendAssistantTurn(eq("session-1"), contains("I couldn't find any relevant documents"));
+        verify(conversationMemoryService).appendUserTurn(key("session-1"), "Can you expand on the second point?");
+        verify(conversationMemoryService).appendAssistantTurn(eq(key("session-1")), contains("I couldn't find any relevant documents"));
         verify(queryReformulationService).reformulate("Can you expand on the second point?", history);
         verify(rerankService).rerank(eq("expand second point from Q4 report"), anyList());
         // Empty context short-circuits the LLM call.
@@ -206,7 +213,7 @@ class RagServiceConversationTest {
 
     @Test
     void prompt_withResetSession_flagResetsBeforeReadingHistory() {
-        when(conversationMemoryService.getRecentTurns("session-reset")).thenReturn(List.of());
+        when(conversationMemoryService.getRecentTurns(key("session-reset"))).thenReturn(List.of());
 
         SemanticSearchResponse emptySearch = SemanticSearchResponse.builder()
                 .query("question")
@@ -224,15 +231,14 @@ class RagServiceConversationTest {
 
         ragService.prompt(request);
 
-        verify(conversationMemoryService).resetSession("session-reset");
-        verify(conversationMemoryService).getRecentTurns("session-reset");
+        verify(conversationMemoryService).resetSession(key("session-reset"));
+        verify(conversationMemoryService).getRecentTurns(key("session-reset"));
         verify(rerankService).rerank(eq("question"), anyList());
     }
 
     @Test
     void prompt_withoutSessionId_usesUserScopedSessionId() {
-        when(securityContextService.getCurrentUsername()).thenReturn("alice");
-        when(conversationMemoryService.getRecentTurns("user:alice")).thenReturn(List.of());
+        when(conversationMemoryService.getRecentTurns(key("user:alice"))).thenReturn(List.of());
 
         SemanticSearchResponse emptySearch = SemanticSearchResponse.builder()
                 .query("question")
@@ -249,10 +255,34 @@ class RagServiceConversationTest {
         RagPromptResponse response = ragService.prompt(request);
 
         assertThat(response.getSessionId()).isEqualTo("user:alice");
-        verify(conversationMemoryService).getRecentTurns("user:alice");
-        verify(conversationMemoryService).appendUserTurn("user:alice", "question");
+        verify(conversationMemoryService).getRecentTurns(key("user:alice"));
+        verify(conversationMemoryService).appendUserTurn(key("user:alice"), "question");
         verify(rerankService).rerank(eq("question"), anyList());
         verify(securityContextService).getCurrentUsername();
+    }
+
+    @Test
+    void prompt_withAnotherUsersSessionId_neverReachesTheirMemory() {
+        when(securityContextService.getCurrentUsername()).thenReturn("bob");
+        when(conversationMemoryService.getRecentTurns(ConversationKeys.of("bob", "alice-session")))
+                .thenReturn(List.of());
+        when(semanticSearchService.search(any())).thenReturn(SemanticSearchResponse.builder()
+                .query("question")
+                .results(List.of())
+                .searchTimeMs(1)
+                .build());
+        when(rerankService.rerank(eq("question"), any())).thenReturn(List.of());
+
+        RagPromptResponse response = ragService.prompt(RagPromptRequest.builder()
+                .question("question")
+                .sessionId("alice-session")
+                .resetSession(true)
+                .build());
+
+        assertThat(response.getSessionId()).isEqualTo("alice-session");
+        verify(conversationMemoryService).resetSession(ConversationKeys.of("bob", "alice-session"));
+        verify(conversationMemoryService, never()).resetSession(key("alice-session"));
+        verify(conversationMemoryService, never()).getRecentTurns(key("alice-session"));
     }
 
     @Test
@@ -261,7 +291,7 @@ class RagServiceConversationTest {
         List<ConversationTurn> history = List.of(
                 ConversationTurn.builder().role(ConversationTurn.Role.USER).content("prior").timestamp(Instant.now()).build()
         );
-        when(conversationMemoryService.getRecentTurns("session-x")).thenReturn(history);
+        when(conversationMemoryService.getRecentTurns(key("session-x"))).thenReturn(history);
 
         SemanticSearchResponse emptySearch = SemanticSearchResponse.builder()
                 .query("follow up")
@@ -361,7 +391,7 @@ class RagServiceConversationTest {
 
     @Test
     void streamPrompt_withoutRetrievedContext_streamsFallbackWithoutLlmCall() {
-        when(conversationMemoryService.getRecentTurns("session-stream")).thenReturn(List.of());
+        when(conversationMemoryService.getRecentTurns(key("session-stream"))).thenReturn(List.of());
         when(semanticSearchService.search(any())).thenReturn(SemanticSearchResponse.builder()
                 .query("question")
                 .searchTimeMs(3)
@@ -375,8 +405,8 @@ class RagServiceConversationTest {
                 .build());
 
         assertThat(emitter).isNotNull();
-        verify(conversationMemoryService).appendUserTurn("session-stream", "question");
-        verify(conversationMemoryService).appendAssistantTurn(eq("session-stream"), contains("I couldn't find any relevant documents"));
+        verify(conversationMemoryService).appendUserTurn(key("session-stream"), "question");
+        verify(conversationMemoryService).appendAssistantTurn(eq(key("session-stream")), contains("I couldn't find any relevant documents"));
         verify(chatModel, never()).stream(any(Prompt.class));
     }
 }

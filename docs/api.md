@@ -268,8 +268,8 @@ Response:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `question` | String | *required* | Natural-language question |
-| `sessionId` | String | user-scoped default | Conversation session id for multi-turn context |
-| `resetSession` | boolean | false | Clear conversation history for the target session before this prompt |
+| `sessionId` | String | user-scoped default | Conversation session id for multi-turn context. Private to the caller: the same id sent by another user opens a separate, empty conversation |
+| `resetSession` | boolean | false | Clear the caller's conversation history for the target session before this prompt |
 | `topK` | int | server default (`rag.default-top-k`, 15) | Number of chunks to retrieve for context |
 | `minScore` | double | server default (`rag.default-min-score`, 0.01) | Minimum similarity threshold |
 | `filter` | String | -- | Additional HXQL filter |

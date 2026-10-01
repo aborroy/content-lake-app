@@ -3,6 +3,7 @@ package org.hyland.contentlake.rag.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.hyland.contentlake.rag.conversation.ConversationKeys;
 import org.hyland.contentlake.rag.conversation.ConversationMemoryService;
 import org.hyland.contentlake.rag.conversation.ConversationTurn;
 import org.hyland.contentlake.rag.conversation.SessionSummaryService;
@@ -475,16 +476,18 @@ public class RagService {
     private ConversationState prepareConversationState(RagPromptRequest request) {
         boolean conversationEnabled = ragProperties.getConversation().isEnabled();
         if (!conversationEnabled) {
-            return new ConversationState(false, null, List.of());
+            return new ConversationState(false, null, null, List.of());
         }
 
-        String sessionId = resolveSessionId(request);
+        String owner = securityContextService.getCurrentUsername().trim();
+        String sessionId = resolveSessionId(request, owner);
+        String memoryKey = ConversationKeys.of(owner, sessionId);
         if (request.isResetSession()) {
-            conversationMemoryService.resetSession(sessionId);
+            conversationMemoryService.resetSession(memoryKey);
         }
 
-        List<ConversationTurn> history = conversationMemoryService.getRecentTurns(sessionId);
-        return new ConversationState(true, sessionId, history != null ? history : List.of());
+        List<ConversationTurn> history = conversationMemoryService.getRecentTurns(memoryKey);
+        return new ConversationState(true, sessionId, memoryKey, history != null ? history : List.of());
     }
 
     private void persistConversationTurn(RagPromptRequest request,
@@ -493,8 +496,8 @@ public class RagService {
         if (!promptContext.conversation().enabled()) {
             return;
         }
-        conversationMemoryService.appendUserTurn(promptContext.conversation().sessionId(), request.getQuestion());
-        conversationMemoryService.appendAssistantTurn(promptContext.conversation().sessionId(), generation.answer());
+        conversationMemoryService.appendUserTurn(promptContext.conversation().memoryKey(), request.getQuestion());
+        conversationMemoryService.appendAssistantTurn(promptContext.conversation().memoryKey(), generation.answer());
     }
 
     private RagPromptResponse buildPromptResponse(RagPromptRequest request,
@@ -520,7 +523,7 @@ public class RagService {
         String currentSummary = (promptContext.conversation().enabled()
                 && promptContext.conversation().sessionId() != null
                 && sessionSummaryService.isEnabled())
-                ? sessionSummaryService.loadSummary(promptContext.conversation().sessionId())
+                ? sessionSummaryService.loadSummary(promptContext.conversation().memoryKey())
                 : null;
 
         return RagPromptResponse.builder()
@@ -729,7 +732,7 @@ public class RagService {
                 || !sessionSummaryService.isEnabled()) {
             return historyBlock;
         }
-        String summary = sessionSummaryService.loadSummary(conversation.sessionId());
+        String summary = sessionSummaryService.loadSummary(conversation.memoryKey());
         if (summary == null || summary.isBlank()) {
             return historyBlock;
         }
@@ -768,20 +771,23 @@ public class RagService {
         return rewritten;
     }
 
-    private String resolveSessionId(RagPromptRequest request) {
+    private String resolveSessionId(RagPromptRequest request, String owner) {
         if (request.getSessionId() != null && !request.getSessionId().isBlank()) {
             return request.getSessionId().trim();
         }
-        // Never null or blank: getCurrentUsername throws when there is no authenticated principal, so a
-        // conversation session is always attributable to a caller.
-        return "user:" + securityContextService.getCurrentUsername().trim();
+        return "user:" + owner;
     }
 
     // ---------------------------------------------------------------
     // Pipeline state
     // ---------------------------------------------------------------
 
-    private record ConversationState(boolean enabled, String sessionId, List<ConversationTurn> history) {
+    /**
+     * @param sessionId the client's session id, echoed back in the response
+     * @param memoryKey the owner-scoped key memory and summaries are stored under; see {@link ConversationKeys}
+     */
+    private record ConversationState(boolean enabled, String sessionId, String memoryKey,
+                                     List<ConversationTurn> history) {
     }
 
     private record PromptContext(ConversationState conversation,
